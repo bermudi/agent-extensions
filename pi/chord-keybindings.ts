@@ -63,6 +63,12 @@ class ChordEditor extends CustomEditor {
         this.trigger("app.session.new");
         return;
       }
+      if (key === "e") {
+        this.prefixActive = false;
+        this.setText("/ext");
+        this.onSubmit?.("/ext");
+        return;
+      }
       if (key === "r") {
         this.prefixActive = false;
         this.setText("/reload");
@@ -86,7 +92,7 @@ class ChordEditor extends CustomEditor {
     const lines = super.render(width);
     if (!this.prefixActive || lines.length === 0) return lines;
 
-    const label = " C-x (M/L/N/R) ";
+    const label = " C-x (M/L/N/E/R) ";
     const last = lines.length - 1;
     if (visibleWidth(lines[last]!) >= label.length) {
       lines[last] = truncateToWidth(lines[last]!, width - label.length, "") + label;
