@@ -22,6 +22,20 @@ ln -sf $(pwd)/pi/thinking-compaction.ts ~/.pi/agent/extensions/thinking-compacti
 
 Reload with `/reload` in pi.
 
+## OpenCode Plugins
+
+Per `docs/opencode-plugins.md`, OpenCode auto-loads local plugins from:
+
+- `~/.config/opencode/plugins/`
+- `.opencode/plugins/`
+
+To use the thinking compaction plugin globally:
+
+```bash
+mkdir -p ~/.config/opencode/plugins
+ln -sf $(pwd)/opencode/thinking-compaction.ts ~/.config/opencode/plugins/thinking-compaction.ts
+```
+
 ## Adding a new extension
 
 1. Create `pi/my-extension.ts` (or `opencode/my-extension.ts`)
