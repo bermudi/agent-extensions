@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -155,7 +155,9 @@ function discoverExtensionUnits(dir: string): ExtensionUnit[] {
   const units: ExtensionUnit[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const fullPath = join(dir, entry.name);
-    if (entry.isFile() && isExtensionFile(fullPath)) {
+
+    // Handle regular files and symlinks-to-files
+    if ((entry.isFile() || entry.isSymbolicLink()) && isExtensionFile(fullPath)) {
       units.push({
         name: basename(entry.name, extname(fullPath)),
         unitPath: fullPath,
@@ -164,7 +166,8 @@ function discoverExtensionUnits(dir: string): ExtensionUnit[] {
       continue;
     }
 
-    if (entry.isDirectory()) {
+    // Handle regular directories and symlinks-to-directories
+    if (entry.isDirectory() || entry.isSymbolicLink()) {
       for (const candidate of ["index.ts", "index.js", "index.mts", "index.mjs", "index.cts", "index.cjs"]) {
         const child = join(fullPath, candidate);
         if (existsSync(child)) {
