@@ -172,12 +172,13 @@ export default function (pi: ExtensionAPI) {
       }
 
       const limit = args ? parseInt(args, 10) || 20 : 20;
+      const cwd = ctx.cwd;
       const hits: SessionHit[] = [];
 
       for (const f of files.slice(0, limit * 3)) {
         if (hits.length >= limit) break;
         const hit = await scanSession(f);
-        if (hit) hits.push(hit);
+        if (hit && hit.cwd === cwd) hits.push(hit);
       }
 
       const items = hits.map((h) => {
@@ -188,16 +189,17 @@ export default function (pi: ExtensionAPI) {
           minute: "2-digit",
         });
         const label = h.name || h.firstUserMessage || "(empty)";
-        return {
-          value: h.file,
-          label: `${date}  ${label.slice(0, 80)}`,
-          description: h.cwd,
-        };
+        return `${date}  ${label.slice(0, 80)}`;
       });
 
       const choice = await ctx.ui.select("Sessions:", items);
       if (choice) {
-        ctx.ui.notify(`Session: ${choice}`, "info");
+        const idx = items.indexOf(choice);
+        const hit = idx >= 0 ? hits[idx] : undefined;
+        const file = hit?.file;
+        if (file) {
+          await ctx.switchSession(file);
+        }
       }
     },
   });
