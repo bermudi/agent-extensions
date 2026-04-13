@@ -1,11 +1,48 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import createJiti from "jiti";
 import type { AutocompleteItem } from "@mariozechner/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import {
+  type PackageSetting,
+  type SettingsFile,
+  type ConfigEntry,
+  type ConfigFile,
+  type OptionalEntry,
+  type PersistentMode,
+  type Scope,
+  type ExtensionUnit,
+  type PersistentItem,
+  OPTIONAL_DIR_NAME,
+  OPTIONAL_CONFIG_NAME,
+  SELF_NAME,
+  SUPPORTED_EXTENSIONS,
+  expandHome,
+  resolveMaybeRelative,
+  isExtensionFile,
+  unique,
+  parseNpmPackageName,
+  packageSettingSource,
+  isOptionalPackageSetting,
+  isManagedPackageSetting,
+  isPackageLikeSource,
+  entryNameFromPath,
+  deriveNameFromSource,
+  sourceLabelForPath,
+  removeStringFromArray,
+  addUniqueString,
+  findPackageIndex,
+  normalizeRequestedName,
+  findEntryByName,
+  findPersistentItemByName,
+  formatPersistentLines,
+  completeNames,
+} from "./optional-extension-loader-utils.js";
+
+// ─── Types that reference Pi APIs ───────────────────────────────────
 
 type SessionStartEventLike = {
   reason: "startup" | "reload" | "new" | "resume" | "fork";
@@ -14,62 +51,11 @@ type SessionStartEventLike = {
 
 type SessionStartHandler = (event: SessionStartEventLike, ctx: ExtensionContext) => Promise<unknown> | unknown;
 
-type PackageSetting = string | {
-  source?: string;
-  extensions?: unknown;
-  [key: string]: unknown;
-};
-
-type SettingsFile = {
-  packages?: PackageSetting[];
-  extensions?: string[];
-  [key: string]: unknown;
-};
-
-type ConfigEntry = {
-  name?: string;
-  description?: string;
-  source?: string;
-  path?: string;
-  paths?: string[];
-};
-
-type ConfigFile = {
-  entries?: ConfigEntry[];
-};
-
-type OptionalEntry = {
-  name: string;
-  description?: string;
-  sourceLabel: string;
-  resolveFiles: () => string[];
-};
-
-type PersistentMode = "startup" | "optional";
-type Scope = "global" | "project";
-
-type PersistentItem = {
-  name: string;
-  mode: PersistentMode;
-  scope: Scope;
-  sourceLabel: string;
-  kind: "package" | "settings-extension" | "auto-file" | "optional-config";
-  setMode: (mode: PersistentMode) => string | undefined;
-};
-
-type ExtensionUnit = {
-  name: string;
-  unitPath: string;
-  entryFile: string;
-};
+// ─── Internal constants ─────────────────────────────────────────────
 
 const STATE_TYPE = "optional-extension-loader.state";
 const STATUS_ID = "optional-exts";
 const COMMAND_EXT = "ext";
-const OPTIONAL_DIR_NAME = "optional-extensions";
-const OPTIONAL_CONFIG_NAME = "optional-extensions.json";
-const SELF_NAME = "optional-extension-loader";
-const SUPPORTED_EXTENSIONS = new Set([".ts", ".js", ".mts", ".mjs", ".cts", ".cjs"]);
 
 const jiti = createJiti(import.meta.url, {
   moduleCache: false,
@@ -77,24 +63,7 @@ const jiti = createJiti(import.meta.url, {
   interopDefault: false,
 });
 
-function expandHome(value: string): string {
-  if (value === "~") return homedir();
-  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
-  return value;
-}
-
-function resolveMaybeRelative(baseDir: string, value: string): string {
-  const expanded = expandHome(value);
-  return isAbsolute(expanded) ? expanded : resolve(baseDir, expanded);
-}
-
-function isExtensionFile(path: string): boolean {
-  return SUPPORTED_EXTENSIONS.has(extname(path));
-}
-
-function unique<T>(items: T[]): T[] {
-  return [...new Set(items)];
-}
+// ─── Filesystem helpers ─────────────────────────────────────────────
 
 function ensureParentDir(path: string): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -133,17 +102,6 @@ function writeOptionalConfigFile(path: string, data: ConfigFile): void {
   writeJson(path, { entries });
 }
 
-function parseNpmPackageName(spec: string): string {
-  if (spec.startsWith("@")) {
-    const slash = spec.indexOf("/");
-    if (slash === -1) return spec;
-    const versionAt = spec.indexOf("@", slash + 1);
-    return versionAt === -1 ? spec : spec.slice(0, versionAt);
-  }
-  const versionAt = spec.indexOf("@");
-  return versionAt === -1 ? spec : spec.slice(0, versionAt);
-}
-
 let cachedGlobalNpmRoot: string | undefined;
 function getGlobalNpmRoot(): string | undefined {
   if (cachedGlobalNpmRoot !== undefined) return cachedGlobalNpmRoot || undefined;
@@ -158,27 +116,7 @@ function getGlobalNpmRoot(): string | undefined {
   return cachedGlobalNpmRoot || undefined;
 }
 
-function packageSettingSource(pkg: PackageSetting): string | undefined {
-  if (typeof pkg === "string") return pkg;
-  if (pkg && typeof pkg === "object" && typeof pkg.source === "string") return pkg.source;
-  return undefined;
-}
-
-function isOptionalPackageSetting(pkg: PackageSetting): pkg is { source: string; extensions?: unknown; [key: string]: unknown } {
-  return Boolean(
-    pkg &&
-      typeof pkg === "object" &&
-      typeof pkg.source === "string" &&
-      Array.isArray(pkg.extensions) &&
-      pkg.extensions.length === 0,
-  );
-}
-
-function isManagedPackageSetting(pkg: PackageSetting): boolean {
-  if (typeof pkg === "string") return true;
-  if (!pkg || typeof pkg !== "object" || typeof pkg.source !== "string") return false;
-  return !Array.isArray(pkg.extensions) || pkg.extensions.length === 0;
-}
+// ─── Package resolution ─────────────────────────────────────────────
 
 function resolvePackageSource(source: string, scopeBaseDir: string): string | undefined {
   if (source.startsWith("npm:")) {
@@ -197,12 +135,19 @@ function resolvePackageSource(source: string, scopeBaseDir: string): string | un
     return undefined;
   }
 
-  if (source.startsWith("git:") || source.startsWith("http://") || source.startsWith("https://") || source.startsWith("ssh://")) {
+  if (
+    source.startsWith("git:") ||
+    source.startsWith("http://") ||
+    source.startsWith("https://") ||
+    source.startsWith("ssh://")
+  ) {
     return undefined;
   }
 
   return resolveMaybeRelative(scopeBaseDir, source);
 }
+
+// ─── Extension discovery ────────────────────────────────────────────
 
 function discoverExtensionUnits(dir: string): ExtensionUnit[] {
   if (!existsSync(dir) || !statSync(dir).isDirectory()) return [];
@@ -212,7 +157,7 @@ function discoverExtensionUnits(dir: string): ExtensionUnit[] {
     const fullPath = join(dir, entry.name);
     if (entry.isFile() && isExtensionFile(fullPath)) {
       units.push({
-        name: basename(entry.name, extname(entry.name)),
+        name: basename(entry.name, extname(fullPath)),
         unitPath: fullPath,
         entryFile: fullPath,
       });
@@ -245,7 +190,8 @@ function resolveManifestExtensionEntries(packageRoot: string, entries: unknown):
     if (!existsSync(resolved)) continue;
     const stats = statSync(resolved);
     if (stats.isFile() && isExtensionFile(resolved)) files.push(resolved);
-    else if (stats.isDirectory()) files.push(...discoverExtensionUnits(resolved).map((unit) => unit.entryFile));
+    else if (stats.isDirectory())
+      files.push(...discoverExtensionUnits(resolved).map((unit) => unit.entryFile));
   }
   return files;
 }
@@ -275,25 +221,7 @@ function resolveExtensionFilesFromSourcePath(sourcePath: string): string[] {
   return unique(discoverExtensionUnits(sourcePath).map((unit) => unit.entryFile));
 }
 
-function entryNameFromPath(path: string): string {
-  const ext = extname(path);
-  const base = basename(path, ext);
-  return base === "index" ? basename(dirname(path)) : base;
-}
-
-function deriveNameFromSource(source: string): string {
-  if (source.startsWith("npm:")) return parseNpmPackageName(source.slice(4));
-  return entryNameFromPath(source);
-}
-
-function sourceLabelForPath(path: string): string {
-  const home = homedir();
-  return path.startsWith(home) ? `~${path.slice(home.length)}` : path;
-}
-
-function isPackageLikeSource(source: string): boolean {
-  return source.startsWith("npm:") || source.startsWith("git:") || source.startsWith("http://") || source.startsWith("https://") || source.startsWith("ssh://");
-}
+// ─── Registry building ──────────────────────────────────────────────
 
 function createOptionalDirEntries(dir: string): OptionalEntry[] {
   if (!existsSync(dir)) return [];
@@ -345,17 +273,15 @@ function createOptionalPackageEntriesFromSettings(settingsPath: string): Optiona
   const packages = Array.isArray(parsed.packages) ? parsed.packages : [];
   const baseDir = dirname(settingsPath);
 
-  return packages
-    .filter(isOptionalPackageSetting)
-    .map((pkg) => ({
-      name: deriveNameFromSource(pkg.source),
-      description: "Optional package extension",
-      sourceLabel: pkg.source,
-      resolveFiles: () => {
-        const resolvedSource = resolvePackageSource(pkg.source, baseDir);
-        return resolvedSource ? resolveExtensionFilesFromSourcePath(resolvedSource) : [];
-      },
-    }));
+  return packages.filter(isOptionalPackageSetting).map((pkg) => ({
+    name: deriveNameFromSource(pkg.source),
+    description: "Optional package extension",
+    sourceLabel: pkg.source,
+    resolveFiles: () => {
+      const resolvedSource = resolvePackageSource(pkg.source, baseDir);
+      return resolvedSource ? resolveExtensionFilesFromSourcePath(resolvedSource) : [];
+    },
+  }));
 }
 
 function buildOptionalRegistry(): Map<string, OptionalEntry> {
@@ -376,12 +302,16 @@ function buildOptionalRegistry(): Map<string, OptionalEntry> {
   return registry;
 }
 
+// ─── Scope helpers ──────────────────────────────────────────────────
+
 function settingsPathForScope(scope: Scope): string {
   return scope === "global" ? join(getAgentDir(), "settings.json") : resolve(process.cwd(), ".pi/settings.json");
 }
 
 function optionalConfigPathForScope(scope: Scope): string {
-  return scope === "global" ? join(getAgentDir(), OPTIONAL_CONFIG_NAME) : resolve(process.cwd(), `.pi/${OPTIONAL_CONFIG_NAME}`);
+  return scope === "global"
+    ? join(getAgentDir(), OPTIONAL_CONFIG_NAME)
+    : resolve(process.cwd(), `.pi/${OPTIONAL_CONFIG_NAME}`);
 }
 
 function startupDirForScope(scope: Scope): string {
@@ -389,12 +319,12 @@ function startupDirForScope(scope: Scope): string {
 }
 
 function optionalDirForScope(scope: Scope): string {
-  return scope === "global" ? join(getAgentDir(), OPTIONAL_DIR_NAME) : resolve(process.cwd(), `.pi/${OPTIONAL_DIR_NAME}`);
+  return scope === "global"
+    ? join(getAgentDir(), OPTIONAL_DIR_NAME)
+    : resolve(process.cwd(), `.pi/${OPTIONAL_DIR_NAME}`);
 }
 
-function findPackageIndex(packages: PackageSetting[], source: string): number {
-  return packages.findIndex((pkg) => packageSettingSource(pkg) === source);
-}
+// ─── Mode transitions (fs mutations) ───────────────────────────────
 
 function setPackageMode(settingsPath: string, source: string, mode: PersistentMode): string | undefined {
   const settings = readSettingsFile(settingsPath);
@@ -404,9 +334,7 @@ function setPackageMode(settingsPath: string, source: string, mode: PersistentMo
 
   const current = packages[index]!;
   if (mode === "optional") {
-    packages[index] = typeof current === "string"
-      ? { source: current, extensions: [] }
-      : { ...current, source, extensions: [] };
+    packages[index] = typeof current === "string" ? { source: current, extensions: [] } : { ...current, source, extensions: [] };
   } else {
     if (typeof current === "string") return undefined;
     const next = { ...current };
@@ -417,14 +345,6 @@ function setPackageMode(settingsPath: string, source: string, mode: PersistentMo
   settings.packages = packages;
   writeSettingsFile(settingsPath, settings);
   return undefined;
-}
-
-function removeStringFromArray(items: string[], value: string): string[] {
-  return items.filter((item) => item !== value);
-}
-
-function addUniqueString(items: string[], value: string): string[] {
-  return items.includes(value) ? items : [...items, value];
 }
 
 function addConfigEntry(configPath: string, entry: ConfigEntry): void {
@@ -531,6 +451,8 @@ function setAutoFileMode(scope: Scope, unitPath: string, mode: PersistentMode): 
   return moveUnitPath(unitPath, target);
 }
 
+// ─── Persistent item collection ─────────────────────────────────────
+
 function createPersistentItems(): PersistentItem[] {
   const items: PersistentItem[] = [];
 
@@ -564,7 +486,8 @@ function createPersistentItems(): PersistentItem[] {
         scope,
         sourceLabel: extensionPath,
         kind: "settings-extension",
-        setMode: (mode) => setSettingsExtensionMode(scope, extensionPath, deriveNameFromSource(extensionPath), mode),
+        setMode: (mode) =>
+          setSettingsExtensionMode(scope, extensionPath, deriveNameFromSource(extensionPath), mode),
       });
     }
   };
@@ -619,6 +542,8 @@ function createPersistentItems(): PersistentItem[] {
   return [...byKey.values()];
 }
 
+// ─── Session state ──────────────────────────────────────────────────
+
 function getEnabledNames(ctx: ExtensionContext): string[] {
   let enabled: string[] = [];
   for (const entry of ctx.sessionManager.getBranch()) {
@@ -642,30 +567,9 @@ function updateStatus(ctx: ExtensionContext, enabledNames: string[]): void {
   ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("accent", `ext ${summary}`));
 }
 
-function formatPersistentLines(items: PersistentItem[], enabledNames: string[]): string[] {
-  if (items.length === 0) {
-    return [
-      "No extension resources found.",
-      `- Startup auto-discovery: ~/.pi/agent/extensions/ and .pi/extensions/`,
-      `- Optional auto-discovery: ~/.pi/agent/${OPTIONAL_DIR_NAME}/ and .pi/${OPTIONAL_DIR_NAME}/`,
-      `- Optional config file: ~/.pi/agent/${OPTIONAL_CONFIG_NAME}`,
-    ];
-  }
+// ─── Optional extension loading ─────────────────────────────────────
 
-  return items
-    .slice()
-    .sort((a, b) => a.name.localeCompare(b.name) || a.scope.localeCompare(b.scope))
-    .map((item) => {
-      const loaded = item.mode === "startup" || enabledNames.includes(item.name) ? "loaded" : "not loaded";
-      const autoload = item.mode === "startup" ? "autoload on" : "autoload off";
-      return `[${loaded}, ${autoload}] ${item.name} (${item.scope}) — ${item.sourceLabel}`;
-    });
-}
-
-function createPiProxy(
-  pi: ExtensionAPI,
-  capturedSessionStartHandlers: SessionStartHandler[],
-): ExtensionAPI {
+function createPiProxy(pi: ExtensionAPI, capturedSessionStartHandlers: SessionStartHandler[]): ExtensionAPI {
   return new Proxy(pi, {
     get(target, prop, receiver) {
       if (prop === "on") {
@@ -715,41 +619,19 @@ async function loadOptionalEntry(
   return undefined;
 }
 
-function normalizeRequestedName(input: string): string {
-  return input.trim();
-}
-
-function findEntryByName(registry: Map<string, OptionalEntry>, input: string): OptionalEntry | undefined {
-  const exact = registry.get(input);
-  if (exact) return exact;
-
-  const lower = input.toLowerCase();
-  return [...registry.values()].find((entry) => entry.name.toLowerCase() === lower);
-}
-
-function findPersistentItemByName(items: PersistentItem[], input: string): PersistentItem | undefined {
-  const exact = items.find((item) => item.name === input);
-  if (exact) return exact;
-
-  const lower = input.toLowerCase();
-  return items.find((item) => item.name.toLowerCase() === lower);
-}
+// ─── TUI helpers ────────────────────────────────────────────────────
 
 async function pickName(ctx: ExtensionContext, title: string, names: string[]): Promise<string | undefined> {
   if (!ctx.hasUI || names.length === 0) return undefined;
   return ctx.ui.select(title, names);
 }
 
-function completeNames(names: string[], prefix: string): AutocompleteItem[] | null {
-  const normalizedPrefix = prefix.trim().toLowerCase();
-  const filtered = names
-    .filter((name) => normalizedPrefix.length === 0 || name.toLowerCase().startsWith(normalizedPrefix))
-    .sort((a, b) => a.localeCompare(b))
-    .map((name) => ({ value: name, label: name }));
-  return filtered.length > 0 ? filtered : null;
-}
-
-async function pickPersistentItem(ctx: ExtensionContext, title: string, items: PersistentItem[], enabledNames: string[]): Promise<PersistentItem | undefined> {
+async function pickPersistentItem(
+  ctx: ExtensionContext,
+  title: string,
+  items: PersistentItem[],
+  enabledNames: string[],
+): Promise<PersistentItem | undefined> {
   if (!ctx.hasUI || items.length === 0) return undefined;
   const sorted = items.slice().sort((a, b) => a.name.localeCompare(b.name) || a.scope.localeCompare(b.scope));
   const labels = sorted.map((item) => {
@@ -780,24 +662,30 @@ function getExtSubcommandCompletions(
   const [subcommand, ...rest] = trimmed.split(/\s+/);
   const namePrefix = rest.join(" ").trim();
   if (subcommand === "load") {
-    return completeNames([...optionalRegistry.keys()], namePrefix)?.map((item) => ({
-      value: `load ${item.value}`,
-      label: item.label,
-    })) ?? null;
+    return (
+      completeNames([...optionalRegistry.keys()], namePrefix)?.map((item) => ({
+        value: `load ${item.value}`,
+        label: item.label,
+      })) ?? null
+    );
   }
 
   if (subcommand === "auto") {
-    return completeNames(
-      persistentItems.filter((item) => item.name !== SELF_NAME).map((item) => item.name),
-      namePrefix,
-    )?.map((item) => ({
-      value: `auto ${item.value}`,
-      label: item.label,
-    })) ?? null;
+    return (
+      completeNames(
+        persistentItems.filter((item) => item.name !== SELF_NAME).map((item) => item.name),
+        namePrefix,
+      )?.map((item) => ({
+        value: `auto ${item.value}`,
+        label: item.label,
+      })) ?? null
+    );
   }
 
   return null;
 }
+
+// ─── Extension entry point ──────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
   let optionalRegistry = buildOptionalRegistry();
@@ -901,7 +789,11 @@ export default function (pi: ExtensionAPI) {
     const actions: string[] = [];
     const loadedNow = item.mode === "startup" || enabledNames.includes(item.name);
     if (item.mode === "optional") {
-      actions.push(loadedNow ? "Toggle load for this session (currently loaded)" : "Toggle load for this session (currently not loaded)");
+      actions.push(
+        loadedNow
+          ? "Toggle load for this session (currently loaded)"
+          : "Toggle load for this session (currently not loaded)",
+      );
     }
     actions.push(item.mode === "startup" ? "Toggle autoload (currently on)" : "Toggle autoload (currently off)");
     actions.push("Cancel");
@@ -947,8 +839,7 @@ export default function (pi: ExtensionAPI) {
       if (subcommand === "load") {
         if (!target) {
           refreshAll();
-          const enabledNames = getEnabledNames(ctx);
-          const choices = [...optionalRegistry.keys()].filter((name) => true).sort();
+          const choices = [...optionalRegistry.keys()].sort();
           const chosen = await pickName(ctx, "Toggle load for optional extension", choices);
           if (!chosen) return;
           await toggleSessionLoad(chosen, ctx);
