@@ -40,7 +40,7 @@ import {
   findPersistentItemByName,
   formatPersistentLines,
   completeNames,
-} from "./optional-extension-loader-utils.js";
+} from "/home/daniel/build/agent-extensions/pi/optional-extension-loader-utils.js";
 
 // ─── Types that reference Pi APIs ───────────────────────────────────
 
