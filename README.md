@@ -22,13 +22,7 @@ agent-extensions/
 
 ## Pi Extensions
 
-Pi auto-discovers extensions in `~/.pi/agent/extensions/`. Symlink from this repo:
-
-```bash
-for f in pi/*.ts; do
-  [[ "$f" != *.test.ts ]] && ln -sf "$(pwd)/$f" ~/.pi/agent/extensions/"$(basename "$f")"
-done
-```
+Pi auto-discovers extensions in `~/.pi/agent/extensions/`.
 
 Reload with `/reload` in pi.
 
