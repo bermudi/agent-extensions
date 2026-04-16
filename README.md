@@ -52,6 +52,36 @@ Adds an Emacs-style `Ctrl+X` prefix:
 
 Replaces Pi's default context compaction with an LLM-generated summary that preserves the assistant's reasoning trail, mental model, and decision history. Uses Gemini Flash as the summary model.
 
+#### How it works
+
+The extension hooks into `session_before_compact` and builds its own summary instead of letting Pi use its default compaction.
+
+1. **Group messages into turns.** Raw messages are bucketed by turn-starting roles (`user`, `bashExecution`, `custom`). Each turn collects:
+   - **reasoning** — extracted from assistant `thinking` blocks (capped at 2,500 chars/message)
+   - **responses** — assistant text, filtered to skip filler like "let me check" (capped at 700 chars)
+   - **evidence** — tool results, but aggressively: `read` output is dropped entirely, `bash` output is only kept if it looks important (tests, builds, errors), `edit`/`write` results become one-liners
+
+2. **Build a transcript.** Turns are serialized into structured markdown (`Request`, `Reasoning`, `Stated conclusions`, `Relevant evidence`) with per-section character budgets via greedy fill + middle-truncation.
+
+3. **Call a summary model.** Tries `gemini-2.5-flash` first, then falls back to the session's current model.
+
+4. **Structured output.** The LLM produces a summary in a fixed format:
+
+   ```
+   ## Goal
+   ## Constraints & Preferences
+   ## Units of Work (each with Understanding / Issues / Attempts / Outcome)
+   ## Current Mental Model
+   ## Open Questions / Risks
+   ## Next Steps
+   ```
+
+5. **Incremental updates.** When re-compacting, the previous summary is passed in `<previous-summary>` tags alongside new work in `<new-work>` tags. The model merges rather than re-summarizing.
+
+6. **File tracking.** `<read-files>` and `<modified-files>` XML tags are computed from file operation metadata and appended to the summary.
+
+If anything fails (model unavailable, empty output, timeout), it falls back silently to Pi's default compaction.
+
 ## OpenCode Plugins
 
 Per `docs/opencode-plugins.md`, OpenCode auto-loads local plugins from:

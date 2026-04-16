@@ -547,7 +547,27 @@ function createPersistentItems(): PersistentItem[] {
 
 // ─── Session state ──────────────────────────────────────────────────
 
+// Session manager defers persisting entries until an assistant message exists.
+// For session-only toggle state that must survive ctx.reload(), we maintain
+// our own sidecar file alongside the session file.
+
+function sessionStatePath(ctx: ExtensionContext): string | undefined {
+  const sessionFile = ctx.sessionManager.getSessionFile();
+  if (!sessionFile) return undefined;
+  return join(dirname(sessionFile), "optional-ext-session-state.json");
+}
+
 function getEnabledNames(ctx: ExtensionContext): string[] {
+  // 1. Check sidecar file (reliable across reload)
+  const sidecarPath = sessionStatePath(ctx);
+  if (sidecarPath) {
+    const data = safeReadJson(sidecarPath) as { enabled?: unknown } | undefined;
+    if (data && Array.isArray(data.enabled)) {
+      return unique(data.enabled.filter((v): v is string => typeof v === "string"));
+    }
+  }
+
+  // 2. Fallback: check session branch entries (works if assistant already wrote)
   let enabled: string[] = [];
   for (const entry of ctx.sessionManager.getBranch()) {
     if (entry.type !== "custom" || entry.customType !== STATE_TYPE) continue;
@@ -557,7 +577,12 @@ function getEnabledNames(ctx: ExtensionContext): string[] {
   return unique(enabled);
 }
 
-function saveEnabledNames(pi: ExtensionAPI, names: string[]): void {
+function saveEnabledNames(ctx: ExtensionContext, pi: ExtensionAPI, names: string[]): void {
+  // Write to both: sidecar (reliable) and session entry (for branch visibility)
+  const sidecarPath = sessionStatePath(ctx);
+  if (sidecarPath) {
+    writeJson(sidecarPath, { enabled: unique(names) });
+  }
   pi.appendEntry(STATE_TYPE, { enabled: unique(names) });
 }
 
@@ -731,12 +756,13 @@ export default function (pi: ExtensionAPI) {
 
     if (enabledNames.includes(entry.name)) {
       saveEnabledNames(
+        ctx,
         pi,
         enabledNames.filter((itemName) => itemName !== entry.name),
       );
       ctx.ui.notify(`Unloading ${entry.name} from this session…`, "info");
     } else {
-      saveEnabledNames(pi, [...enabledNames, entry.name]);
+      saveEnabledNames(ctx, pi, [...enabledNames, entry.name]);
       ctx.ui.notify(`Loading ${entry.name} for this session…`, "info");
     }
     await ctx.reload();
@@ -766,10 +792,11 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (nextMode === "optional") {
-      saveEnabledNames(pi, [...enabledNames, item.name]);
+      saveEnabledNames(ctx, pi, [...enabledNames, item.name]);
       ctx.ui.notify(`${item.name} will stop autoloading and stay loaded in this session`, "success");
     } else {
       saveEnabledNames(
+        ctx,
         pi,
         enabledNames.filter((itemName) => itemName !== item.name),
       );
