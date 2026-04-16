@@ -1,7 +1,7 @@
 import { type ExtensionAPI, type ExtensionContext, CustomEditor } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
-type ChordAction = "model" | "resume" | "new" | "ext" | "reload";
+type ChordAction = "model" | "resume" | "new" | "ext" | "reload" | "compact" | "queue";
 
 const CHORDS: { key: string; label: string; desc: string; action: ChordAction }[] = [
 	{ key: "M", label: "Model", desc: "Switch model", action: "model" },
@@ -9,12 +9,14 @@ const CHORDS: { key: string; label: string; desc: string; action: ChordAction }[
 	{ key: "N", label: "New", desc: "New session", action: "new" },
 	{ key: "E", label: "Ext", desc: "Extensions", action: "ext" },
 	{ key: "R", label: "Reload", desc: "Reload config", action: "reload" },
+	{ key: "C", label: "Compact", desc: "Compact context", action: "compact" },
+	{ key: "Q", label: "Queue", desc: "Queue follow-up", action: "queue" },
 ];
 
 // Padding: 1 row top/bottom, 2 cols left/right
 const PAD_X = 4;
 const PAD_Y = 1;
-const CONTENT_WIDTH = Math.max(...CHORDS.map((c) => visibleWidth(`${c.key}  ${c.desc}`)));
+const CONTENT_WIDTH = Math.max(...CHORDS.map((c) => visibleWidth(`${c.key}  ${c.desc}`))) + 2;
 const BOX_WIDTH = CONTENT_WIDTH + 2 + PAD_X * 2; // 2 border + side padding
 const BOX_HEIGHT = CHORDS.length + 2 + PAD_Y * 2; // 2 border rows + top/bottom padding
 
@@ -127,6 +129,15 @@ class ChordEditor extends CustomEditor {
 			} else if (action === "reload") {
 				editor.setText("/reload");
 				editor.onSubmit?.("/reload");
+			} else if (action === "compact") {
+				editor.setText("/compact");
+				editor.onSubmit?.("/compact");
+			} else if (action === "queue") {
+				const text = editor.getText().trim();
+				if (text) {
+					editor.setText(`/queue ${text}`);
+					editor.onSubmit?.(`/queue ${text}`);
+				}
 			}
 		});
 	}
