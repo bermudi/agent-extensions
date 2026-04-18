@@ -1,13 +1,16 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
+const DEBUG_DIR = join(homedir(), ".pi", "logs", "thinking-compaction");
+
 const EXTENSION_NAME = "thinking-compaction";
 const SUMMARY_MODEL_CANDIDATES: Array<[string, string]> = [["google", "gemini-2.5-flash"]];
-const MAX_THINKING_PER_MESSAGE = 2500;
-const MAX_ASSISTANT_TEXT_PER_MESSAGE = 700;
-const MAX_TOOL_EVIDENCE_PER_ITEM = 700;
-const MAX_TURN_TEXT = 12000;
-const MAX_PROMPT_TEXT = 180000;
+// Safety valve: if the transcript exceeds this, drop middle turns rather than
+// slicing strings. The model gets full turns — not truncated fragments.
+const MAX_PROMPT_CHARS = 180_000;
 
 const INITIAL_PROMPT = `You are compacting an AI coding session for future continuation.
 
@@ -127,6 +130,9 @@ export default function (pi: ExtensionAPI) {
     const { messagesToSummarize, turnPrefixMessages, previousSummary, firstKeptEntryId, tokensBefore, fileOps } = preparation;
 
     const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
+    const runId = new Date().toISOString().replace(/[:.]/g, "-");
+    const runDir = join(DEBUG_DIR, runId);
+
     if (allMessages.length === 0) return;
 
     const turns = groupIntoTurns(allMessages);
@@ -144,6 +150,27 @@ export default function (pi: ExtensionAPI) {
       previousSummary: stripFileTags(previousSummary),
       customInstructions,
     });
+
+    // ── Observability ────────────────────────────────────────────────────
+    await mkdir(runDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(runDir, "inputs.json"), JSON.stringify({
+        timestamp: new Date().toISOString(),
+        tokensBefore,
+        messagesToSummarizeCount: messagesToSummarize.length,
+        turnPrefixMessagesCount: turnPrefixMessages.length,
+        firstKeptEntryId,
+        hasPreviousSummary: Boolean(previousSummary),
+        customInstructions,
+        fileOps: {
+          read: fileOps?.read ? [...fileOps.read] : [],
+          written: fileOps?.written ? [...fileOps.written] : [],
+          edited: fileOps?.edited ? [...fileOps.edited] : [],
+        },
+      }, null, 2)),
+      writeFile(join(runDir, "transcript.md"), transcript),
+      writeFile(join(runDir, "prompt.txt"), prompt),
+    ]);
 
     ctx.ui.notify(
       `Thinking compaction: summarizing ${allMessages.length} messages (${tokensBefore.toLocaleString()} tokens) with ${modelChoice.model.provider}/${modelChoice.model.id}`,
@@ -187,13 +214,27 @@ export default function (pi: ExtensionAPI) {
       const { readFiles, modifiedFiles } = computeFileLists(fileOps);
       const finalSummary = `${summary}${formatFileTags(readFiles, modifiedFiles)}`;
 
+      // ── Observability: output ─────────────────────────────────────────
+      await writeFile(join(runDir, "summary.md"), finalSummary);
+      await writeFile(join(runDir, "details.json"), JSON.stringify({
+        version: 2,
+        strategy: EXTENSION_NAME,
+        readFiles,
+        modifiedFiles,
+        turns: turns.length,
+        model: `${modelChoice.model.provider}/${modelChoice.model.id}`,
+        summaryLength: finalSummary.length,
+        transcriptLength: transcript.length,
+        promptLength: prompt.length,
+      }, null, 2));
+
       return {
         compaction: {
           summary: finalSummary,
           firstKeptEntryId,
           tokensBefore,
           details: {
-            version: 1,
+            version: 2,
             strategy: EXTENSION_NAME,
             readFiles,
             modifiedFiles,
@@ -211,6 +252,8 @@ export default function (pi: ExtensionAPI) {
     }
   });
 }
+
+// ── Model resolution ──────────────────────────────────────────────────
 
 async function resolveSummaryModel(ctx: AnyRecord) {
   const seen = new Set<string>();
@@ -238,6 +281,8 @@ async function resolveSummaryModel(ctx: AnyRecord) {
   return undefined;
 }
 
+// ── Prompt construction ───────────────────────────────────────────────
+
 function buildPrompt(args: { transcript: string; previousSummary?: string; customInstructions?: string }) {
   const parts: string[] = [];
 
@@ -247,13 +292,15 @@ function buildPrompt(args: { transcript: string; previousSummary?: string; custo
 
   if (args.previousSummary?.trim()) {
     parts.push(`<previous-summary>\n${args.previousSummary.trim()}\n</previous-summary>`);
-    parts.push(`<new-work>\n${truncateForPrompt(args.transcript)}\n</new-work>`);
+    parts.push(`<new-work>\n${args.transcript}\n</new-work>`);
   } else {
-    parts.push(`<conversation>\n${truncateForPrompt(args.transcript)}\n</conversation>`);
+    parts.push(`<conversation>\n${args.transcript}\n</conversation>`);
   }
 
   return parts.join("\n\n");
 }
+
+// ── Turn grouping ─────────────────────────────────────────────────────
 
 function groupIntoTurns(messages: AnyMessage[]): Turn[] {
   const turns: Turn[] = [];
@@ -285,7 +332,8 @@ function groupIntoTurns(messages: AnyMessage[]): Turn[] {
     }
 
     if (role === "branchSummary" || role === "compactionSummary") {
-      current.responses.push(trimMiddle(typeof message.summary === "string" ? message.summary : "", MAX_ASSISTANT_TEXT_PER_MESSAGE));
+      const summary = typeof message.summary === "string" ? message.summary : "";
+      if (summary) current.responses.push(summary);
       continue;
     }
   }
@@ -309,38 +357,7 @@ function createTurn(label: string, request: string): Turn {
 }
 
 function finalizeTurn(turn: Turn, index: number): Turn {
-  return {
-    ...turn,
-    label: `${turn.label} ${index}`,
-    reasoning: capSection(turn.reasoning, MAX_TURN_TEXT),
-    responses: capSection(turn.responses, Math.floor(MAX_TURN_TEXT / 2)),
-    evidence: capSection(turn.evidence, Math.floor(MAX_TURN_TEXT / 2)),
-  };
-}
-
-function capSection(items: string[], maxChars: number) {
-  const result: string[] = [];
-  let used = 0;
-
-  for (const item of items) {
-    if (!item) continue;
-    const next = item.trim();
-    if (!next) continue;
-    const cost = next.length + 2;
-    if (used + cost <= maxChars) {
-      result.push(next);
-      used += cost;
-      continue;
-    }
-
-    const remaining = Math.max(0, maxChars - used - 16);
-    if (remaining > 80) {
-      result.push(trimMiddle(next, remaining));
-    }
-    break;
-  }
-
-  return result;
+  return { ...turn, label: `${turn.label} ${index}` };
 }
 
 function hasUsefulTurnContent(turn: Turn) {
@@ -381,6 +398,8 @@ function describeTurnRequest(message: AnyMessage) {
   return "(implicit continuation)";
 }
 
+// ── Message ingestion ─────────────────────────────────────────────────
+
 function ingestAssistantMessage(turn: Turn, message: AnyMessage) {
   const blocks = Array.isArray(message?.content) ? message.content : [];
 
@@ -391,7 +410,7 @@ function ingestAssistantMessage(turn: Turn, message: AnyMessage) {
     .trim();
 
   if (thinking) {
-    turn.reasoning.push(trimMiddle(thinking, MAX_THINKING_PER_MESSAGE));
+    turn.reasoning.push(thinking);
   }
 
   const text = blocks
@@ -401,7 +420,7 @@ function ingestAssistantMessage(turn: Turn, message: AnyMessage) {
     .trim();
 
   if (text && !looksLikeFiller(text)) {
-    turn.responses.push(trimMiddle(text, MAX_ASSISTANT_TEXT_PER_MESSAGE));
+    turn.responses.push(text);
   }
 
   for (const block of blocks) {
@@ -431,7 +450,7 @@ function ingestToolResult(turn: Turn, message: AnyMessage) {
 
   if (message?.isError) {
     const descriptor = toolCall?.name ? `${toolCall.name}` : toolName;
-    turn.evidence.push(`${descriptor} error: ${trimMiddle(text || "(no output)", MAX_TOOL_EVIDENCE_PER_ITEM)}`);
+    turn.evidence.push(`${descriptor} error: ${text || "(no output)"}`);
     return;
   }
 
@@ -440,14 +459,25 @@ function ingestToolResult(turn: Turn, message: AnyMessage) {
     if (path) {
       turn.evidence.push(`${toolName} succeeded on ${path}`);
     }
+    return;
+  }
+
+  // Generic tool result (find, grep, ls, session_search, etc.)
+  if (text) {
+    const descriptor = toolCall?.name ? `${toolCall.name}` : toolName;
+    turn.evidence.push(`${descriptor}: ${text}`);
   }
 }
 
+// ── Bash evidence summarization ───────────────────────────────────────
+// The only place we summarize — we're formatting tool output for the model,
+// not truncating it. The model handles compression; we handle relevance.
+
 function summarizeBashEvidence(command: string | undefined, output: string, isError: boolean) {
+  // Command is one-liner for display — bash commands are typically short.
   const cmd = oneLine(command || "bash");
   const cleaned = output.trim();
   const lowerCommand = cmd.toLowerCase();
-  const lowerOutput = cleaned.toLowerCase();
   const commandLooksImportant = /(go test|npm test|pnpm test|yarn test|pytest|cargo test|vitest|jest|go build|tsc\b|eslint|golangci-lint|make test|make lint|git diff|git status|gh\b)/i.test(cmd);
   const outputLooksImportant = /(\bpass\b|\bfail\b|error|panic:|traceback|exception|undefined|not found|timed out|permission denied|lgtm|rejected|critical|warning)/i.test(cleaned);
 
@@ -456,25 +486,23 @@ function summarizeBashEvidence(command: string | undefined, output: string, isEr
   }
 
   const interestingLines = pickInterestingLines(cleaned, 8);
-  const detailSource = interestingLines.length > 0 ? interestingLines.join(" | ") : cleaned;
-  const detail = trimMiddle(detailSource || "(no output)", MAX_TOOL_EVIDENCE_PER_ITEM);
+  const detail = interestingLines.length > 0 ? interestingLines.join(" | ") : cleaned || "(no output)";
 
   if (/go test|npm test|pnpm test|yarn test|pytest|cargo test|vitest|jest/i.test(lowerCommand)) {
     const status = /(\bFAIL\b|failed|panic:|error)/i.test(cleaned) || isError ? "failed" : /(\bPASS\b|\bok\b|passed)/i.test(cleaned) ? "passed" : "ran";
-    return `Test command \`${trimMiddle(cmd, 120)}\` ${status}: ${detail}`;
+    return `Test \`${cmd}\` ${status}: ${detail}`;
   }
 
   if (/go build|tsc\b|eslint|golangci-lint|make test|make lint/i.test(lowerCommand)) {
     const status = isError || /(error|fail)/i.test(cleaned) ? "reported problems" : "completed";
-    return `Check command \`${trimMiddle(cmd, 120)}\` ${status}: ${detail}`;
+    return `Check \`${cmd}\` ${status}: ${detail}`;
   }
 
   if (/git diff/i.test(lowerCommand)) {
-    if (isError) return `Git diff command \`${trimMiddle(cmd, 120)}\` errored: ${detail}`;
-    return undefined;
+    return `Git diff \`${cmd}\`${isError ? " errored" : ""}: ${detail}`;
   }
 
-  return `Bash command \`${trimMiddle(cmd, 120)}\`${isError ? " errored" : " produced relevant output"}: ${detail}`;
+  return `Bash \`${cmd}\`${isError ? " errored" : ""}: ${detail}`;
 }
 
 function pickInterestingLines(text: string, maxLines: number) {
@@ -497,42 +525,79 @@ function pickInterestingLines(text: string, maxLines: number) {
   return [...lines.slice(0, Math.ceil(maxLines / 2)), ...lines.slice(-(Math.floor(maxLines / 2)))];
 }
 
-function looksLikeFiller(text: string) {
-  const compact = oneLine(text).toLowerCase();
-  if (compact.length > 180) return false;
+// ── Transcript building ───────────────────────────────────────────────
 
-  return /^(let me|i'?ll|i will|first,? let me|now let me|i'm going to|i am going to|let's|i should|i need to)\b/.test(compact);
-}
+function buildTranscript(turns: Turn[]): string {
+  const formatted = turns.map(formatTurn);
+  // If the full transcript fits, send it all — the model decides what matters.
+  const full = formatted.join("\n\n");
+  if (full.length <= MAX_PROMPT_CHARS) return full;
 
-function buildTranscript(turns: Turn[]) {
-  const parts: string[] = [];
+  // Otherwise drop middle turns — keep the first (context) and last (recent).
+  const charBudget = MAX_PROMPT_CHARS;
+  const firstTurn = formatted[0];
+  const firstLen = firstTurn?.length ?? 0;
 
-  for (const turn of turns) {
-    const section: string[] = [];
-    section.push(`### ${turn.label}`);
-    section.push(`Request: ${turn.request}`);
+  // Walk backwards from the end, including recent turns until budget is spent.
+  // Budget accounts for all content: first turn + gap marker + recent turns.
+  let used = firstLen;
+  const keptRecent: string[] = [];
 
-    if (turn.reasoning.length > 0) {
-      section.push(`Reasoning:\n${turn.reasoning.map((item) => `- ${indentBullet(item)}`).join("\n")}`);
-    }
-
-    if (turn.responses.length > 0) {
-      section.push(`Stated conclusions:\n${turn.responses.map((item) => `- ${indentBullet(item)}`).join("\n")}`);
-    }
-
-    if (turn.evidence.length > 0) {
-      section.push(`Relevant evidence:\n${turn.evidence.map((item) => `- ${indentBullet(item)}`).join("\n")}`);
-    }
-
-    parts.push(section.join("\n\n"));
+  for (let i = formatted.length - 1; i > 0; i--) {
+    if (used + formatted[i].length + 4 > charBudget) break;
+    keptRecent.push(formatted[i]);
+    used += formatted[i].length + 4;
   }
 
+  // Assemble: first turn, gap marker, then recent turns in chronological order.
+  const recentInOrder = keptRecent.reverse();
+  const droppedCount = turns.length - 1 - recentInOrder.length;
+  const parts: string[] = [];
+  if (firstTurn) parts.push(firstTurn);
+  if (droppedCount > 0) parts.push(`[… ${droppedCount} earlier turns omitted …]`);
+  parts.push(...recentInOrder);
   return parts.join("\n\n");
+}
+
+function formatTurn(turn: Turn): string {
+  const section: string[] = [];
+  section.push(`### ${turn.label}`);
+  section.push(`Request: ${turn.request}`);
+
+  if (turn.reasoning.length > 0) {
+    section.push(`Reasoning:\n${turn.reasoning.map((item) => `- ${indentBullet(item)}`).join("\n")}`);
+  }
+
+  if (turn.responses.length > 0) {
+    section.push(`Stated conclusions:\n${turn.responses.map((item) => `- ${indentBullet(item)}`).join("\n")}`);
+  }
+
+  if (turn.evidence.length > 0) {
+    section.push(`Relevant evidence:\n${turn.evidence.map((item) => `- ${indentBullet(item)}`).join("\n")}`);
+  }
+
+  return section.join("\n\n");
 }
 
 function indentBullet(text: string) {
   return text.replace(/\n/g, "\n  ");
 }
+
+// ── Filler detection ──────────────────────────────────────────────────
+
+function looksLikeFiller(text: string) {
+  // Only filter short messages that are pure hedging — no substantive content.
+  // Check the first line (not the collapsed string) and total length.
+  if (text.length > 180) return false;
+
+  const firstLine = text.split("\n")[0].trim().toLowerCase();
+  // Must start with a hedging phrase followed by a verb/sentence boundary.
+  // Avoids matching "I'll implement the auth module" (substantive continuation).
+  const match = firstLine.match(/^(let me|i'll|i will|first,? let me|now let me|i'm going to|i am going to|i should|i need to)\s+(?:check|look|see|inspect|examine|investigate|review|read|try|find|search|explore|start|begin)\b/i);
+  return Boolean(match);
+}
+
+// ── Utilities ──────────────────────────────────────────────────────────
 
 function extractText(content: unknown) {
   if (typeof content === "string") return content;
@@ -543,19 +608,6 @@ function extractText(content: unknown) {
     .map((part: AnyRecord) => part.text)
     .join("\n")
     .trim();
-}
-
-function trimMiddle(text: string, maxChars: number) {
-  if (!text) return "";
-  if (text.length <= maxChars) return text;
-
-  const head = Math.max(40, Math.floor(maxChars * 0.6));
-  const tail = Math.max(20, maxChars - head - 24);
-  return `${text.slice(0, head)}\n[… truncated …]\n${text.slice(-tail)}`;
-}
-
-function truncateForPrompt(text: string) {
-  return trimMiddle(text, MAX_PROMPT_TEXT);
 }
 
 function oneLine(text: string) {
