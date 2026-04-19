@@ -1,14 +1,14 @@
 /**
  * Pi Notify Extension
  *
- * Sends a native desktop notification when Pi finishes and is waiting for input.
+ * Sends a notification when Pi finishes and is waiting for input.
  *
  * Detection order:
  * 1. WSL (Windows Terminal) → PowerShell toast
  * 2. macOS → osascript (works in any terminal)
  * 3. Linux with notify-send → libnotify desktop notification
  * 4. Kitty → OSC 99
- * 5. Fallback → BEL character (\x07) for terminals with bell.command configured
+ * 5. Fallback → BEL character (\x07) for Alacritty bell / any terminal with bell support
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -60,8 +60,11 @@ function notify(title: string, body: string): void {
 		notifyMacOS(title, body);
 	} else if (process.env.KITTY_WINDOW_ID) {
 		notifyOSC99(title, body);
+	} else if (process.env.ALACRITTY_WINDOW_ID) {
+		// Alacritty — native bell only (no OSC notify support)
+		fallback();
 	} else {
-		// Linux with any terminal — try libnotify first, BEL as last resort
+		// Other Linux terminals — try libnotify, BEL as last resort
 		notifyLibnotify(title, body);
 	}
 }
