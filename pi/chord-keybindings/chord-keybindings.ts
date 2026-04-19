@@ -1,7 +1,7 @@
 import { type ExtensionAPI, type ExtensionContext, CustomEditor } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
-type ChordAction = "model" | "resume" | "new" | "ext" | "reload" | "compact" | "queue";
+type ChordAction = "model" | "resume" | "new" | "ext" | "reload" | "compact" | "queue" | "search";
 
 const CHORDS: { key: string; label: string; desc: string; action: ChordAction }[] = [
 	{ key: "M", label: "Model", desc: "Switch model", action: "model" },
@@ -11,6 +11,7 @@ const CHORDS: { key: string; label: string; desc: string; action: ChordAction }[
 	{ key: "R", label: "Reload", desc: "Reload config", action: "reload" },
 	{ key: "C", label: "Compact", desc: "Compact context", action: "compact" },
 	{ key: "Q", label: "Queue", desc: "Queue follow-up", action: "queue" },
+	{ key: "S", label: "Search", desc: "Search sessions", action: "search" },
 ];
 
 // Padding: 1 row top/bottom, 2 cols left/right
@@ -138,6 +139,9 @@ class ChordEditor extends CustomEditor {
 					editor.setText(`/queue ${text}`);
 					editor.onSubmit?.(`/queue ${text}`);
 				}
+			} else if (action === "search") {
+				editor.setText("/search");
+				editor.onSubmit?.("/search");
 			}
 		});
 	}
