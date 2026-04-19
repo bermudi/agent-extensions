@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, st
 import { execFileSync, execSync } from "node:child_process";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import createJiti from "jiti";
+import { createJiti } from "@mariozechner/jiti";
 import type { AutocompleteItem } from "@mariozechner/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
