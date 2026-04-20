@@ -1,43 +1,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { readlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-
-// Resolve engine from the real file location, not the symlink.
-// Pi loads extensions via symlink from ~/.pi/agent/extensions/ → repo,
-// so import.meta.url points at the symlink dir. readlinkSync gives us
-// the real path so ../compaction-engine resolves correctly.
-import { readlinkSync, existsSync } from "node:fs";
-
-function resolveEngineDir(importMetaUrl: string): string {
-  const filePath = fileURLToPath(importMetaUrl);
-  try {
-    const realPath = readlinkSync(filePath);
-    return join(dirname(realPath), "..", "compaction-engine");
-  } catch {
-    // Not a symlink — resolve relative to the file itself
-    return join(dirname(filePath), "..", "compaction-engine");
-  }
-}
-
-const engineDir = resolveEngineDir(import.meta.url);
-
-const compactionEngine = await import(engineDir);
-const {
-  INITIAL_PROMPT,
-  UPDATE_PROMPT,
-  SUMMARY_MAX_TOKENS,
-  CHARS_PER_TOKEN,
-  groupIntoTurns,
-  computeCharBudget,
-  buildTranscript,
-  buildPrompt,
-  stripFileTags,
-  computeFileLists,
-  formatFileTags,
-} = compactionEngine;
 
 const DEBUG_DIR = join(homedir(), ".pi", "logs", "thinking-compaction");
 
@@ -45,6 +12,30 @@ const EXTENSION_NAME = "thinking-compaction";
 const SUMMARY_MODEL_CANDIDATES: Array<[string, string]> = [["google", "gemini-2.5-flash"]];
 
 type AnyRecord = Record<string, any>;
+
+// Lazy-loaded compaction engine. Resolved at first use so we don't
+// block module evaluation with top-level await (pi's loader doesn't
+// support it). Uses readlinkSync to chase the symlink so the engine
+// resolves correctly from the real repo path.
+let _engine: Promise<typeof import("../compaction-engine")> | undefined;
+
+async function loadEngine() {
+  if (!_engine) {
+    _engine = (async () => {
+      const filePath = fileURLToPath(import.meta.url);
+      let realDir: string;
+      try {
+        const realPath = readlinkSync(filePath);
+        realDir = dirname(realPath);
+      } catch {
+        realDir = dirname(filePath);
+      }
+      const engineDir = join(realDir, "..", "compaction-engine");
+      return import(engineDir);
+    })();
+  }
+  return _engine;
+}
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_before_compact", async (event, ctx) => {
@@ -57,7 +48,9 @@ export default function (pi: ExtensionAPI) {
 
     if (allMessages.length === 0) return;
 
-    const turns = groupIntoTurns(allMessages);
+    const engine = await loadEngine();
+
+    const turns = engine.groupIntoTurns(allMessages);
 
     const modelChoice = await resolveSummaryModel(ctx);
     if (!modelChoice) {
@@ -65,14 +58,14 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const systemPrompt = previousSummary ? UPDATE_PROMPT : INITIAL_PROMPT;
-    const maxPromptChars = computeCharBudget(modelChoice.model.contextWindow as number | undefined, SUMMARY_MAX_TOKENS, systemPrompt);
-    const transcript = buildTranscript(turns, maxPromptChars);
+    const systemPrompt = previousSummary ? engine.UPDATE_PROMPT : engine.INITIAL_PROMPT;
+    const maxPromptChars = engine.computeCharBudget(modelChoice.model.contextWindow as number | undefined, engine.SUMMARY_MAX_TOKENS, systemPrompt);
+    const transcript = engine.buildTranscript(turns, maxPromptChars);
     if (!transcript.trim()) return;
 
-    const prompt = buildPrompt({
+    const prompt = engine.buildPrompt({
       transcript,
-      previousSummary: stripFileTags(previousSummary),
+      previousSummary: engine.stripFileTags(previousSummary),
       customInstructions,
     });
 
@@ -106,7 +99,7 @@ export default function (pi: ExtensionAPI) {
       const response = await complete(
         modelChoice.model,
         {
-          systemPrompt: previousSummary ? UPDATE_PROMPT : INITIAL_PROMPT,
+          systemPrompt: previousSummary ? engine.UPDATE_PROMPT : engine.INITIAL_PROMPT,
           messages: [
             {
               role: "user",
@@ -118,7 +111,7 @@ export default function (pi: ExtensionAPI) {
         {
           apiKey: modelChoice.auth.apiKey,
           headers: modelChoice.auth.headers,
-          maxTokens: SUMMARY_MAX_TOKENS,
+          maxTokens: engine.SUMMARY_MAX_TOKENS,
           signal,
         },
       );
@@ -136,8 +129,8 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-      const finalSummary = `${summary}${formatFileTags(readFiles, modifiedFiles)}`;
+      const { readFiles, modifiedFiles } = engine.computeFileLists(fileOps);
+      const finalSummary = `${summary}${engine.formatFileTags(readFiles, modifiedFiles)}`;
 
       // ── Observability: output ─────────────────────────────────────────
       await writeFile(join(runDir, "summary.md"), finalSummary);
@@ -176,7 +169,6 @@ export default function (pi: ExtensionAPI) {
       return;
     }
   });
-}
 
   pi.registerCommand("compact", {
     description: "Compact context with optional focus instructions",
