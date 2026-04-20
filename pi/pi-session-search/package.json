@@ -1,6 +1,6 @@
 {
-  "name": "@kaiserlich-dev/pi-session-search",
-  "version": "1.1.1",
+  "name": "pi-session-search",
+  "version": "1.1.2",
   "description": "Full-text search across pi sessions with FTS5 index and overlay UI",
   "keywords": [
     "pi-package",
@@ -13,7 +13,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/kaiserlich-dev/pi-session-search"
+    "url": "https://github.com/bermudi/agent-extensions"
   },
   "publishConfig": {
     "access": "public"

@@ -3,6 +3,15 @@ import * as path from "node:path";
 import * as os from "node:os";
 import type { SearchResult } from "./indexer";
 import { formatDate } from "./types";
+import { parseSessionMessages } from "./jsonl-parser";
+import {
+	groupIntoTurns,
+	buildTranscript,
+	buildPrompt,
+	INITIAL_PROMPT,
+	computeCharBudget,
+	SUMMARY_MAX_TOKENS,
+} from "../../compaction-engine";
 
 export const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 export const MODEL = "google/gemini-3-flash-preview";
@@ -23,7 +32,10 @@ export function getApiKey(): string {
 	}
 }
 
-/** Extract user + assistant text from a session JSONL file. */
+/**
+ * @deprecated Use parseSessionMessages + groupIntoTurns from compaction-engine instead.
+ * Extracts user + assistant text only — loses reasoning, tool calls, and evidence.
+ */
 export function extractSessionText(sessionPath: string): string {
 	const data = fs.readFileSync(sessionPath, "utf-8");
 	const lines = data.split("\n");
@@ -64,40 +76,30 @@ export function extractSessionText(sessionPath: string): string {
 
 /**
  * Summarize a session via Gemini Flash through OpenRouter.
- * Extracts conversation text first to strip images/thinking/tools,
- * then sends a single API call. Fast and cheap.
+ * Uses the compaction engine to build a structured transcript
+ * preserving reasoning, tool calls, and evidence — not just raw text.
  */
 export async function summarizeSession(
 	session: SearchResult,
 	focusPrompt?: string,
 ): Promise<string> {
-	const text = extractSessionText(session.sessionPath);
-	if (!text.trim())
+	const messages = parseSessionMessages(session.sessionPath);
+	const turns = groupIntoTurns(messages);
+
+	if (turns.length === 0)
 		return "Empty session — no user or assistant messages found.";
+
+	const maxPromptChars = computeCharBudget(1_000_000, SUMMARY_MAX_TOKENS, INITIAL_PROMPT);
+	const transcript = buildTranscript(turns, maxPromptChars);
+	const prompt = buildPrompt({
+		transcript,
+		customInstructions: focusPrompt,
+	});
 
 	const project = session.project;
 	const date = formatDate(session.timestamp);
 
-	const systemParts = [
-		`You summarize coding agent sessions. Be concise but thorough.`,
-		`Use markdown headings for distinct topics.`,
-		`Focus on: key decisions, outcomes, what was built/fixed/configured,`,
-		`and important context someone continuing this work would need.`,
-	];
-	if (focusPrompt) {
-		systemParts.push(
-			`The user specifically wants you to focus on: ${focusPrompt}`,
-		);
-	}
-	const systemPrompt = systemParts.join(" ");
-
-	const userPrompt = [
-		`Project: ${project} | Date: ${date}`,
-		``,
-		`Summarize this session:`,
-		``,
-		text,
-	].join("\n");
+	const userPrompt = `Project: ${project} | Date: ${date}\n\n${prompt}`;
 
 	const response = await fetch(OPENROUTER_URL, {
 		method: "POST",
@@ -108,10 +110,10 @@ export async function summarizeSession(
 		body: JSON.stringify({
 			model: MODEL,
 			messages: [
-				{ role: "system", content: systemPrompt },
+				{ role: "system", content: INITIAL_PROMPT },
 				{ role: "user", content: userPrompt },
 			],
-			max_tokens: 4096,
+			max_tokens: SUMMARY_MAX_TOKENS,
 		}),
 	});
 
