@@ -5,11 +5,24 @@ import { fileURLToPath } from "node:url";
 import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
-// Resolve from real file location (not symlink) so ../compaction-engine works
-// when this file is symlinked into ~/.pi/agent/extensions/
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const engineDir = join(__dirname, "..", "compaction-engine");
+// Resolve engine from the real file location, not the symlink.
+// Pi loads extensions via symlink from ~/.pi/agent/extensions/ → repo,
+// so import.meta.url points at the symlink dir. readlinkSync gives us
+// the real path so ../compaction-engine resolves correctly.
+import { readlinkSync, existsSync } from "node:fs";
+
+function resolveEngineDir(importMetaUrl: string): string {
+  const filePath = fileURLToPath(importMetaUrl);
+  try {
+    const realPath = readlinkSync(filePath);
+    return join(dirname(realPath), "..", "compaction-engine");
+  } catch {
+    // Not a symlink — resolve relative to the file itself
+    return join(dirname(filePath), "..", "compaction-engine");
+  }
+}
+
+const engineDir = resolveEngineDir(import.meta.url);
 
 const compactionEngine = await import(engineDir);
 const {
