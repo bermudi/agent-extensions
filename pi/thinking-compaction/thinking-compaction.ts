@@ -8,9 +8,9 @@ const DEBUG_DIR = join(homedir(), ".pi", "logs", "thinking-compaction");
 
 const EXTENSION_NAME = "thinking-compaction";
 const SUMMARY_MODEL_CANDIDATES: Array<[string, string]> = [["google", "gemini-2.5-flash"]];
-// Safety valve: if the transcript exceeds this, drop middle turns rather than
-// slicing strings. The model gets full turns — not truncated fragments.
-const MAX_PROMPT_CHARS = 180_000;
+const SUMMARY_MAX_TOKENS = 8192;
+// Rough heuristic: 1 token ≈ 3.5 characters. Conservative to avoid overshooting.
+const CHARS_PER_TOKEN = 3.5;
 
 const INITIAL_PROMPT = `You are compacting an AI coding session for future continuation.
 
@@ -139,14 +139,17 @@ export default function (pi: ExtensionAPI) {
     if (allMessages.length === 0) return;
 
     const turns = groupIntoTurns(allMessages);
-    const transcript = buildTranscript(turns);
-    if (!transcript.trim()) return;
 
     const modelChoice = await resolveSummaryModel(ctx);
     if (!modelChoice) {
       ctx.ui.notify("Thinking compaction: no summary model available, falling back to default compaction", "warning");
       return;
     }
+
+    const systemPrompt = previousSummary ? UPDATE_PROMPT : INITIAL_PROMPT;
+    const maxPromptChars = computeCharBudget(modelChoice.model.contextWindow as number | undefined, SUMMARY_MAX_TOKENS, systemPrompt);
+    const transcript = buildTranscript(turns, maxPromptChars);
+    if (!transcript.trim()) return;
 
     const prompt = buildPrompt({
       transcript,
@@ -196,7 +199,7 @@ export default function (pi: ExtensionAPI) {
         {
           apiKey: modelChoice.auth.apiKey,
           headers: modelChoice.auth.headers,
-          maxTokens: 8192,
+          maxTokens: SUMMARY_MAX_TOKENS,
           signal,
         },
       );
@@ -530,14 +533,22 @@ function pickInterestingLines(text: string, maxLines: number) {
 
 // ── Transcript building ───────────────────────────────────────────────
 
-function buildTranscript(turns: Turn[]): string {
+function computeCharBudget(contextWindow: number | undefined, maxOutputTokens: number, systemPrompt: string) {
+  // Fallback to 128k tokens if contextWindow is unknown — conservative default.
+  const cw = contextWindow ?? 128_000;
+  const systemPromptTokens = Math.ceil(systemPrompt.length / CHARS_PER_TOKEN);
+  const availableTokens = cw - maxOutputTokens - systemPromptTokens;
+  return Math.floor(availableTokens * CHARS_PER_TOKEN);
+}
+
+function buildTranscript(turns: Turn[], maxChars: number): string {
   const formatted = turns.map(formatTurn);
   // If the full transcript fits, send it all — the model decides what matters.
   const full = formatted.join("\n\n");
-  if (full.length <= MAX_PROMPT_CHARS) return full;
+  if (full.length <= maxChars) return full;
 
   // Otherwise drop middle turns — keep the first (context) and last (recent).
-  const charBudget = MAX_PROMPT_CHARS;
+  const charBudget = maxChars;
   const firstTurn = formatted[0];
   const firstLen = firstTurn?.length ?? 0;
 
