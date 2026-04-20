@@ -22,6 +22,8 @@ Your highest priority is preserving the assistant's working mind:
 - why it changed direction
 - what mental model it built
 
+User messages may contain crucial details — requirements, constraints, preferences, or corrections buried in casual conversation. You SHOULD attempt to preserve as much of that content as possible without sacrificing the compression of other low-value material.
+
 Low-value information to aggressively compress or omit unless essential:
 - raw file contents from read tool calls
 - repetitive tool call lists
@@ -82,6 +84,7 @@ Rules:
 - Remove stale "Next Steps" items if they are already done.
 - Preserve exact file paths, function names, identifiers, branch names, and important error messages.
 - Do not bloat the summary with raw tool output or repetitive tool listings.
+- User messages often contain the most important context (requirements, constraints, corrections). Never sacrifice user-stated details for the sake of brevity.
 
 Use this EXACT format:
 
