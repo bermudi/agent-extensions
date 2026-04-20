@@ -170,13 +170,6 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.registerCommand("compact", {
-    description: "Compact context with optional focus instructions",
-    handler: async (args, ctx) => {
-      const focus = args?.trim();
-      ctx.compact(focus ? { customInstructions: focus } : undefined);
-    },
-  });
 }
 
 // ── Model resolution ──────────────────────────────────────────────────
