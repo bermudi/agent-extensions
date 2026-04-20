@@ -30,13 +30,14 @@
     ]
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.1"
+    "better-sqlite3": "^11.10.0"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*"
   },
   "scripts": {
+    "bundle": "esbuild extensions/index.ts --bundle --platform=node --format=esm --target=esnext --outfile=extensions/index.bundle.mjs --external:@mariozechner/pi-coding-agent --external:@mariozechner/pi-tui --alias:better-sqlite3=./node_modules/better-sqlite3/lib/index.js",
     "publish:pi": "bash ./scripts/publish.sh"
   },
   "devDependencies": {
