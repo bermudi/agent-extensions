@@ -1,11 +1,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 
 // Resolve from real file location (not symlink) so ../compaction-engine works
 // when this file is symlinked into ~/.pi/agent/extensions/
