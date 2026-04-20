@@ -8,7 +8,6 @@ const DEBUG_DIR = join(homedir(), ".pi", "logs", "thinking-compaction");
 
 const EXTENSION_NAME = "thinking-compaction";
 const SUMMARY_MODEL_CANDIDATES: Array<[string, string]> = [["google", "gemini-2.5-flash"]];
-const SUMMARY_MAX_TOKENS = 8192;
 // Rough heuristic: 1 token ≈ 3.5 characters. Conservative to avoid overshooting.
 const CHARS_PER_TOKEN = 3.5;
 
@@ -147,7 +146,8 @@ export default function (pi: ExtensionAPI) {
     }
 
     const systemPrompt = previousSummary ? UPDATE_PROMPT : INITIAL_PROMPT;
-    const maxPromptChars = computeCharBudget(modelChoice.model.contextWindow as number | undefined, SUMMARY_MAX_TOKENS, systemPrompt);
+    const summaryMaxTokens = (modelChoice.model.maxTokens as number) ?? 8192;
+    const maxPromptChars = computeCharBudget(modelChoice.model.contextWindow as number | undefined, summaryMaxTokens, systemPrompt);
     const transcript = buildTranscript(turns, maxPromptChars);
     if (!transcript.trim()) return;
 
@@ -199,7 +199,7 @@ export default function (pi: ExtensionAPI) {
         {
           apiKey: modelChoice.auth.apiKey,
           headers: modelChoice.auth.headers,
-          maxTokens: SUMMARY_MAX_TOKENS,
+          maxTokens: summaryMaxTokens,
           signal,
         },
       );
