@@ -8,7 +8,7 @@ const DEBUG_DIR = join(homedir(), ".pi", "logs", "thinking-compaction");
 
 const EXTENSION_NAME = "thinking-compaction";
 const SUMMARY_MODEL_CANDIDATES: Array<[string, string]> = [["google", "gemini-2.5-flash"]];
-const SUMMARY_MAX_TOKENS = 8192;
+const SUMMARY_MAX_TOKENS = 16384;
 // Rough heuristic: 1 token ≈ 3.5 characters. Conservative to avoid overshooting.
 const CHARS_PER_TOKEN = 3.5;
 
