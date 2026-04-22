@@ -245,11 +245,6 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 		}
 	}
 
-	pi.registerShortcut("ctrl+f", {
-		description: "Search sessions",
-		handler: (ctx) => openSearch(ctx as ExtensionContext),
-	});
-
 	pi.registerCommand("search", {
 		description: "Full-text search across all pi sessions",
 		handler: async (args, ctx) => {
