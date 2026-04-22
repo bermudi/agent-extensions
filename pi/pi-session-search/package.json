@@ -26,7 +26,7 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions/index.ts"
+      "./extensions/pi-session-search.ts"
     ]
   },
   "dependencies": {
