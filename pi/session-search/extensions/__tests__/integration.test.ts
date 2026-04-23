@@ -1,5 +1,5 @@
 /**
- * Integration tests for pi-session-search extension.
+ * Integration tests for session-search extension.
  *
  * Uses @marcfargas/pi-test-harness to load the extension into a real pi
  * session, verifying tool/command registration, tool execution, parameter
@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { createTestSession, when, calls, says } from "@marcfargas/pi-test-harness";
 import { Type, Static } from "@sinclair/typebox";
 
-const EXTENSION = resolve(import.meta.dirname, "..", "pi-session-search.ts");
+const EXTENSION = resolve(import.meta.dirname, "..", "session-search.ts");
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ function getExtension(ts: TestSession) {
   const runner = ts.session.extensionRunner;
   if (!runner) throw new Error("No extensionRunner on session");
   return runner.extensions.find((e: any) =>
-    e.path.includes("pi-session-search")
+    e.path.includes("session-search")
   );
 }
 
@@ -115,7 +115,7 @@ async function createFakeSession(
 
 // ─── Test Suite ────────────────────────────────────────────────────
 
-describe("pi-session-search extension", () => {
+describe("session-search extension", () => {
   let ts: TestSession | undefined;
 
   afterEach(() => {

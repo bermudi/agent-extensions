@@ -1,8 +1,8 @@
 /**
- * pi-session-search — Full-text search across all pi sessions.
+ * session-search — Full-text search across all pi sessions.
  *
  * Merges session-reference agent tools (session_search, session_read, session_list)
- * with pi-session-search's SQLite FTS5 index, TUI overlay, and summarizer.
+ * with SQLite FTS5 index, TUI overlay, and summarizer.
  *
  * Agent tools use FTS5 as a fast pre-filter when the index is ready, then load
  * actual session files and run rich scoring / snippet extraction. Falls back to
