@@ -1,65 +1,72 @@
-# Fork of: 
-# @kaiserlich-dev/pi-session-search
+# session-search
 
-Full-text search across all sessions with a SQLite FTS5 index and overlay UI.
+Full-text search across all pi sessions — for agents and humans.
+
+Merges the best of [session-reference](https://github.com/bermudi/agent-extensions) (branch-aware tree parsing, field-weighted scoring, path security, agent tools) with a SQLite FTS5 index, TUI overlay, and LLM summarizer.
 
 ## Install
 
-### npm (recommended)
-
 ```bash
-pi install npm:@kaiserlich-dev/pi-session-search
+pi install /path/to/session-search
 ```
 
-### git (alternative)
+Or add to `~/.pi/agent/settings.json`:
 
-```bash
-pi install git:github.com/kaiserlich-dev/pi-session-search
+```json
+{
+  "packages": [
+    "/path/to/session-search"
+  ]
+}
 ```
-
-> By default this writes to `~/.pi/agent/settings.json`. Use `-l` to install into `.pi/settings.json` for a project.
 
 Then restart pi or run `/reload`.
 
 ## Features
 
-- **FTS5 index** — indexes user messages, assistant responses, tool results, and session metadata. Sub-100ms queries regardless of session count.
-- **Browse recent sessions** — opening search shows your most recent sessions immediately, no typing required.
-- **Incremental indexing** — only processes new/changed sessions. Runs async in background on startup with cooperative yielding.
-- **Overlay search palette** — theme-aware UI matching pi-skill-picker / pi-queue-picker style.
-- **Preview** — see matched snippets with highlighted search terms before deciding.
-- **Resume** — switch to a found session directly from the preview.
-- **Summarize & inject** — ask the LLM to read the full session and inject a summary into your current context.
-- **Custom focus prompt** — optionally provide a focus (e.g. "focus on the auth decisions") before summarizing, so the summary targets what you care about.
-- **New session with context** — start a fresh session with summarized context from a previous one.
-- **Smart project names** — resolves `~/code/owner/repo` paths into readable `owner/repo` project labels.
+### Agent tools
 
-## Usage
+The extension registers three tools the LLM can call directly:
 
-| Shortcut / Command | Action |
+| Tool | Description |
 |---|---|
-| `Ctrl+F` | Open search overlay |
-| `/search` | Open search overlay |
-| `/search resume <sessionPath>` | Resume a specific session by file path |
-| `/search reindex` | Clear and rebuild index from scratch |
+| `session_search` | Search sessions by keyword, partial UUID, date, CWD, or transcript content. Returns ranked matches with snippets and `entry_id` for branch anchoring. |
+| `session_read` | Read a session's conversation. Follows branch trees via `parentId`. Optionally anchor to a specific entry from search results. |
+| `session_list` | List recent sessions, optionally filtered by project path. |
+
+`session_search` uses FTS5 as a fast pre-filter when the index is ready, then loads actual session files and runs field-weighted scoring (`id > name > content > cwd > tool_result`). Falls back to full file scan when the index is cold.
+
+`session_read` validates paths through `realpath` + `isPathWithinDir` — no traversal attacks.
+
+### Human commands
+
+| Command | Action |
+|---|---|
+| `/search` | Open TUI search overlay |
+| `/search resume <path>` | Resume a session by file path |
+| `/search reindex` | Rebuild FTS5 index from scratch |
 | `/search stats` | Show index statistics |
+| `/sessions` | Browse recent sessions in a picker |
+
+### Other features
+
+- **FTS5 index** — SQLite FTS5 with Porter stemming. Sub-100ms queries. Incremental indexing on startup.
+- **Branch awareness** — understands pi's `parentId` tree. Reads the correct conversation branch, not a flat concatenation.
+- **Preview & actions** — overlay shows matched snippets, then Resume / Summarize / New + Context.
+- **LLM summarization** — summarize a past session into your current context with optional focus prompt.
+- **Path security** — `realpath` + traversal guards on all agent-facing file reads.
+- **TypeBox schemas** — all tool parameters validated at runtime.
+
+## Keyboard shortcuts (TUI overlay)
 
 ### Search screen
 
 | Key | Action |
 |---|---|
 | Type | Search query (debounced) |
-| `←` / `→` | Move cursor within query |
-| `Home` / `Ctrl+A` | Jump to start of query |
-| `End` / `Ctrl+E` | Jump to end of query |
-| `Delete` | Delete character after cursor |
-| `Ctrl+W` / `Alt+Backspace` | Delete word before cursor |
-| Paste | Insert clipboard text at cursor |
 | `↑` / `↓` | Navigate results |
-| `Enter` | Open preview for selected result |
+| `Enter` | Open preview |
 | `Esc` | Close |
-
-When opened with an empty query, recent sessions are shown (most recent first).
 
 ### Preview screen
 
@@ -69,30 +76,39 @@ When opened with an empty query, recent sessions are shown (most recent first).
 | `Enter` | Execute selected action |
 | `Esc` | Back to search |
 
-### Summary Focus screen
-
-When choosing **Summarize** or **New + Context**, a prompt screen appears:
+### Focus prompt
 
 | Key | Action |
 |---|---|
-| `Enter` | Use default summary (no custom focus) |
+| `Enter` | Summarize with default focus |
 | Type + `Enter` | Summarize with custom focus prompt |
 | `Esc` | Back to preview |
 
-The custom focus is passed to the LLM alongside the session content, steering the summary toward what matters to you.
+## Architecture
 
-## How it works
+```
+extensions/
+  session-search.ts       ← main entry (tools, commands, hooks, renderer)
+  session-utils.ts        ← pure domain logic (types, tree parsing, scoring, security)
+  indexer.ts              ← SQLite FTS5 engine (incremental indexing, WAL mode)
+  summarizer.ts           ← LLM-powered session summarization
+  jsonl-parser.ts         ← JSONL parser for compaction engine
+  resume.ts               ← /search resume argument parser
+  types.ts                ← TUI types
+  component.ts            ← TUI overlay component
+  screens/                ← TUI screens (search, preview, prompt-input)
+```
 
-1. On `session_start`, the indexer scans `~/.pi/agent/sessions/` for JSONL files.
-2. Files with a newer `mtime` than last indexed are parsed — user messages, assistant text (no thinking blocks), and tool results are extracted.
-3. Text is chunked into ~4KB segments and inserted into a SQLite FTS5 table with Porter stemming.
-4. Searches use FTS5 `MATCH` with BM25 ranking, deduplicated per session at the SQL level.
-5. The index lives at `~/.pi-session-search/index.db` (~5–10MB for hundreds of sessions).
-6. Summaries are generated via OpenRouter (Gemini Flash) and injected as assistant messages.
+- `session-utils.ts` has zero `fs`/`Database`/extension API imports — pure functions, fully testable.
+- Agent tools use FTS5 as a pre-filter, then enrich with branch-aware `SessionSummary` data.
+- The TUI overlay uses `SearchResult` from the FTS5 indexer (different type, different code path).
 
 ## Development
 
 ```bash
-# Run locally without installing
-pi -e ./extensions/index.ts
+# Run tests
+cd pi/session-search && bun test
+
+# Run locally
+pi -e ./extensions/session-search.ts
 ```
