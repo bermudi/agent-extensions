@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
+import type { SearchField } from "./session-utils.js";
 
 const INDEX_DIR = path.join(os.homedir(), ".pi-session-search");
 const DB_PATH = path.join(INDEX_DIR, "index.db");
@@ -21,6 +22,12 @@ export interface SearchResult {
 	snippet: string;
 	rank: number;
 	title: string | null;
+	/** Best-effort field attribution — FTS5 indexes all content together. */
+	field: SearchField;
+	/** Higher-is-better score derived from FTS5 rank. */
+	score: number;
+	/** Not available from FTS5 — populated by rich matching when needed. */
+	entryId?: string;
 }
 
 export interface IndexStats {
@@ -74,17 +81,14 @@ export function closeDb(): void {
 }
 
 /**
- * Cache for ~/code/ directory listings: owner → Set<repo>.
+ * Default code-dir resolver for projectFromDir.
  * Populated once per indexing run for greedy path resolution.
  */
-let _codeDirs: Map<string, Set<string>> | null = null;
-
-function getCodeDirs(): Map<string, Set<string>> {
-	if (_codeDirs) return _codeDirs;
-	_codeDirs = new Map();
+function getDefaultCodeDirs(): Map<string, Set<string>> {
+	const codeDirs = new Map<string, Set<string>>();
 
 	const codeDir = path.join(os.homedir(), "code");
-	if (!fs.existsSync(codeDir)) return _codeDirs;
+	if (!fs.existsSync(codeDir)) return codeDirs;
 
 	try {
 		for (const owner of fs.readdirSync(codeDir)) {
@@ -103,16 +107,11 @@ function getCodeDirs(): Map<string, Set<string>> {
 					} catch { /* skip */ }
 				}
 			} catch { /* skip */ }
-			_codeDirs.set(owner, repos);
+			codeDirs.set(owner, repos);
 		}
 	} catch { /* code dir inaccessible */ }
 
-	return _codeDirs;
-}
-
-/** Reset the code dirs cache (call between indexing runs if needed). */
-function resetCodeDirsCache(): void {
-	_codeDirs = null;
+	return codeDirs;
 }
 
 /**
@@ -124,8 +123,13 @@ function resetCodeDirsCache(): void {
  *
  * Since path components can also contain hyphens, we resolve ambiguity
  * by checking actual directories under ~/code/ (greedy longest-match).
+ *
+ * @param getCodeDirs — injectable resolver for testability.
  */
-export function projectFromDir(dirName: string): string {
+export function projectFromDir(
+	dirName: string,
+	getCodeDirs?: () => Map<string, Set<string>>,
+): string {
 	// Strip leading/trailing --
 	const encoded = dirName.replace(/^--/, "").replace(/--$/, "");
 	if (!encoded) return "unknown";
@@ -148,7 +152,7 @@ export function projectFromDir(dirName: string): string {
 	if (!remaining) return "~/code";
 
 	// Greedily resolve against actual filesystem directories
-	const codeDirs = getCodeDirs();
+	const codeDirs = getCodeDirs ? getCodeDirs() : getDefaultCodeDirs();
 	const segments = remaining.split("-");
 
 	// Try to find the owner (may contain hyphens) — longest match wins
@@ -410,8 +414,9 @@ export async function updateIndex(onProgress?: (msg: string) => void): Promise<n
 	const files = findSessionFiles(sessionsDir);
 	const db = getDb();
 
-	// Refresh code dirs cache for accurate project resolution
-	resetCodeDirsCache();
+	// Cache code dirs once per indexing run for efficient project resolution
+	const codeDirs = getDefaultCodeDirs();
+	const getCodeDirsCached = () => codeDirs;
 
 	// Get currently indexed sessions with their mtimes
 	const indexed = new Map<string, number>();
@@ -498,7 +503,7 @@ export async function updateIndex(onProgress?: (msg: string) => void): Promise<n
 				if (!item) continue;
 
 				const { file, mtime, chunks, firstUserMessage } = item;
-				const project = projectFromDir(file.dirName);
+				const project = projectFromDir(file.dirName, getCodeDirsCached);
 				const sessionTs = timestampFromFilename(file.filename);
 
 				deleteFts.run(file.path);
@@ -572,6 +577,11 @@ export function buildFtsQuery(tokens: string[]): string {
 		.join(" ");
 }
 
+/** Convert FTS5 rank (lower-is-better) to a session-reference score (higher-is-better). */
+function rankToScore(rank: number): number {
+	return Math.max(0, Math.round(750 - Math.abs(rank) * 50));
+}
+
 /** Search sessions. Returns deduplicated results ranked by relevance. */
 export function search(query: string, limit = 20): SearchResult[] {
 	const db = getDb();
@@ -624,6 +634,9 @@ export function search(query: string, limit = 20): SearchResult[] {
 		snippet: row.snippet ?? "",
 		rank: row.rank,
 		title: row.first_user_message,
+		// FTS5 indexes combined content; default to user_message as the most common field.
+		field: "user_message" as SearchField,
+		score: rankToScore(row.rank),
 	}));
 }
 
@@ -683,6 +696,8 @@ export function listRecent(limit = 20): SearchResult[] {
 		snippet: "",
 		rank: 0,
 		title: row.first_user_message,
+		field: "timestamp" as SearchField,
+		score: 0,
 	}));
 }
 

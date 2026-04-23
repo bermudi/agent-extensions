@@ -1,369 +1,781 @@
 /**
  * pi-session-search — Full-text search across all pi sessions.
  *
- * SQLite FTS5 index built incrementally on session_start.
- * Ctrl+F or /search opens an overlay palette to search, preview, resume, or
- * summarize past sessions into a new session.
+ * Merges session-reference agent tools (session_search, session_read, session_list)
+ * with pi-session-search's SQLite FTS5 index, TUI overlay, and summarizer.
+ *
+ * Agent tools use FTS5 as a fast pre-filter when the index is ready, then load
+ * actual session files and run rich scoring / snippet extraction. Falls back to
+ * full file scan when the index is cold.
  */
 
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+import { Text } from "@mariozechner/pi-tui";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	ExtensionCommandContext,
-} from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+
 import {
-	updateIndex,
-	rebuildIndex,
-	getStats,
-	closeDb,
-	type SearchResult,
+  buildSessionSummary,
+  clampPositiveInteger,
+  compareTimestampDesc,
+  findSessionMatch,
+  formatConversation,
+  hasEntryId,
+  isPathWithinDir,
+  isSameProjectPath,
+  parseSessionText,
+  type ParsedSession,
+  type SessionSummary,
+  type SessionMatch,
+  matchFieldLabel,
+  formatSessionDate,
+  formatSessionChoiceLabel,
+  filterByCwd,
+  searchSessions,
+} from "./session-utils";
+
+import {
+  updateIndex,
+  rebuildIndex,
+  getStats,
+  closeDb,
+  search as ftsSearch,
+  listRecent as ftsListRecent,
 } from "./indexer";
+
 import type { PaletteAction } from "./types";
 import { formatDate, shortenProject } from "./types";
 import { SessionSearchComponent } from "./component";
 import { summarizeSession } from "./summarizer";
 import { parseSearchResumePath, quoteCommandArg } from "./resume";
 
+const SESSIONS_DIR = join(homedir(), ".pi/agent/sessions");
+const MAX_SEARCH_RESULTS = 50;
+const MAX_LIST_RESULTS = 50;
+const MAX_READ_TURNS = 200;
+
+interface CachedSession {
+  mtimeMs: number;
+  size: number;
+  parsed: ParsedSession;
+  summary: SessionSummary;
+}
+
+const sessionCache = new Map<string, CachedSession>();
+
+async function getAllSessionFiles(): Promise<string[]> {
+  const dirs = await readdir(SESSIONS_DIR).catch(() => [] as string[]);
+  const files: string[] = [];
+
+  for (const dir of dirs) {
+    const dirPath = join(SESSIONS_DIR, dir);
+    try {
+      const entries = await readdir(dirPath);
+      for (const entry of entries) {
+        if (entry.endsWith(".jsonl")) {
+          files.push(join(dirPath, entry));
+        }
+      }
+    } catch {
+      // Ignore unreadable directories.
+    }
+  }
+
+  return files;
+}
+
+async function loadSession(filePath: string): Promise<CachedSession | null> {
+  let fileStat;
+  try {
+    fileStat = await stat(filePath);
+  } catch {
+    sessionCache.delete(filePath);
+    return null;
+  }
+
+  if (!fileStat.isFile()) return null;
+
+  const cached = sessionCache.get(filePath);
+  if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
+    return cached;
+  }
+
+  let data: string;
+  try {
+    data = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const parsed = parseSessionText(data);
+  if (!parsed) return null;
+
+  const next: CachedSession = {
+    mtimeMs: fileStat.mtimeMs,
+    size: fileStat.size,
+    parsed,
+    summary: buildSessionSummary(filePath, parsed),
+  };
+  sessionCache.set(filePath, next);
+  return next;
+}
+
+async function loadSessionSummaries(): Promise<SessionSummary[]> {
+  const files = await getAllSessionFiles();
+  const summaries: SessionSummary[] = [];
+
+  for (const file of files) {
+    const loaded = await loadSession(file);
+    if (loaded) summaries.push(loaded.summary);
+  }
+
+  summaries.sort(compareTimestampDesc);
+  return summaries;
+}
+
+async function resolveSessionFilePath(requestedFile: string): Promise<string> {
+  if (!requestedFile.endsWith(".jsonl")) {
+    throw new Error("Session files must end in .jsonl");
+  }
+
+  const resolvedSessionsDir = await realpath(SESSIONS_DIR).catch(() => SESSIONS_DIR);
+  const resolvedCandidate = resolve(requestedFile);
+  if (!isPathWithinDir(resolvedSessionsDir, resolvedCandidate)) {
+    throw new Error("Session file must live under ~/.pi/agent/sessions");
+  }
+
+  const realCandidate = await realpath(resolvedCandidate).catch(() => {
+    throw new Error("Session file not found");
+  });
+
+  if (!realCandidate.endsWith(".jsonl") || !isPathWithinDir(resolvedSessionsDir, realCandidate)) {
+    throw new Error("Refusing to read files outside ~/.pi/agent/sessions");
+  }
+
+  return realCandidate;
+}
+
 export default function sessionSearch(pi: ExtensionAPI): void {
-	let indexReady = false;
-	let indexing = false;
+  let indexReady = false;
+  let indexing = false;
 
-	// Persist pending context across extension reloads when /new is used.
-	const PENDING_DIR = path.join(os.homedir(), ".pi", "agent");
-	const PENDING_FILE = path.join(PENDING_DIR, ".session-search-pending.json");
+  // Persist pending context across extension reloads when /new is used.
+  const PENDING_DIR = path.join(os.homedir(), ".pi", "agent");
+  const PENDING_FILE = path.join(PENDING_DIR, ".session-search-pending.json");
 
-	async function ensureIndex(ctx?: ExtensionContext) {
-		if (indexing) return;
-		indexing = true;
+  async function ensureIndex(ctx?: ExtensionContext) {
+    if (indexing) return;
+    indexing = true;
 
-		try {
-			await updateIndex((msg) => {
-				ctx?.ui?.setStatus("session-search", `🔍 ${msg}`);
-			});
-			indexReady = true;
-		} catch {
-			// will retry on next search
-		} finally {
-			ctx?.ui?.setStatus("session-search", undefined);
-			indexing = false;
-		}
-	}
+    try {
+      await updateIndex((msg) => {
+        ctx?.ui?.setStatus("session-search", `🔍 ${msg}`);
+      });
+      indexReady = true;
+    } catch {
+      // will retry on next search
+    } finally {
+      ctx?.ui?.setStatus("session-search", undefined);
+      indexing = false;
+    }
+  }
 
-	pi.on("session_start", async (event, ctx) => {
-		setTimeout(() => ensureIndex(ctx), 100);
+  // ── Agent tools ─────────────────────────────────────────────────────
 
-		// Inject summary into newly created sessions that were queued via "New + Context".
-		// Cast needed because local dev types are older than the runtime API.
-		if ((event as any).reason !== "new") return;
+  pi.registerTool({
+    name: "session_search",
+    label: "Search Sessions",
+    description:
+      "Search past Pi sessions by keyword, partial UUID, cwd path, date, or transcript content. Returns ranked matches with snippets and file paths. Uses a fast full-text index when available.",
+    parameters: Type.Object({
+      query: Type.String({
+        description: "Search query: keyword, partial UUID, date, cwd path substring, or transcript text.",
+      }),
+      limit: Type.Optional(
+        Type.Number({
+          description: `Max results (default 10, max ${MAX_SEARCH_RESULTS})`,
+          default: 10,
+        }),
+      ),
+      cwd_filter: Type.Optional(
+        Type.String({
+          description: "Optional cwd path substring filter.",
+        }),
+      ),
+      search_tools: Type.Optional(
+        Type.Boolean({
+          description: "Also search tool-result text (default false).",
+          default: false,
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params) {
+      const query = params.query.trim();
+      if (!query) {
+        return {
+          content: [{ type: "text", text: "Query cannot be empty." }],
+          isError: true,
+          details: undefined,
+        };
+      }
 
-		try {
-			const raw = await fs.readFile(PENDING_FILE, "utf8");
-			const pending = JSON.parse(raw) as {
-				sessionPath: string;
-				project: string;
-				timestamp: string;
-				customPrompt?: string;
-				createdAt: number;
-			};
+      const limit = clampPositiveInteger(params.limit, 10, MAX_SEARCH_RESULTS);
+      let candidatePaths: string[];
 
-			// Ignore stale pending files (> 5 minutes)
-			if (Date.now() - pending.createdAt > 5 * 60 * 1000) {
-				await fs.unlink(PENDING_FILE).catch(() => {});
-				return;
-			}
+      if (indexReady) {
+        // Fast path: FTS5 pre-filter. Ask for extra candidates because some may
+        // drop out during rich scoring (e.g. tool-only matches when search_tools=false).
+        const ftsResults = ftsSearch(query, limit * 5);
+        candidatePaths = ftsResults.map((r) => r.sessionPath);
+      } else {
+        candidatePaths = await getAllSessionFiles();
+      }
 
-			await fs.unlink(PENDING_FILE).catch(() => {});
+      // Enrich candidates into SessionSummary objects (cached reads)
+      const summaries: SessionSummary[] = [];
+      for (const file of candidatePaths) {
+        const loaded = await loadSession(file);
+        if (loaded) summaries.push(loaded.summary);
+      }
 
-			const session = {
-				sessionPath: pending.sessionPath,
-				project: pending.project,
-				timestamp: pending.timestamp,
-			};
+      const hits = searchSessions(summaries, query, {
+        cwdFilter: params.cwd_filter,
+        limit,
+        searchTools: params.search_tools ?? false,
+      });
 
-			const project = shortenProject(session.project, 40);
-			ctx.ui.setStatus(
-				"session-search",
-				`🔍 Summarizing ${project}...`,
-			);
+      if (hits.length === 0) {
+        const scopeText = params.cwd_filter ? ` within cwd matching "${params.cwd_filter}"` : "";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No sessions found matching "${query}"${scopeText}. Try a different keyword, a partial UUID, or enable search_tools for tool output.`,
+            },
+          ],
+          details: undefined,
+        };
+      }
 
-			try {
-				const summary = await summarizeSession(session, ctx, pending.customPrompt);
+      const text = hits
+        .map(({ summary, match }, index) => {
+          const label = summary.name || summary.firstUserMessage || "(unnamed)";
+          const lines = [
+            `## ${index + 1}. ${label}`,
+            `- **Date:** ${formatSessionDate(summary.timestamp)}`,
+            `- **CWD:** ${summary.cwd}`,
+            `- **UUID:** ${summary.id}`,
+            `- **File:** ${summary.file}`,
+            `- **First message:** ${summary.firstUserMessage || "(empty)"}`,
+            `- **Match:** ${matchFieldLabel(match.field)} — ${match.snippet}`,
+          ];
+          if (match.entryId) {
+            lines.push(`- **Entry ID:** ${match.entryId}`);
+          }
+          return lines.join("\n");
+        })
+        .join("\n\n");
 
-				pi.sendMessage(
-					{
-						customType: "session-search-context",
-						content:
-							`## Session Summary: ${session.project}\n` +
-							`**Date:** ${formatDate(session.timestamp)} | **File:** ${session.sessionPath}\n\n` +
-							summary,
-						display: true,
-					},
-					{ triggerTurn: false },
-				);
-			} catch {
-				// Fallback: ask the LLM to read the file directly
-				pi.sendMessage(
-					{
-						customType: "session-search-context",
-						content:
-							`Summary failed. Please read this session file and summarize:\n` +
-							`- **Project:** ${session.project}\n` +
-							`- **Date:** ${formatDate(session.timestamp)}\n` +
-							`- **Session file:** ${session.sessionPath}`,
-						display: true,
-					},
-					{ triggerTurn: true },
-				);
-			} finally {
-				ctx.ui.setStatus("session-search", undefined);
-			}
-		} catch {
-			// No pending context file — normal new session
-		}
-	});
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Found ${hits.length} session(s):\n\n${text}\n\n` +
+              "Use session_read with the file path to read the matching session. If a result includes Entry ID, pass it as entry_id to read the matching branch.",
+          },
+        ],
+        details: undefined,
+      };
+    },
+  });
 
-	pi.on("session_shutdown", async () => {
-		closeDb();
-	});
+  pi.registerTool({
+    name: "session_read",
+    label: "Read Session",
+    description:
+      "Read the conversation from a past Pi session file. Provide the session file path from session_search or session_list. Optionally pass entry_id to read the branch containing a specific matched entry.",
+    parameters: Type.Object({
+      file: Type.String({
+        description: "Absolute path to the session .jsonl file",
+      }),
+      entry_id: Type.Optional(
+        Type.String({
+          description: "Optional entry ID from session_search. Reads the branch anchored at that matching entry.",
+        }),
+      ),
+      max_turns: Type.Optional(
+        Type.Number({
+          description: `Max user turns (default 50, max ${MAX_READ_TURNS})`,
+          default: 50,
+        }),
+      ),
+      include_tools: Type.Optional(
+        Type.Boolean({
+          description: "Include tool calls and results (default false)",
+          default: false,
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params) {
+      let filePath: string;
+      try {
+        filePath = await resolveSessionFilePath(params.file);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Unknown error";
+        return {
+          content: [{ type: "text", text: `Failed to resolve session file: ${message}` }],
+          isError: true,
+          details: undefined,
+        };
+      }
 
-	// ── Open search overlay ───────────────────────────────────────────
+      const loaded = await loadSession(filePath);
+      if (!loaded) {
+        return {
+          content: [{ type: "text", text: "Failed to parse session file." }],
+          isError: true,
+          details: undefined,
+        };
+      }
 
-	async function openSearch(ctx: ExtensionContext) {
-		if (!indexReady && !indexing) {
-			ctx.ui.setStatus("session-search", "🔍 Building index...");
-			await ensureIndex(ctx);
-		}
+      if (params.entry_id && !hasEntryId(loaded.parsed, params.entry_id)) {
+        return {
+          content: [{ type: "text", text: `Entry ID ${params.entry_id} was not found in that session.` }],
+          isError: true,
+          details: undefined,
+        };
+      }
 
-		const action = await ctx.ui.custom<PaletteAction>(
-			(tui, theme, _kb, done) =>
-				new SessionSearchComponent(done, tui, theme),
-			{
-				overlay: true,
-				overlayOptions: {
-					anchor: "center" as any,
-					width: 84,
-				},
-			},
-		);
+      const maxTurns = clampPositiveInteger(params.max_turns, 50, MAX_READ_TURNS);
+      const conversation = formatConversation(loaded.parsed, {
+        includeTools: params.include_tools ?? false,
+        maxTurns,
+        entryId: params.entry_id,
+      });
 
-		if (action.type === "cancel") return;
+      const headerInfo = [
+        `Session ${loaded.summary.id}`,
+        `CWD: ${loaded.summary.cwd}`,
+        `Created: ${formatSessionDate(loaded.summary.timestamp)}`,
+        conversation.leafEntryId ? `Branch leaf: ${conversation.leafEntryId}` : undefined,
+      ]
+        .filter((part): part is string => typeof part === "string" && part.length > 0)
+        .join(" | ");
 
-		if (action.type === "resume") {
-			const sessionPath = action.session.sessionPath;
-			const project = shortenProject(action.session.project, 40);
+      if (!conversation.text.trim()) {
+        return {
+          content: [{ type: "text", text: `${headerInfo}\n\n(No conversation messages found on that branch.)` }],
+          details: undefined,
+        };
+      }
 
-			const commandCtx = ctx as ExtensionContext &
-				Partial<ExtensionCommandContext>;
-			if (typeof commandCtx.switchSession === "function") {
-				try {
-					const result = await commandCtx.switchSession(sessionPath);
-					if (!result.cancelled) {
-						ctx.ui.notify(`Resumed ${project}`, "info");
-					}
-				} catch (err) {
-					ctx.ui.notify(`Resume failed: ${err}`, "error");
-				}
-				return;
-			}
+      return {
+        content: [{ type: "text", text: `${headerInfo}\n\n---\n${conversation.text}` }],
+        details: undefined,
+      };
+    },
+  });
 
-			ctx.ui.setEditorText(`/search resume ${quoteCommandArg(sessionPath)}`);
-			ctx.ui.notify(
-				`${project} — press Enter to resume this session`,
-				"info",
-			);
-			return;
-		}
+  pi.registerTool({
+    name: "session_list",
+    label: "List Recent Sessions",
+    description:
+      "List recent Pi sessions, optionally filtered by project path. Returns session metadata sorted by timestamp. Uses the full-text index when available.",
+    parameters: Type.Object({
+      cwd_filter: Type.Optional(
+        Type.String({
+          description: "Filter by project path substring",
+        }),
+      ),
+      limit: Type.Optional(
+        Type.Number({
+          description: `Max results (default 20, max ${MAX_LIST_RESULTS})`,
+          default: 20,
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params) {
+      const limit = clampPositiveInteger(params.limit, 20, MAX_LIST_RESULTS);
+      let summaries: SessionSummary[];
 
-		if (action.type === "summarize") {
-			const project = shortenProject(action.session.project, 40);
-			ctx.ui.setStatus(
-				"session-search",
-				`🔍 Summarizing ${project}...`,
-			);
-			ctx.ui.notify(
-				`Summarizing ${project}...`,
-				"info",
-			);
+      if (indexReady) {
+        const recent = ftsListRecent(limit * 2);
+        const loaded = await Promise.all(recent.map((r) => loadSession(r.sessionPath)));
+        summaries = loaded
+          .filter((c): c is CachedSession => c !== null)
+          .map((c) => c.summary)
+          .sort(compareTimestampDesc)
+          .slice(0, limit);
+      } else {
+        summaries = await loadSessionSummaries();
+      }
 
-			try {
-				const summary = await summarizeSession(
-					action.session,
-					ctx,
-					action.customPrompt,
-				);
+      summaries = filterByCwd(summaries, params.cwd_filter).slice(0, limit);
 
-				pi.sendMessage(
-					{
-						customType: "session-search-context",
-						content:
-							`## Session Summary: ${action.session.project}\n` +
-							`**Date:** ${formatDate(action.session.timestamp)} | **File:** ${action.session.sessionPath}\n\n` +
-							summary,
-						display: true,
-					},
-					{ triggerTurn: false, deliverAs: "followUp" },
-				);
+      if (summaries.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: params.cwd_filter
+                ? `No sessions found for project matching "${params.cwd_filter}".`
+                : "No sessions found.",
+            },
+          ],
+          details: undefined,
+        };
+      }
 
-				ctx.ui.notify(`Summary injected from ${project}`, "info");
-			} catch (err) {
-				ctx.ui.notify(`Summary failed: ${err}`, "error");
-			} finally {
-				ctx.ui.setStatus("session-search", undefined);
-			}
-			return;
-		}
+      const text = summaries
+        .map((summary, index) => {
+          const label = summary.name || summary.firstUserMessage.slice(0, 80) || "(empty)";
+          return [
+            `${index + 1}. **${label}** — ${formatSessionDate(summary.timestamp)}`,
+            `   CWD: ${summary.cwd}`,
+            `   UUID: ${summary.id}`,
+            `   File: ${summary.file}`,
+          ].join("\n");
+        })
+        .join("\n\n");
 
-		if (action.type === "newSession") {
-			const project = shortenProject(action.session.project, 40);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `**${summaries.length} session(s):**\n\n${text}\n\nUse session_read with the file path to read a session's conversation.`,
+          },
+        ],
+        details: undefined,
+      };
+    },
+  });
 
-			// Persist to disk so we survive the extension reload on /new.
-			// session_start will pick this up in the new session.
-			await fs.mkdir(PENDING_DIR, { recursive: true });
-			await fs.writeFile(
-				PENDING_FILE,
-				JSON.stringify({
-					sessionPath: action.session.sessionPath,
-					project: action.session.project,
-					timestamp: action.session.timestamp,
-					customPrompt: action.customPrompt,
-					createdAt: Date.now(),
-				}),
-				"utf8",
-			);
+  // ── /sessions command ───────────────────────────────────────────────
 
-			// Pre-fill /new and tell the user to press Enter
-			ctx.ui.setEditorText(`/new`);
-			ctx.ui.notify(
-				`${project} — press Enter to start new session with context`,
-				"info",
-			);
-			return;
-		}
-	}
+  pi.registerCommand("sessions", {
+    description: "Browse and list past sessions",
+    handler: async (args, ctx) => {
+      const summaries = await loadSessionSummaries();
+      if (summaries.length === 0) {
+        ctx.ui.notify("No sessions found.", "info");
+        return;
+      }
 
-	pi.registerCommand("search", {
-		description: "Full-text search across all pi sessions",
-		handler: async (args, ctx) => {
-			const trimmedArgs = args?.trim() ?? "";
-			const resumePath = parseSearchResumePath(trimmedArgs);
+      const limit = clampPositiveInteger(args ? Number.parseInt(args, 10) : undefined, 20, MAX_LIST_RESULTS);
+      const sameProject = summaries.filter((summary) => isSameProjectPath(summary.cwd, ctx.cwd));
+      const hits = (sameProject.length > 0 ? sameProject : summaries).slice(0, limit);
 
-			if (resumePath !== null) {
-				if (!resumePath) {
-					ctx.ui.notify("Usage: /search resume <sessionPath>", "warning");
-					return;
-				}
+      if (hits.length === 0) {
+        ctx.ui.notify("No sessions found for this project.", "info");
+        return;
+      }
 
-				try {
-					const result = await ctx.switchSession(resumePath);
-					if (!result.cancelled) {
-						ctx.ui.notify(`Resumed: ${resumePath}`, "info");
-					}
-				} catch (err) {
-					ctx.ui.notify(`Resume failed: ${err}`, "error");
-				}
-				return;
-			}
+      const labelToFile = new Map<string, string>();
+      const items = hits.map((summary) => {
+        const label = formatSessionChoiceLabel(summary);
+        labelToFile.set(label, summary.file);
+        return label;
+      });
 
-			if (trimmedArgs === "reindex") {
-				ctx.ui.notify("Rebuilding index from scratch...", "info");
-				indexReady = false;
-				try {
-					const count = await rebuildIndex((msg) =>
-						ctx.ui.notify(msg, "info"),
-					);
-					indexReady = true;
-					ctx.ui.notify(`Rebuilt index: ${count} sessions`, "info");
-				} catch (err) {
-					ctx.ui.notify(`Reindex failed: ${err}`, "error");
-				}
-				return;
-			}
+      const choice = await ctx.ui.select("Sessions:", items);
+      const file = choice ? labelToFile.get(choice) : undefined;
+      if (file) {
+        await ctx.switchSession(file);
+      }
+    },
+  });
 
-			if (trimmedArgs === "stats") {
-				try {
-					const stats = getStats();
-					ctx.ui.notify(
-						`Sessions: ${stats.totalSessions} | Chunks: ${stats.totalChunks} | Updated: ${stats.lastUpdated ?? "never"}`,
-						"info",
-					);
-				} catch (err) {
-					ctx.ui.notify(`Stats failed: ${err}`, "error");
-				}
-				return;
-			}
+  // ── Hooks ───────────────────────────────────────────────────────────
 
-			await openSearch(ctx as ExtensionContext);
-		},
-	});
+  pi.on("session_start", async (event, ctx) => {
+    // Build index in the background without binding ctx — the old ctx becomes
+    // stale if the session is replaced or reloaded before the timer fires.
+    setTimeout(() => ensureIndex(), 100);
 
-	pi.registerMessageRenderer(
-		"session-search-context",
-		(message, options, theme) => {
-			const rawContent =
-				typeof message.content === "string"
-					? message.content
-					: Array.isArray(message.content)
-						? (message.content as any[])
-								.map((c: any) =>
-									c.type === "text" ? c.text || "" : "",
-								)
-								.join("")
-						: "";
+    // Inject summary into newly created sessions that were queued via "New + Context".
+    if ((event as any).reason !== "new") return;
 
-			// Parse from "## Session Summary: project" or "**Project:** project" format
-			const summaryMatch = rawContent.match(
-				/Session Summary:\s*(.+)/,
-			);
-			const projectMatch = rawContent.match(
-				/\*\*Project:\*\*\s*(.+)/,
-			);
-			const dateMatch = rawContent.match(
-				/\*\*Date:\*\*\s*([^|*]+)/,
-			);
-			const project =
-				summaryMatch?.[1]?.trim() ||
-				projectMatch?.[1]?.trim() ||
-				"session";
-			const date = dateMatch?.[1]?.trim() || "";
+    try {
+      const raw = await fs.readFile(PENDING_FILE, "utf8");
+      const pending = JSON.parse(raw) as {
+        sessionPath: string;
+        project: string;
+        timestamp: string;
+        customPrompt?: string;
+        createdAt: number;
+      };
 
-			if (options.expanded) {
-				const lines: string[] = [];
-				lines.push(
-					theme.fg("accent", "🔍 ") +
-						theme.fg(
-							"customMessageLabel",
-							theme.bold("Session context: "),
-						) +
-						theme.fg("accent", project) +
-						(date ? theme.fg("muted", ` (${date})`) : ""),
-				);
+      // Ignore stale pending files (> 5 minutes)
+      if (Date.now() - pending.createdAt > 5 * 60 * 1000) {
+        await fs.unlink(PENDING_FILE).catch(() => {});
+        return;
+      }
 
-				const bodyStart = rawContent.indexOf("\n\n");
-				if (bodyStart >= 0) {
-					const body = rawContent.slice(bodyStart + 2).trim();
-					if (body) {
-						lines.push("");
-						lines.push(theme.fg("muted", body));
-					}
-				}
+      await fs.unlink(PENDING_FILE).catch(() => {});
 
-				return new Text(lines.join("\n"), 0, 0);
-			}
+      const session = {
+        sessionPath: pending.sessionPath,
+        project: pending.project,
+        timestamp: pending.timestamp,
+      };
 
-			const header =
-				theme.fg("accent", "🔍 ") +
-				theme.fg(
-					"customMessageLabel",
-					theme.bold("Session context: "),
-				) +
-				theme.fg("accent", project) +
-				(date ? theme.fg("muted", ` (${date})`) : "");
+      const project = shortenProject(session.project, 40);
+      ctx.ui.setStatus("session-search", `🔍 Summarizing ${project}...`);
 
-			return new Text(header, 0, 0);
-		},
-	);
+      try {
+        const summary = await summarizeSession(session, ctx, pending.customPrompt);
+
+        pi.sendMessage(
+          {
+            customType: "session-search-context",
+            content:
+              `## Session Summary: ${session.project}\n` +
+              `**Date:** ${formatDate(session.timestamp)} | **File:** ${session.sessionPath}\n\n` +
+              summary,
+            display: true,
+          },
+          { triggerTurn: false },
+        );
+      } catch {
+        // Fallback: ask the LLM to read the file directly
+        pi.sendMessage(
+          {
+            customType: "session-search-context",
+            content:
+              `Summary failed. Please read this session file and summarize:\n` +
+              `- **Project:** ${session.project}\n` +
+              `- **Date:** ${formatDate(session.timestamp)}\n` +
+              `- **Session file:** ${session.sessionPath}`,
+            display: true,
+          },
+          { triggerTurn: true },
+        );
+      } finally {
+        ctx.ui.setStatus("session-search", undefined);
+      }
+    } catch {
+      // No pending context file — normal new session
+    }
+  });
+
+  pi.on("session_shutdown", async () => {
+    closeDb();
+  });
+
+  // ── Open search overlay ─────────────────────────────────────────────
+
+  async function openSearch(ctx: ExtensionContext) {
+    if (!indexReady && !indexing) {
+      ctx.ui.setStatus("session-search", "🔍 Building index...");
+      await ensureIndex(ctx);
+    }
+
+    const action = await ctx.ui.custom<PaletteAction>(
+      (tui, theme, _kb, done) => new SessionSearchComponent(done, tui, theme),
+      {
+        overlay: true,
+        overlayOptions: {
+          anchor: "center" as any,
+          width: 84,
+        },
+      },
+    );
+
+    if (action.type === "cancel") return;
+
+    if (action.type === "resume") {
+      const sessionPath = action.session.sessionPath;
+      const project = shortenProject(action.session.project, 40);
+
+      const commandCtx = ctx as ExtensionContext & Partial<ExtensionCommandContext>;
+      if (typeof commandCtx.switchSession === "function") {
+        try {
+          const result = await commandCtx.switchSession(sessionPath);
+          if (!result.cancelled) {
+            // Session switched — old ctx is stale, must not touch it.
+            return;
+          }
+        } catch (err) {
+          ctx.ui.notify(`Resume failed: ${err}`, "error");
+        }
+        return;
+      }
+
+      ctx.ui.setEditorText(`/search resume ${quoteCommandArg(sessionPath)}`);
+      ctx.ui.notify(`${project} — press Enter to resume this session`, "info");
+      return;
+    }
+
+    if (action.type === "summarize") {
+      const project = shortenProject(action.session.project, 40);
+      ctx.ui.setStatus("session-search", `🔍 Summarizing ${project}...`);
+      ctx.ui.notify(`Summarizing ${project}...`, "info");
+
+      try {
+        const summary = await summarizeSession(action.session, ctx, action.customPrompt);
+
+        pi.sendMessage(
+          {
+            customType: "session-search-context",
+            content:
+              `## Session Summary: ${action.session.project}\n` +
+              `**Date:** ${formatDate(action.session.timestamp)} | **File:** ${action.session.sessionPath}\n\n` +
+              summary,
+            display: true,
+          },
+          { triggerTurn: false, deliverAs: "followUp" },
+        );
+
+        ctx.ui.notify(`Summary injected from ${project}`, "info");
+      } catch (err) {
+        // Ignore stale-context errors — session was replaced while summarizing.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!msg.includes("stale")) {
+          ctx.ui.notify(`Summary failed: ${err}`, "error");
+        }
+      } finally {
+        try {
+          ctx.ui.setStatus("session-search", undefined);
+        } catch {
+          /* stale context after session switch */
+        }
+      }
+      return;
+    }
+
+    if (action.type === "newSession") {
+      const project = shortenProject(action.session.project, 40);
+
+      // Persist to disk so we survive the extension reload on /new.
+      // session_start will pick this up in the new session.
+      await fs.mkdir(PENDING_DIR, { recursive: true });
+      await fs.writeFile(
+        PENDING_FILE,
+        JSON.stringify({
+          sessionPath: action.session.sessionPath,
+          project: action.session.project,
+          timestamp: action.session.timestamp,
+          customPrompt: action.customPrompt,
+          createdAt: Date.now(),
+        }),
+        "utf8",
+      );
+
+      // Pre-fill /new and tell the user to press Enter
+      ctx.ui.setEditorText(`/new`);
+      ctx.ui.notify(`${project} — press Enter to start new session with context`, "info");
+      return;
+    }
+  }
+
+  // ── /search command ─────────────────────────────────────────────────
+
+  pi.registerCommand("search", {
+    description: "Full-text search across all pi sessions",
+    handler: async (args, ctx) => {
+      const trimmedArgs = args?.trim() ?? "";
+      const resumePath = parseSearchResumePath(trimmedArgs);
+
+      if (resumePath !== null) {
+        if (!resumePath) {
+          ctx.ui.notify("Usage: /search resume <sessionPath>", "warning");
+          return;
+        }
+
+        try {
+          const result = await ctx.switchSession(resumePath);
+          if (!result.cancelled) {
+            // Session switched — old ctx is stale, must not touch it.
+            return;
+          }
+        } catch (err) {
+          ctx.ui.notify(`Resume failed: ${err}`, "error");
+        }
+        return;
+      }
+
+      if (trimmedArgs === "reindex") {
+        ctx.ui.notify("Rebuilding index from scratch...", "info");
+        indexReady = false;
+        try {
+          const count = await rebuildIndex((msg) => ctx.ui.notify(msg, "info"));
+          indexReady = true;
+          ctx.ui.notify(`Rebuilt index: ${count} sessions`, "info");
+        } catch (err) {
+          ctx.ui.notify(`Reindex failed: ${err}`, "error");
+        }
+        return;
+      }
+
+      if (trimmedArgs === "stats") {
+        try {
+          const stats = getStats();
+          ctx.ui.notify(
+            `Sessions: ${stats.totalSessions} | Chunks: ${stats.totalChunks} | Updated: ${stats.lastUpdated ?? "never"}`,
+            "info",
+          );
+        } catch (err) {
+          ctx.ui.notify(`Stats failed: ${err}`, "error");
+        }
+        return;
+      }
+
+      await openSearch(ctx as ExtensionContext);
+    },
+  });
+
+  // ── Custom message renderer ─────────────────────────────────────────
+
+  pi.registerMessageRenderer("session-search-context", (message, options, theme) => {
+    const rawContent =
+      typeof message.content === "string"
+        ? message.content
+        : Array.isArray(message.content)
+          ? (message.content as any[])
+              .map((c: any) => (c.type === "text" ? c.text || "" : ""))
+              .join("")
+          : "";
+
+    // Parse from "## Session Summary: project" or "**Project:** project" format
+    const summaryMatch = rawContent.match(/Session Summary:\s*(.+)/);
+    const projectMatch = rawContent.match(/\*\*Project:\*\*\s*(.+)/);
+    const dateMatch = rawContent.match(/\*\*Date:\*\*\s*([^|*]+)/);
+    const project = summaryMatch?.[1]?.trim() || projectMatch?.[1]?.trim() || "session";
+    const date = dateMatch?.[1]?.trim() || "";
+
+    if (options.expanded) {
+      const lines: string[] = [];
+      lines.push(
+        theme.fg("accent", "🔍 ") +
+          theme.fg("customMessageLabel", theme.bold("Session context: ")) +
+          theme.fg("accent", project) +
+          (date ? theme.fg("muted", ` (${date})`) : ""),
+      );
+
+      const bodyStart = rawContent.indexOf("\n\n");
+      if (bodyStart >= 0) {
+        const body = rawContent.slice(bodyStart + 2).trim();
+        if (body) {
+          lines.push("");
+          lines.push(theme.fg("muted", body));
+        }
+      }
+
+      return new Text(lines.join("\n"), 0, 0);
+    }
+
+    const header =
+      theme.fg("accent", "🔍 ") +
+      theme.fg("customMessageLabel", theme.bold("Session context: ")) +
+      theme.fg("accent", project) +
+      (date ? theme.fg("muted", ` (${date})`) : "");
+
+    return new Text(header, 0, 0);
+  });
 }

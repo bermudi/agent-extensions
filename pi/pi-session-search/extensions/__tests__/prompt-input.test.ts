@@ -21,6 +21,8 @@ const mockSession = {
 	snippet: "",
 	rank: 0,
 	title: null,
+	field: "user_message" as const,
+	score: 0,
 };
 
 function makeState(overrides?: Partial<PromptScreenState>): PromptScreenState {

@@ -43,6 +43,8 @@ describe("handleSearchInput", () => {
 					snippet: "",
 					rank: 0,
 					title: null,
+					field: "user_message" as const,
+					score: 0,
 				},
 			],
 			selected: 0,

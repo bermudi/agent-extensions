@@ -1,6 +1,15 @@
 import type { SearchResult } from "./indexer";
 export type { SearchResult };
 
+export type {
+  SearchField,
+  SessionSummary,
+  SessionMatch,
+  SearchSegment,
+  FormatConversationOptions,
+  FormattedConversation,
+} from "./session-utils";
+
 export type Theme = Parameters<
 	Parameters<import("@mariozechner/pi-coding-agent").ExtensionContext["ui"]["custom"]>[0]
 >[1];

@@ -1,7 +1,7 @@
 {
   "name": "pi-session-search",
   "version": "1.1.2",
-  "description": "Full-text search across pi sessions with FTS5 index and overlay UI",
+  "description": "Full-text search across pi sessions with FTS5 index, agent tools, and overlay UI",
   "keywords": [
     "pi-package",
     "pi-coding-agent",
@@ -30,14 +30,15 @@
     ]
   },
   "dependencies": {
-    "better-sqlite3": "^11.10.0"
+    "better-sqlite3": "^11.10.0",
+    "@sinclair/typebox": "^0.34.0"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*"
   },
   "scripts": {
-    "bundle": "esbuild extensions/index.ts --bundle --platform=node --format=esm --target=esnext --outfile=extensions/index.bundle.mjs --external:@mariozechner/pi-coding-agent --external:@mariozechner/pi-tui --alias:better-sqlite3=./node_modules/better-sqlite3/lib/index.js",
+    "bundle": "esbuild extensions/pi-session-search.ts --bundle --platform=node --format=esm --target=esnext --outfile=extensions/pi-session-search.bundle.mjs --external:@mariozechner/pi-coding-agent --external:@mariozechner/pi-tui --alias:better-sqlite3=./node_modules/better-sqlite3/lib/index.js",
     "publish:pi": "bash ./scripts/publish.sh"
   },
   "devDependencies": {
