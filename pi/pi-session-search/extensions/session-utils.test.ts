@@ -818,3 +818,120 @@ describe("buildFtsQuery", () => {
     expect(buildFtsQuery(["a", "b", "c"])).toBe('"a" "b" "c"*');
   });
 });
+
+const DEEP_BRANCH_SESSION = jsonl([
+  { type: "session", version: 3, id: "session-deep", timestamp: "2026-04-15T00:00:00.000Z", cwd: "/deep" },
+  { type: "message", id: "u1", parentId: null, timestamp: "2026-04-15T00:00:01.000Z", message: { role: "user", content: textBlock("level 1") } },
+  { type: "message", id: "a1", parentId: "u1", timestamp: "2026-04-15T00:00:02.000Z", message: { role: "assistant", content: textBlock("response 1") } },
+  { type: "message", id: "u2", parentId: "a1", timestamp: "2026-04-15T00:00:03.000Z", message: { role: "user", content: textBlock("level 2") } },
+  { type: "message", id: "a2", parentId: "u2", timestamp: "2026-04-15T00:00:04.000Z", message: { role: "assistant", content: textBlock("response 2") } },
+  { type: "message", id: "u3", parentId: "a2", timestamp: "2026-04-15T00:00:05.000Z", message: { role: "user", content: textBlock("level 3") } },
+  { type: "message", id: "a3", parentId: "u3", timestamp: "2026-04-15T00:00:06.000Z", message: { role: "assistant", content: textBlock("deep leaf") } },
+  { type: "message", id: "u3b", parentId: "a2", timestamp: "2026-04-15T00:00:05.500Z", message: { role: "user", content: textBlock("level 3 alt") } },
+  { type: "message", id: "a3b", parentId: "u3b", timestamp: "2026-04-15T00:00:06.500Z", message: { role: "assistant", content: textBlock("deep leaf alt") } },
+]);
+
+describe("deep branch traversal (3+ levels)", () => {
+  test("selectLeafEntryId picks the newest deep leaf", () => {
+    const parsed = parseSessionText(DEEP_BRANCH_SESSION)!;
+    expect(selectLeafEntryId(parsed)).toBe("a3b");
+  });
+
+  test("selectBranchMessages traces through all levels", () => {
+    const parsed = parseSessionText(DEEP_BRANCH_SESSION)!;
+    const branch = selectBranchMessages(parsed);
+    expect(branch.map((m) => m.id)).toEqual(["u1", "a1", "u2", "a2", "u3b", "a3b"]);
+  });
+
+  test("formatConversation includes messages from all levels", () => {
+    const parsed = parseSessionText(DEEP_BRANCH_SESSION)!;
+    const formatted = formatConversation(parsed, { maxTurns: 10 });
+    expect(formatted.text).toContain("level 1");
+    expect(formatted.text).toContain("response 1");
+    expect(formatted.text).toContain("level 2");
+    expect(formatted.text).toContain("response 2");
+    expect(formatted.text).toContain("level 3 alt");
+    expect(formatted.text).toContain("deep leaf alt");
+    expect(formatted.leafEntryId).toBe("a3b");
+    expect(formatted.messageCount).toBe(6);
+  });
+});
+
+const CORRUPT_PARENT_SESSION = jsonl([
+  { type: "session", version: 3, id: "session-corrupt", timestamp: "2026-04-15T00:00:00.000Z", cwd: "/corrupt" },
+  { type: "message", id: "a", parentId: "b", timestamp: "2026-04-15T00:00:01.000Z", message: { role: "user", content: textBlock("a points to b") } },
+  { type: "message", id: "b", parentId: "a", timestamp: "2026-04-15T00:00:02.000Z", message: { role: "assistant", content: textBlock("b points to a") } },
+]);
+
+describe("corrupt parentId cycle", () => {
+  test("selectBranchMessages terminates without hanging", () => {
+    const parsed = parseSessionText(CORRUPT_PARENT_SESSION)!;
+    const start = Date.now();
+    const branch = selectBranchMessages(parsed);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(1000);
+    expect(branch.map((m) => m.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("formatConversation empty text blocks", () => {
+  test("message with empty text block produces no output line", () => {
+    const data = jsonl([
+      { type: "session", id: "s-empty", timestamp: "2026-04-15T00:00:00.000Z", cwd: "/empty" },
+      { type: "message", id: "m1", parentId: null, timestamp: "2026-04-15T00:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "" }] } },
+    ]);
+    const parsed = parseSessionText(data)!;
+    const formatted = formatConversation(parsed, { maxTurns: 10 });
+    expect(formatted.text).toBe("");
+    expect(formatted.text).not.toContain("### User");
+    expect(formatted.messageCount).toBe(1);
+  });
+});
+
+describe("buildSessionSummary edge cases", () => {
+  test("no user messages sets firstUserMessage to empty string", () => {
+    const data = jsonl([
+      { type: "session", id: "s-assist", timestamp: "2026-04-15T00:00:00.000Z", cwd: "/assist" },
+      { type: "message", id: "a1", parentId: null, timestamp: "2026-04-15T00:00:01.000Z", message: { role: "assistant", content: textBlock("only assistant") } },
+    ]);
+    const parsed = parseSessionText(data)!;
+    const summary = buildSessionSummary("/tmp/session.jsonl", parsed);
+    expect(summary.firstUserMessage).toBe("");
+    expect(summary.segments.some((s) => s.field === "first_user_message")).toBe(false);
+  });
+
+  test("empty session (no messages) sets firstUserMessage to empty string and latestLeafId to null", () => {
+    const data = jsonl([
+      { type: "session", id: "s-empty", timestamp: "2026-04-15T00:00:00.000Z", cwd: "/empty" },
+    ]);
+    const parsed = parseSessionText(data)!;
+    const summary = buildSessionSummary("/tmp/session.jsonl", parsed);
+    expect(summary.firstUserMessage).toBe("");
+    expect(summary.latestLeafId).toBeNull();
+    expect(summary.segments.some((s) => s.field === "first_user_message")).toBe(false);
+  });
+});
+
+describe("snippetForMatch multi-term fallback", () => {
+  test("findSessionMatch returns a match for all-terms query", () => {
+    const allTerms = makeSummaryWithSegment("allterms.jsonl", "user_message", "hello there world");
+    const match = findSessionMatch(allTerms, "hello world");
+    expect(match).not.toBeNull();
+    expect(match!.snippet).toContain("hello");
+    expect(match!.snippet).toContain("world");
+  });
+});
+
+describe("extractTextFlat", () => {
+  test("behavior if exported", async () => {
+    const mod = await import("./session-utils.js");
+    if (!("extractTextFlat" in mod)) return;
+
+    const { extractTextFlat } = mod as any;
+    expect(extractTextFlat("hello world")).toBe("hello world");
+    expect(extractTextFlat([{ type: "text", text: "a" }, { type: "text", text: "b" }])).toBe("a b");
+    expect(extractTextFlat(42)).toBe("");
+    expect(extractTextFlat(null)).toBe("");
+    expect(extractTextFlat([])).toBe("");
+  });
+});

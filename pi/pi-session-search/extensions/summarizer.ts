@@ -57,6 +57,14 @@ export function extractSessionText(sessionPath: string): string {
 
 // ── Model resolution ──────────────────────────────────────────────────
 
+interface ModelRegistry {
+	getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string> }>;
+}
+
+interface SignalContext {
+	signal?: AbortSignal;
+}
+
 async function resolveSummaryModel(ctx: ExtensionContext) {
 	const candidates: any[] = [];
 
@@ -64,7 +72,8 @@ async function resolveSummaryModel(ctx: ExtensionContext) {
 
 	for (const model of candidates) {
 		if (!model) continue;
-		const auth = await (ctx.modelRegistry as any).getApiKeyAndHeaders(model);
+		// Narrow through a minimal interface — modelRegistry is not in the public ExtensionContext type
+		const auth = await (ctx.modelRegistry as unknown as ModelRegistry).getApiKeyAndHeaders(model);
 		if (auth.ok && auth.apiKey) {
 			return { model, auth };
 		}
@@ -125,7 +134,8 @@ export async function summarizeSession(
 			apiKey: modelChoice.auth.apiKey,
 			headers: modelChoice.auth.headers,
 			maxTokens: SUMMARY_MAX_TOKENS,
-			signal: (ctx as any).signal,
+			// Narrow through a minimal interface — signal is not in the public ExtensionContext type
+			signal: (ctx as unknown as SignalContext).signal,
 		},
 	);
 

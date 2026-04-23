@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
-import type { SearchField } from "./session-utils.js";
+import { extractTextFlat, type SearchField } from "./session-utils.js";
 
 const INDEX_DIR = path.join(os.homedir(), ".pi-session-search");
 const DB_PATH = path.join(INDEX_DIR, "index.db");
@@ -247,61 +247,21 @@ function extractContent(filePath: string): { chunks: string[]; firstUserMessage:
 		const role = msg.role;
 
 		if (role === "user") {
-			const text = extractText(msg.content);
+			const text = extractTextFlat(msg.content);
 			if (text) {
 				chunks.push(text);
 				if (!firstUserMessage) firstUserMessage = text.slice(0, 200);
 			}
 		} else if (role === "assistant") {
-			const text = extractAssistantText(msg.content);
+			const text = extractTextFlat(msg.content);
 			if (text) chunks.push(text);
 		} else if (role === "toolResult") {
-			const text = extractToolResultText(msg.content);
+			const text = extractTextFlat(msg.content);
 			if (text) chunks.push(text);
 		}
 	}
 
 	return { chunks, firstUserMessage };
-}
-
-function extractText(content: any): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-
-	const parts: string[] = [];
-	for (const block of content) {
-		if (block.type === "text" && block.text) {
-			parts.push(block.text);
-		}
-	}
-	return parts.join(" ");
-}
-
-function extractAssistantText(content: any): string {
-	if (!Array.isArray(content)) return "";
-
-	const parts: string[] = [];
-	for (const block of content) {
-		// Skip thinking blocks and tool calls
-		if (block.type === "text" && block.text) {
-			parts.push(block.text);
-		}
-	}
-	return parts.join(" ");
-}
-
-/** Extract text from toolResult content blocks. */
-function extractToolResultText(content: any): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-
-	const parts: string[] = [];
-	for (const block of content) {
-		if (block.type === "text" && block.text) {
-			parts.push(block.text);
-		}
-	}
-	return parts.join(" ");
 }
 
 /** Find all session JSONL files. */
@@ -383,16 +343,16 @@ async function extractContentAsync(filePath: string): Promise<{ chunks: string[]
 		const role = msg.role;
 
 		if (role === "user") {
-			const text = extractText(msg.content);
+			const text = extractTextFlat(msg.content);
 			if (text) {
 				chunks.push(text);
 				if (!firstUserMessage) firstUserMessage = text.slice(0, 200);
 			}
 		} else if (role === "assistant") {
-			const text = extractAssistantText(msg.content);
+			const text = extractTextFlat(msg.content);
 			if (text) chunks.push(text);
 		} else if (role === "toolResult") {
-			const text = extractToolResultText(msg.content);
+			const text = extractTextFlat(msg.content);
 			if (text) chunks.push(text);
 		}
 	}

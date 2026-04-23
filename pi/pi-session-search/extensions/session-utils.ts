@@ -173,6 +173,24 @@ export function extractText(content: unknown): string {
   return texts.join("\n");
 }
 
+/**
+ * Extract text from content blocks, joining with spaces.
+ * Suitable for FTS5 indexing where newlines would break token boundaries.
+ */
+export function extractTextFlat(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  const texts: string[] = [];
+  for (const block of content) {
+    if (!isRecord(block)) continue;
+    if (block.type === "text" && typeof block.text === "string") {
+      texts.push(block.text);
+    }
+  }
+  return texts.join(" ");
+}
+
 export function extractToolCalls(content: unknown): Array<{ name: string; arguments: string }> {
   if (!Array.isArray(content)) return [];
 

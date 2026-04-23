@@ -12,10 +12,7 @@
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Text } from "@mariozechner/pi-tui";
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { homedir } from "node:os";
-import * as fs from "node:fs/promises";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 
@@ -37,6 +34,7 @@ import {
   formatSessionChoiceLabel,
   filterByCwd,
   searchSessions,
+  extractText,
 } from "./session-utils";
 
 import {
@@ -54,7 +52,7 @@ import { SessionSearchComponent } from "./component";
 import { summarizeSession } from "./summarizer";
 import { parseSearchResumePath, quoteCommandArg } from "./resume";
 
-const SESSIONS_DIR = join(homedir(), ".pi/agent/sessions");
+const SESSIONS_DIR = path.join(os.homedir(), ".pi/agent/sessions");
 const MAX_SEARCH_RESULTS = 50;
 const MAX_LIST_RESULTS = 50;
 const MAX_READ_TURNS = 200;
@@ -69,16 +67,16 @@ interface CachedSession {
 const sessionCache = new Map<string, CachedSession>();
 
 async function getAllSessionFiles(): Promise<string[]> {
-  const dirs = await readdir(SESSIONS_DIR).catch(() => [] as string[]);
+  const dirs = await fsp.readdir(SESSIONS_DIR).catch(() => [] as string[]);
   const files: string[] = [];
 
   for (const dir of dirs) {
-    const dirPath = join(SESSIONS_DIR, dir);
+    const dirPath = path.join(SESSIONS_DIR, dir);
     try {
-      const entries = await readdir(dirPath);
+      const entries = await fsp.readdir(dirPath);
       for (const entry of entries) {
         if (entry.endsWith(".jsonl")) {
-          files.push(join(dirPath, entry));
+          files.push(path.join(dirPath, entry));
         }
       }
     } catch {
@@ -92,7 +90,7 @@ async function getAllSessionFiles(): Promise<string[]> {
 async function loadSession(filePath: string): Promise<CachedSession | null> {
   let fileStat;
   try {
-    fileStat = await stat(filePath);
+    fileStat = await fsp.stat(filePath);
   } catch {
     sessionCache.delete(filePath);
     return null;
@@ -107,7 +105,7 @@ async function loadSession(filePath: string): Promise<CachedSession | null> {
 
   let data: string;
   try {
-    data = await readFile(filePath, "utf8");
+    data = await fsp.readFile(filePath, "utf8");
   } catch {
     return null;
   }
@@ -122,6 +120,12 @@ async function loadSession(filePath: string): Promise<CachedSession | null> {
     summary: buildSessionSummary(filePath, parsed),
   };
   sessionCache.set(filePath, next);
+  if (sessionCache.size > 500) {
+    const oldest = [...sessionCache.entries()]
+      .sort((a, b) => a[1].mtimeMs - b[1].mtimeMs)
+      .slice(0, sessionCache.size - 400);
+    for (const [key] of oldest) sessionCache.delete(key);
+  }
   return next;
 }
 
@@ -143,13 +147,13 @@ async function resolveSessionFilePath(requestedFile: string): Promise<string> {
     throw new Error("Session files must end in .jsonl");
   }
 
-  const resolvedSessionsDir = await realpath(SESSIONS_DIR).catch(() => SESSIONS_DIR);
-  const resolvedCandidate = resolve(requestedFile);
+  const resolvedSessionsDir = await fsp.realpath(SESSIONS_DIR).catch(() => SESSIONS_DIR);
+  const resolvedCandidate = path.resolve(requestedFile);
   if (!isPathWithinDir(resolvedSessionsDir, resolvedCandidate)) {
     throw new Error("Session file must live under ~/.pi/agent/sessions");
   }
 
-  const realCandidate = await realpath(resolvedCandidate).catch(() => {
+  const realCandidate = await fsp.realpath(resolvedCandidate).catch(() => {
     throw new Error("Session file not found");
   });
 
@@ -177,8 +181,8 @@ export default function sessionSearch(pi: ExtensionAPI): void {
         ctx?.ui?.setStatus("session-search", `🔍 ${msg}`);
       });
       indexReady = true;
-    } catch {
-      // will retry on next search
+    } catch (err) {
+      console.warn("[session-search] Index build failed:", err);
     } finally {
       ctx?.ui?.setStatus("session-search", undefined);
       indexing = false;
@@ -499,25 +503,30 @@ export default function sessionSearch(pi: ExtensionAPI): void {
     setTimeout(() => ensureIndex(), 100);
 
     // Inject summary into newly created sessions that were queued via "New + Context".
-    if ((event as any).reason !== "new") return;
+    if (!('reason' in (event as unknown as Record<string, unknown>) && (event as unknown as Record<string, unknown>).reason === "new")) return;
 
     try {
-      const raw = await fs.readFile(PENDING_FILE, "utf8");
-      const pending = JSON.parse(raw) as {
-        sessionPath: string;
-        project: string;
-        timestamp: string;
-        customPrompt?: string;
-        createdAt: number;
-      };
+      const raw = await fsp.readFile(PENDING_FILE, "utf8");
+      const pending = JSON.parse(raw);
 
-      // Ignore stale pending files (> 5 minutes)
-      if (Date.now() - pending.createdAt > 5 * 60 * 1000) {
-        await fs.unlink(PENDING_FILE).catch(() => {});
+      if (
+        typeof pending !== "object" || pending === null ||
+        typeof pending.sessionPath !== "string" ||
+        typeof pending.project !== "string" ||
+        typeof pending.timestamp !== "string" ||
+        typeof pending.createdAt !== "number"
+      ) {
+        await fsp.unlink(PENDING_FILE).catch(() => {});
         return;
       }
 
-      await fs.unlink(PENDING_FILE).catch(() => {});
+      // Ignore stale pending files (> 5 minutes)
+      if (Date.now() - pending.createdAt > 5 * 60 * 1000) {
+        await fsp.unlink(PENDING_FILE).catch(() => {});
+        return;
+      }
+
+      await fsp.unlink(PENDING_FILE).catch(() => {});
 
       const session = {
         sessionPath: pending.sessionPath,
@@ -542,7 +551,8 @@ export default function sessionSearch(pi: ExtensionAPI): void {
           },
           { triggerTurn: false },
         );
-      } catch {
+      } catch (err) {
+        console.warn("[session-search] Summary failed, falling back:", err);
         // Fallback: ask the LLM to read the file directly
         pi.sendMessage(
           {
@@ -559,8 +569,8 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       } finally {
         ctx.ui.setStatus("session-search", undefined);
       }
-    } catch {
-      // No pending context file — normal new session
+    } catch (err) {
+      console.warn("[session-search] No pending context file:", err);
     }
   });
 
@@ -581,9 +591,9 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       {
         overlay: true,
         overlayOptions: {
-          anchor: "center" as any,
+          anchor: "center" as const,
           width: 84,
-        },
+        } as Record<string, unknown>,
       },
     );
 
@@ -654,8 +664,8 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 
       // Persist to disk so we survive the extension reload on /new.
       // session_start will pick this up in the new session.
-      await fs.mkdir(PENDING_DIR, { recursive: true });
-      await fs.writeFile(
+      await fsp.mkdir(PENDING_DIR, { recursive: true });
+      await fsp.writeFile(
         PENDING_FILE,
         JSON.stringify({
           sessionPath: action.session.sessionPath,
@@ -737,9 +747,7 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       typeof message.content === "string"
         ? message.content
         : Array.isArray(message.content)
-          ? (message.content as any[])
-              .map((c: any) => (c.type === "text" ? c.text || "" : ""))
-              .join("")
+          ? extractText(message.content)
           : "";
 
     // Parse from "## Session Summary: project" or "**Project:** project" format
