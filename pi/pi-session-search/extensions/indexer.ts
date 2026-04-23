@@ -215,54 +215,7 @@ function timestampFromFilename(filename: string): string {
 		.replace(/T(\d{2})-(\d{2})-(\d{2})-(\d+)Z/, "T$1:$2:$3.$4Z");
 }
 
-/** Extract indexable text from a JSONL session file. */
-function extractContent(filePath: string): { chunks: string[]; firstUserMessage: string | null } {
-	const chunks: string[] = [];
-	let firstUserMessage: string | null = null;
 
-	let data: string;
-	try {
-		data = fs.readFileSync(filePath, "utf-8");
-	} catch {
-		return { chunks, firstUserMessage };
-	}
-
-	const lines = data.split("\n");
-
-	for (const line of lines) {
-		if (!line.trim()) continue;
-
-		let entry: any;
-		try {
-			entry = JSON.parse(line);
-		} catch {
-			continue;
-		}
-
-		if (entry.type !== "message") continue;
-
-		const msg = entry.message;
-		if (!msg) continue;
-
-		const role = msg.role;
-
-		if (role === "user") {
-			const text = extractTextFlat(msg.content);
-			if (text) {
-				chunks.push(text);
-				if (!firstUserMessage) firstUserMessage = text.slice(0, 200);
-			}
-		} else if (role === "assistant") {
-			const text = extractTextFlat(msg.content);
-			if (text) chunks.push(text);
-		} else if (role === "toolResult") {
-			const text = extractTextFlat(msg.content);
-			if (text) chunks.push(text);
-		}
-	}
-
-	return { chunks, firstUserMessage };
-}
 
 /** Find all session JSONL files. */
 function findSessionFiles(sessionsDir: string): { path: string; dirName: string; filename: string }[] {
@@ -620,15 +573,6 @@ export function getSessionSnippets(sessionPath: string, query: string, limit = 1
 
 	const rows = stmt.all(safeQuery, sessionPath, limit) as { snippet: string }[];
 	return rows.map((r) => r.snippet);
-}
-
-/** Get the first user message for a session (for display). */
-export function getSessionTitle(sessionPath: string): string | null {
-	const db = getDb();
-	const row = db.prepare("SELECT first_user_message FROM sessions WHERE path = ?").get(sessionPath) as {
-		first_user_message: string | null;
-	} | undefined;
-	return row?.first_user_message ?? null;
 }
 
 /** List recent sessions, ordered by timestamp descending. */

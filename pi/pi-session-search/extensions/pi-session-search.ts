@@ -234,8 +234,13 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       if (indexReady) {
         // Fast path: FTS5 pre-filter. Ask for extra candidates because some may
         // drop out during rich scoring (e.g. tool-only matches when search_tools=false).
-        const ftsResults = ftsSearch(query, limit * 5);
-        candidatePaths = ftsResults.map((r) => r.sessionPath);
+        try {
+          const ftsResults = ftsSearch(query, limit * 5);
+          candidatePaths = ftsResults.map((r) => r.sessionPath);
+        } catch (err) {
+          console.warn("[session-search] FTS search failed, falling back to full scan:", err);
+          candidatePaths = await getAllSessionFiles();
+        }
       } else {
         candidatePaths = await getAllSessionFiles();
       }
@@ -409,13 +414,18 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       let summaries: SessionSummary[];
 
       if (indexReady) {
-        const recent = ftsListRecent(limit * 2);
-        const loaded = await Promise.all(recent.map((r) => loadSession(r.sessionPath)));
-        summaries = loaded
-          .filter((c): c is CachedSession => c !== null)
-          .map((c) => c.summary)
-          .sort(compareTimestampDesc)
-          .slice(0, limit);
+        try {
+          const recent = ftsListRecent(limit * 2);
+          const loaded = await Promise.all(recent.map((r) => loadSession(r.sessionPath)));
+          summaries = loaded
+            .filter((c): c is CachedSession => c !== null)
+            .map((c) => c.summary)
+            .sort(compareTimestampDesc)
+            .slice(0, limit);
+        } catch (err) {
+          console.warn("[session-search] FTS list failed, falling back to full scan:", err);
+          summaries = await loadSessionSummaries();
+        }
       } else {
         summaries = await loadSessionSummaries();
       }

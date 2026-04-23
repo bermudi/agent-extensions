@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import type { SearchResult } from "./indexer";
 import { formatDate } from "./types";
 import { parseSessionMessages } from "./jsonl-parser";
@@ -12,48 +11,6 @@ import {
 } from "../../compaction-engine";
 import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-
-/**
- * @deprecated Use parseSessionMessages + groupIntoTurns from compaction-engine instead.
- * Extracts user + assistant text only — loses reasoning, tool calls, and evidence.
- */
-export function extractSessionText(sessionPath: string): string {
-	const data = fs.readFileSync(sessionPath, "utf-8");
-	const lines = data.split("\n");
-	const parts: string[] = [];
-
-	for (const line of lines) {
-		if (!line.trim()) continue;
-		let entry: any;
-		try {
-			entry = JSON.parse(line);
-		} catch {
-			continue;
-		}
-		if (entry.type !== "message") continue;
-		const msg = entry.message;
-		if (!msg) continue;
-
-		if (msg.role === "user") {
-			const text =
-				typeof msg.content === "string"
-					? msg.content
-					: (msg.content || [])
-							.filter((c: any) => c.type === "text")
-							.map((c: any) => c.text)
-							.join(" ");
-			if (text.trim()) parts.push(`[USER] ${text.trim()}`);
-		} else if (msg.role === "assistant") {
-			const text = (msg.content || [])
-				.filter((c: any) => c.type === "text")
-				.map((c: any) => c.text)
-				.join(" ");
-			if (text.trim()) parts.push(`[ASSISTANT] ${text.trim()}`);
-		}
-	}
-
-	return parts.join("\n\n");
-}
 
 // ── Model resolution ──────────────────────────────────────────────────
 
