@@ -580,7 +580,9 @@ export default function sessionSearch(pi: ExtensionAPI): void {
         ctx.ui.setStatus("session-search", undefined);
       }
     } catch (err) {
-      console.warn("[session-search] No pending context file:", err);
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.warn("[session-search] Error reading pending context file:", err);
+      }
     }
   });
 
