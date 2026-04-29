@@ -59,9 +59,11 @@ interface TaskDef {
 interface TaskProgress {
   index: number;
   agent: string;
+  task: string;
   status: "pending" | "running" | "done" | "failed";
   durationMs: number;
   tokens: number;
+  toolUses: number;
   error?: string;
 }
 
@@ -219,6 +221,12 @@ function resolveModel(spec: string | undefined, registry: ModelRegistry, parentM
 
 // ── Agent Runner ──────────────────────────────────────────────────────────
 
+interface AgentProgressUpdate {
+  tokens: number;
+  toolUses: number;
+  durationMs: number;
+}
+
 async function runAgent(
   config: {
     systemPrompt: string;
@@ -230,6 +238,7 @@ async function runAgent(
   prompt: string,
   modelRegistry: ModelRegistry,
   signal?: AbortSignal,
+  onProgress?: (update: AgentProgressUpdate) => void,
 ): Promise<{ output: string; error?: string; durationMs: number; tokens: number }> {
   const start = Date.now();
 
@@ -253,6 +262,21 @@ async function runAgent(
     },
   });
 
+  // Track real-time progress via agent events
+  let toolUses = 0;
+  if (onProgress) {
+    agent.subscribe((event) => {
+      if (event.type === "tool_execution_end") {
+        toolUses++;
+        const usage = extractUsage(agent.state.messages);
+        onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start });
+      } else if (event.type === "message_end") {
+        const usage = extractUsage(agent.state.messages);
+        onProgress({ tokens: usage.total, toolUses, durationMs: Date.now() - start });
+      }
+    });
+  }
+
   if (signal) {
     const onAbort = () => { try { agent.abort(); } catch { /* */ } };
     signal.addEventListener("abort", onAbort, { once: true });
@@ -262,26 +286,17 @@ async function runAgent(
     await agent.prompt(prompt);
     await agent.waitForIdle();
 
-    const messages = (agent as unknown as { state: { messages: AgentMessage[]; errorMessage?: string } }).state.messages;
-    const errorMessage = (agent as unknown as { state: { errorMessage?: string } }).state.errorMessage;
+    const state = (agent as unknown as { state: { messages: AgentMessage[]; errorMessage?: string } }).state;
+    const errorMessage = state.errorMessage;
 
-    let output = "";
-    for (const msg of messages) {
-      if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-      for (const block of msg.content) {
-        if (block.type === "text" && block.text) output += block.text;
-      }
-      if (msg.usage) {
-        const u = msg.usage as Record<string, number>;
-        tokens += (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0);
-      }
-    }
+    const output = extractOutput(state.messages);
+    const usage = extractUsage(state.messages);
 
     return {
       output: output || "(no output)",
       error: errorMessage,
       durationMs: Date.now() - start,
-      tokens,
+      tokens: usage.total,
     };
   } catch (err) {
     return {
@@ -291,6 +306,33 @@ async function runAgent(
       tokens: 0,
     };
   }
+}
+
+// ── Output Extraction ────────────────────────────────────────────────────
+
+function extractOutput(messages: AgentMessage[]): string {
+  const parts: string[] = [];
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block.type === "text" && block.text) parts.push(block.text);
+    }
+  }
+  return parts.join("\n\n");
+}
+
+function extractUsage(messages: AgentMessage[]) {
+  const usage = { input: 0, output: 0, cacheRead: 0, total: 0 };
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !msg.usage) continue;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const u = msg.usage as any;
+    usage.input += u.input ?? 0;
+    usage.output += u.output ?? 0;
+    usage.cacheRead += u.cacheRead ?? 0;
+    usage.total += u.total ?? (u.input ?? 0) + (u.output ?? 0);
+  }
+  return usage;
 }
 
 // ── Formatting ────────────────────────────────────────────────────────────
@@ -311,6 +353,9 @@ function fmtTokens(n: number): string {
 function trunc(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
+
+const tree = (i: number, n: number) => i === n - 1 ? "└─" : "├─";
+const indent = (i: number, n: number) => i === n - 1 ? "   " : "│  ";
 
 // ── Extension ─────────────────────────────────────────────────────────────
 
@@ -441,12 +486,15 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       });
 
       // ── Progress tracking ─────────────────────────────────────────
+      const startedAt = Date.now();
       const progress: TaskProgress[] = resolved.map((t, i) => ({
         index: i,
         agent: t.agentName,
+        task: trunc(t.prompt, 50),
         status: "pending" as const,
         durationMs: 0,
         tokens: 0,
+        toolUses: 0,
       }));
       const fire = () => onUpdate?.({
         content: [{ type: "text", text: `Running ${resolved.length} subagent${resolved.length > 1 ? "s" : ""}…` }],
@@ -464,6 +512,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             t.prompt,
             ctx.modelRegistry,
             signal,
+            (u) => { p.tokens = u.tokens; p.toolUses = u.toolUses; p.durationMs = u.durationMs; fire(); },
           );
           p.status = r.error ? "failed" : "done";
           p.durationMs = r.durationMs;
@@ -483,10 +532,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       const finalResults = results.map((r, i) =>
         r.status === "fulfilled" ? r.value : { agent: resolved[i]!.agentName, output: "", error: String(r.reason), durationMs: 0, tokens: 0 },
       );
+      const elapsedTotal = Date.now() - startedAt;
 
       const parts: string[] = [];
       const succeeded = finalResults.filter((r) => !r.error).length;
-      parts.push(`${succeeded}/${finalResults.length} tasks completed successfully\n`);
+      parts.push(`${succeeded}/${finalResults.length} tasks completed successfully · ${fmtDuration(elapsedTotal)} wall time\n`);
       for (let i = 0; i < finalResults.length; i++) {
         const r = finalResults[i]!;
         const t = resolved[i]!;
@@ -507,27 +557,39 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       };
     },
 
-    renderCall(args, theme) {
+    renderCall(args, theme, ctx) {
+      const state = ctx.state as { startedAt?: number; interval?: ReturnType<typeof setInterval> };
+      if (ctx.executionStarted && state.startedAt === undefined) state.startedAt = Date.now();
       const tasks = (args as { tasks?: TaskDef[] }).tasks ?? [];
-      if (!tasks.length) return new Text(theme.fg("toolTitle", theme.bold("delegate")), 0, 0);
+      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      if (!tasks.length) {
+        text.setText(theme.fg("toolTitle", theme.bold("delegate")));
+        return text;
+      }
       const lines = [theme.fg("toolTitle", theme.bold(`delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""}`))];
       for (let i = 0; i < tasks.length; i++) {
         const t = tasks[i]!;
-        const tree = i === tasks.length - 1 ? "└─" : "├─";
         const label = t.agent ? theme.bold(t.agent) : "inline";
-        lines.push(`${tree} ${label} ${theme.fg("muted", trunc(t.prompt, 60))}`);
+        lines.push(`${tree(i, tasks.length)} ${label} ${theme.fg("muted", trunc(t.prompt, 60))}`);
       }
-      return new Text(lines.join("\n"), 0, 0);
+      text.setText(lines.join("\n"));
+      return text;
     },
 
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, ctx) {
+      const state = ctx.state as { startedAt?: number; interval?: ReturnType<typeof setInterval> };
+      if (options.isPartial && !state.interval) state.interval = setInterval(() => ctx.invalidate(), 1000);
+      if (!options.isPartial && state.interval) { clearInterval(state.interval); state.interval = undefined; }
+      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+
       const details = result.details as DelegateDetails | undefined;
       if (!details?.progress?.length) {
-        const text = (result.content as Array<{ type: string; text: string }>)
+        const content = (result.content as Array<{ type: string; text: string }>)
           ?.filter((c) => c.type === "text")
           .map((c) => c.text)
           .join("\n") ?? "";
-        return new Text(text ? `\n${text}` : "", 0, 0);
+        text.setText(content ? `\n${content}` : "");
+        return text;
       }
 
       const { progress, results: taskResults } = details;
@@ -536,44 +598,55 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       if (options.isPartial) {
         const done = progress.filter((p) => p.status === "done" || p.status === "failed").length;
-        lines.push(theme.fg("muted", `Running ${total} subagent${total > 1 ? "s" : ""}… (${done}/${total})`), "");
+        const elapsed = state.startedAt ? ` · ${fmtDuration(Date.now() - state.startedAt)}` : "";
+        lines.push(theme.fg("muted", `Running ${total} subagent${total > 1 ? "s" : ""}…${elapsed}`), "");
         for (let i = 0; i < total; i++) {
           const p = progress[i]!;
-          const tree = i === total - 1 ? "└─" : "├─";
-          const icon = p.status === "done" ? theme.fg("success", "✓") : p.status === "failed" ? theme.fg("error", "✗") : p.status === "running" ? theme.fg("warning", "●") : theme.fg("muted", "○");
-          const stats = p.tokens > 0 ? theme.fg("muted", ` · ${fmtTokens(p.tokens)} tokens`) : "";
-          lines.push(`${tree} ${icon} ${theme.bold(p.agent)}${stats}`);
+          const stats = (parts: string[]) => parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
+          switch (p.status) {
+            case "done":
+              lines.push(`${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${stats([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`);
+              break;
+            case "failed":
+              lines.push(`${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`);
+              break;
+            case "running":
+              lines.push(`${tree(i, total)} ${theme.fg("warning", "●")} ${theme.bold(p.agent)}${stats(p.toolUses > 0 ? [`${p.toolUses} tool use${p.toolUses > 1 ? "s" : ""}`, `${fmtTokens(p.tokens)} tokens`] : [])}`);
+              break;
+            default:
+              lines.push(`${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)} ${theme.fg("muted", "waiting…")}`);
+          }
         }
+        if (done > 0 && done < total) lines.push("", theme.fg("muted", `${done}/${total} complete`));
       } else {
         const succeeded = progress.filter((p) => p.status === "done").length;
         const totalTokens = progress.reduce((sum, p) => sum + p.tokens, 0);
         const totalMs = progress.reduce((sum, p) => sum + p.durationMs, 0);
-        lines.push(theme.fg("muted", `${succeeded}/${total} completed · ${fmtDuration(totalMs)} · ${fmtTokens(totalTokens)} tokens`), "");
+        const elapsed = state.startedAt ? fmtDuration(Date.now() - state.startedAt) : fmtDuration(totalMs);
+        lines.push(theme.fg("muted", `${succeeded}/${total} completed · ${elapsed} wall · ${fmtTokens(totalTokens)} tokens`), "");
 
         for (let i = 0; i < total; i++) {
           const p = progress[i]!;
           const r = taskResults[i];
-          const tree = i === total - 1 ? "└─" : "├─";
-          const indent = i === total - 1 ? "   " : "│  ";
+          const ind = indent(i, total);
           const icon = p.status === "done" ? theme.fg("success", "✓") : theme.fg("error", "✗");
           const stats = theme.fg("muted", ` · ${fmtDuration(p.durationMs)} · ${fmtTokens(p.tokens)} tokens`);
-          lines.push(`${tree} ${icon} ${theme.bold(p.agent)}${stats}`);
+          lines.push(`${tree(i, total)} ${icon} ${theme.bold(p.agent)} ${theme.fg("muted", `(${p.task})`)}${stats}`);
 
           if (r && "output" in r && r.output?.trim() && r.output !== "(no output)") {
             const outputLines = r.output.trim().split("\n");
             const maxLines = options.expanded ? outputLines.length : 3;
-            for (const line of outputLines.slice(0, maxLines)) {
-              lines.push(`${indent}${theme.fg("toolOutput", line)}`);
-            }
+            for (const line of outputLines.slice(0, maxLines)) lines.push(`${ind}${theme.fg("toolOutput", line)}`);
             const remaining = outputLines.length - maxLines;
-            if (remaining > 0) lines.push(`${indent}${theme.fg("muted", `… ${remaining} more lines`)}`);
+            if (remaining > 0) lines.push(`${ind}${theme.fg("muted", `… ${remaining} more lines`)}`);
           } else if (r && "error" in r && r.error) {
-            lines.push(`${indent}${theme.fg("error", r.error)}`);
+            lines.push(`${ind}${theme.fg("error", r.error)}`);
           }
         }
       }
 
-      return new Text(lines.join("\n"), 0, 0);
+      text.setText(lines.join("\n"));
+      return text;
     },
   });
 }
