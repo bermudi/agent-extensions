@@ -5,10 +5,12 @@
  * with no LLM call. Instead of asking a model to summarize, it:
  *
  * 1. Extracts structured data from messages (tool calls, text, roles)
- * 2. Deduplicates consecutive same-role messages
- * 3. Keeps only the last operation per file path
- * 4. Renders a Handlebars-like template with the structured data
- * 5. Returns the rendered output as the compaction summary
+ * 2. Drops system messages and droppable (attachment) messages
+ * 3. Deduplicates consecutive same-role messages (keeps first, drops rest)
+ * 4. Trims duplicate file operations per assistant block (keeps last)
+ * 5. Strips working directory prefix from file paths
+ * 6. Renders a template with the structured data
+ * 7. Returns the rendered output as the compaction summary
  *
  * Zero latency, zero cost, fully deterministic.
  */
@@ -44,6 +46,8 @@ type SummaryTool =
   | { kind: "grep"; pattern: string }
   | { kind: "find"; pattern: string }
   | { kind: "ls"; path: string }
+  | { kind: "skill"; name: string }
+  | { kind: "mcp"; name: string }
   | { kind: "unknown"; name: string };
 
 // ── Main extension ────────────────────────────────────────────────────
@@ -62,7 +66,8 @@ export default function (pi: ExtensionAPI) {
     const rawBlocks = extractSummaryBlocks(allMessages);
 
     // 2. Apply transformer pipeline (dedupe, trim, etc.)
-    const transformed = applyTransformers(rawBlocks);
+    const cwd = ctx.cwd;
+    const transformed = applyTransformers(rawBlocks, cwd);
 
     // 3. Render template
     const templateOutput = renderTemplate(transformed, previousSummary, customInstructions);
@@ -128,6 +133,10 @@ function extractSummaryBlocks(messages: AgentMessage[]): SummaryBlock[] {
 
     // Skip compaction/branch summaries — they become previousSummary
     if (role === "compactionSummary" || role === "branchSummary") continue;
+
+    // Skip droppable messages (attachments, UI-only content)
+    const rec = msg as unknown as AnyRecord;
+    if (rec.droppable === true) continue;
 
     if (role === "user") {
       const text = extractText(msg);
@@ -208,9 +217,12 @@ function classifyTool(name: string, args: AnyRecord): SummaryTool {
     case "read":
       return { kind: "read", path: String(args.path ?? args.file_path ?? "") };
     case "write":
-      return { kind: "update", path: String(args.path ?? args.file_path ?? "") };
     case "edit":
+    case "patch":
+    case "multi_patch":
       return { kind: "update", path: String(args.path ?? args.file_path ?? "") };
+    case "remove":
+      return { kind: "delete", path: String(args.path ?? "") };
     case "bash":
       return { kind: "shell", command: String(args.command ?? "") };
     case "grep":
@@ -219,87 +231,91 @@ function classifyTool(name: string, args: AnyRecord): SummaryTool {
       return { kind: "find", pattern: String(args.pattern ?? args.name ?? "") };
     case "ls":
       return { kind: "ls", path: String(args.path ?? "") };
+    case "skill":
+      return { kind: "skill", name: String(args.name ?? "") };
     default:
-      // Catch search-like tools
+      // Catch search-like tools (fs_search, session_search, codebase_search, etc.)
       if (name.includes("search")) {
-        return { kind: "search", pattern: String(args.pattern ?? args.query ?? "") };
+        return { kind: "search", pattern: String(args.pattern ?? args.query ?? args.glob ?? args.file_type ?? "") };
       }
-      return { kind: "unknown", name };
+      // Treat unrecognised tools as MCP
+      return { kind: "mcp", name };
   }
 }
 
 // ── Transformer pipeline ─────────────────────────────────────────────
+//
+// Matches ForgeCode's SummaryTransformer order:
+//   DropRole(System) → DedupeRole(User) → TrimContextSummary → StripWorkingDir
+// Plus DedupeRole(Assistant) which ForgeCode does in DedupeRole.
 
-function applyTransformers(blocks: SummaryBlock[]): SummaryBlock[] {
+function applyTransformers(blocks: SummaryBlock[], cwd: string): SummaryBlock[] {
   let result = blocks;
 
   // 1. Drop system messages
   result = result.filter((b) => b.role !== "system");
 
-  // 2. Deduplicate consecutive user messages (merge text)
+  // 2. Deduplicate consecutive user messages — ForgeCode keeps FIRST, drops rest
   result = dedupeConsecutiveRole(result, "user");
 
-  // 3. Trim: keep only the last operation per file path
+  // 3. Trim: keep only the last file operation per path within each assistant block
   result = trimDuplicateFilePaths(result);
 
-  // 4. Deduplicate consecutive assistant content blocks
+  // 4. Deduplicate consecutive assistant blocks — same logic
   result = dedupeConsecutiveRole(result, "assistant");
 
-  // 5. Truncate long text blocks
+  // 5. Strip working directory prefix from file paths
+  result = stripWorkingDir(result, cwd);
+
+  // 6. Truncate long text blocks
   result = truncateText(result, 500);
 
   return result;
 }
 
+/**
+ * ForgeCode's DedupeRole: for consecutive same-role messages, keep the
+ * FIRST and discard the rest. This is different from merging — it drops
+ * content, not accumulates it.
+ */
 function dedupeConsecutiveRole(blocks: SummaryBlock[], role: "user" | "assistant"): SummaryBlock[] {
   const result: SummaryBlock[] = [];
+  let lastRole: string | null = null;
 
   for (const block of blocks) {
-    if (block.role === role && result.length > 0 && result[result.length - 1].role === role) {
-      // Merge contents into previous block
-      const prev = result[result.length - 1];
-      prev.contents.push(...block.contents);
-    } else {
-      result.push({ ...block, contents: [...block.contents] });
+    if (block.role === role && lastRole === role) {
+      // Skip this block entirely — ForgeCode drains and discards duplicates
+      continue;
     }
+    result.push({ ...block, contents: [...block.contents] });
+    lastRole = block.role;
   }
 
   return result;
 }
 
+/**
+ * ForgeCode's TrimContextSummary: within each individual Assistant block,
+ * keep only the LAST occurrence of each file path. Non-assistant blocks
+ * are untouched. This is per-block, not global.
+ */
 function trimDuplicateFilePaths(blocks: SummaryBlock[]): SummaryBlock[] {
-  // Track which file paths we've seen — keep only the last occurrence of each
-  const seenPaths = new Map<string, { blockIdx: number; contentIdx: number }>();
+  return blocks.map((block) => {
+    if (block.role !== "assistant") return block;
 
-  // Forward pass: record all file paths
-  for (let bi = 0; bi < blocks.length; bi++) {
-    for (let ci = 0; ci < blocks[bi].contents.length; ci++) {
-      const c = blocks[bi].contents[ci];
-      if (c.type === "tool") {
-        const path = toolPath(c.tool);
-        if (path) {
-          seenPaths.set(path, { blockIdx: bi, contentIdx: ci });
-        }
-      }
-    }
-  }
-
-  // Now do a reverse pass: keep only the LAST occurrence of each path
-  const lastOccurrence = new Map<string, boolean>();
-  const result: SummaryBlock[] = [];
-
-  for (let bi = blocks.length - 1; bi >= 0; bi--) {
+    const seen = new Set<string>();
     const contents: SummaryContent[] = [];
-    for (let ci = blocks[bi].contents.length - 1; ci >= 0; ci--) {
-      const c = blocks[bi].contents[ci];
+
+    // Process in reverse to keep last occurrence per path
+    for (const c of [...block.contents].reverse()) {
       if (c.type === "tool") {
         const path = toolPath(c.tool);
         if (path) {
-          if (!lastOccurrence.has(path)) {
-            lastOccurrence.set(path, true);
+          if (!seen.has(path)) {
+            seen.add(path);
             contents.unshift(c);
           }
-          // else: skip this duplicate
+          // else: skip this duplicate within this block
         } else {
           contents.unshift(c);
         }
@@ -307,12 +323,29 @@ function trimDuplicateFilePaths(blocks: SummaryBlock[]): SummaryBlock[] {
         contents.unshift(c);
       }
     }
-    if (contents.length > 0) {
-      result.unshift({ ...blocks[bi], contents });
-    }
-  }
 
-  return result;
+    return { ...block, contents };
+  });
+}
+
+/** Strip working directory prefix from file paths for portability. */
+function stripWorkingDir(blocks: SummaryBlock[], cwd: string): SummaryBlock[] {
+  if (!cwd) return blocks;
+  // Normalise cwd: ensure trailing slash so we match prefix cleanly
+  const prefix = cwd.endsWith("/") ? cwd : cwd + "/";
+
+  return blocks.map((block) => ({
+    ...block,
+    contents: block.contents.map((c) => {
+      if (c.type === "tool") {
+        const path = toolPath(c.tool);
+        if (path && path.startsWith(prefix)) {
+          return { ...c, tool: withStrippedPath(c.tool, path.slice(prefix.length)) };
+        }
+      }
+      return c;
+    }),
+  }));
 }
 
 function toolPath(tool: SummaryTool): string | undefined {
@@ -324,6 +357,18 @@ function toolPath(tool: SummaryTool): string | undefined {
       return tool.path || undefined;
     default:
       return undefined;
+  }
+}
+
+function withStrippedPath(tool: SummaryTool, newPath: string): SummaryTool {
+  switch (tool.kind) {
+    case "read":
+    case "update":
+    case "delete":
+    case "ls":
+      return { ...tool, path: newPath };
+    default:
+      return tool;
   }
 }
 
@@ -362,7 +407,7 @@ function renderTemplate(blocks: SummaryBlock[], previousSummary?: string, custom
 
     for (const content of block.contents) {
       if (content.type === "text") {
-        parts.push("```\n" + content.text + "\n```\n");
+        parts.push("````\n" + content.text + "\n````\n");
       } else if (content.type === "tool") {
         const line = renderTool(content.tool, content.success);
         if (line) parts.push(line + "\n");
@@ -397,6 +442,10 @@ function renderTool(tool: SummaryTool, success: boolean): string {
       return `**Find:** \`${tool.pattern}\`${suffix}`;
     case "ls":
       return `**Ls:** \`${tool.path}\`${suffix}`;
+    case "skill":
+      return `**Skill:** \`${tool.name}\`${suffix}`;
+    case "mcp":
+      return `**MCP:** \`${tool.name}\`${suffix}`;
     case "unknown":
       return `**${tool.name}**${suffix}`;
   }
