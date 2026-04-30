@@ -1,5 +1,5 @@
-import { type ExtensionAPI, type ExtensionContext, CustomEditor } from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { type ExtensionAPI, type ExtensionContext, CustomEditor, type KeybindingsManager } from "@mariozechner/pi-coding-agent";
+import { type EditorTheme, Key, matchesKey, truncateToWidth, type TUI, visibleWidth } from "@mariozechner/pi-tui";
 
 type ChordAction = "model" | "resume" | "new" | "ext" | "reload" | "compact" | "queue" | "search";
 
@@ -25,9 +25,9 @@ class ChordEditor extends CustomEditor {
 	private ctx: ExtensionContext;
 
 	constructor(
-		tui: Parameters<typeof CustomEditor>[0],
-		theme: Parameters<typeof CustomEditor>[1],
-		keybindings: Parameters<typeof CustomEditor>[2],
+		tui: TUI,
+		theme: EditorTheme,
+		keybindings: KeybindingsManager,
 		ctx: ExtensionContext,
 	) {
 		super(tui, theme, keybindings);

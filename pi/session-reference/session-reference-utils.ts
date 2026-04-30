@@ -266,8 +266,11 @@ export function parseSessionText(data: string): ParsedSession | null {
     if (!entry) continue;
     entries.push(entry);
 
-    if (entry.type === "session_info" && entry.name) {
-      name = entry.name;
+    if (entry.type === "session_info") {
+      const info = entry as SessionInfoEntry;
+      if (info.name) {
+        name = info.name;
+      }
     }
   }
 
@@ -275,9 +278,9 @@ export function parseSessionText(data: string): ParsedSession | null {
 }
 
 function getTreeEntries(entries: readonly SessionEntry[]): GenericEntry[] {
-  return entries.flatMap((entry) => {
+  return entries.flatMap((entry): GenericEntry[] => {
     if (entry.type === "session_info") return [];
-    return [entry];
+    return [entry as GenericEntry];
   });
 }
 
@@ -492,7 +495,11 @@ export function findSessionMatch(
 
 export function buildSessionSummary(file: string, session: ParsedSession): SessionSummary {
   const firstUserMessageEntry = session.entries.find(
-    (entry): entry is MessageEntry => entry.type === "message" && entry.message.role === "user" && extractText(entry.message.content).length > 0,
+    (entry): entry is MessageEntry => {
+      if (entry.type !== "message") return false;
+      const msg = (entry as MessageEntry).message;
+      return msg.role === "user" && extractText(msg.content).length > 0;
+    },
   );
   const firstUserMessage = firstUserMessageEntry
     ? limitText(extractText(firstUserMessageEntry.message.content), MAX_FIRST_USER_MESSAGE_CHARS)
@@ -512,21 +519,23 @@ export function buildSessionSummary(file: string, session: ParsedSession): Sessi
     segments.push({ field: "first_user_message", text: firstUserMessage, entryId: firstUserMessageEntry?.id });
   }
 
-  for (const entry of session.entries) {
-    if (entry.type !== "message") continue;
+  for (const rawEntry of session.entries) {
+    if (rawEntry.type !== "message") continue;
+    const entry = rawEntry as MessageEntry;
 
-    const text = collapseWhitespace(extractText(entry.message.content));
+    const msg = entry.message;
+    const text = collapseWhitespace(extractText(msg.content));
     if (!text) continue;
 
-    if (entry.message.role === "user") {
+    if (msg.role === "user") {
       segments.push({ field: "user_message", text: limitText(text, MAX_SEARCH_TEXT_CHARS), entryId: entry.id });
       continue;
     }
-    if (entry.message.role === "assistant") {
+    if (msg.role === "assistant") {
       segments.push({ field: "assistant_message", text: limitText(text, MAX_SEARCH_TEXT_CHARS), entryId: entry.id });
       continue;
     }
-    if (entry.message.role === "toolResult") {
+    if (msg.role === "toolResult") {
       segments.push({ field: "tool_result", text: limitText(text, MAX_SEARCH_TEXT_CHARS), entryId: entry.id });
     }
   }

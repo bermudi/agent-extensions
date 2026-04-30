@@ -97,7 +97,7 @@ export default function (pi: ExtensionAPI) {
 
     try {
       const response = await complete(
-        modelChoice.model,
+        modelChoice.model as any,
         {
           systemPrompt: previousSummary ? engine.UPDATE_PROMPT : engine.INITIAL_PROMPT,
           messages: [

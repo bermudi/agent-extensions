@@ -247,7 +247,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const label = result === "enabled" ? "ON ✓" : "OFF ✗";
-			ctx.ui.notify(`${input}: ${label}`, "success");
+			ctx.ui.notify(`${input}: ${label}`, "info");
 			await ctx.reload();
 		},
 	});

@@ -2,6 +2,7 @@ import { mkdir, appendFile, writeFile } from "node:fs/promises";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+// @ts-expect-error no @opencode-ai/plugin types
 import type { Plugin } from "@opencode-ai/plugin";
 
 // ---------------------------------------------------------------------------
@@ -230,7 +231,7 @@ function generateReport(
 // Plugin
 // ---------------------------------------------------------------------------
 
-export const ThinkingCompactionPlugin: Plugin = async ({ client }) => {
+export const ThinkingCompactionPlugin: Plugin = async ({ client }: { client: any }) => {
   await appendLine(join(DEBUG_DIR, "log"), `${new Date().toISOString()} plugin.init pid=${process.pid} cwd=${process.cwd()}`);
 
   return {
@@ -267,7 +268,7 @@ export const ThinkingCompactionPlugin: Plugin = async ({ client }) => {
       );
     },
 
-    event: async ({ event }) => {
+    event: async ({ event }: { event: any }) => {
       if (event.type !== "session.compacted") return;
 
       const sessionID = (event as { type: "session.compacted"; properties: { sessionID: string } }).properties.sessionID;

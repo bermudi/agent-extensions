@@ -27,7 +27,7 @@ import {
   type SearchField,
   type SessionMatch,
   type SessionSummary,
-} from "/home/daniel/build/agent-extensions/pi/session-reference-utils.js";
+} from "./session-reference-utils.ts";
 
 const SESSIONS_DIR = join(homedir(), ".pi/agent/sessions");
 const MAX_SEARCH_RESULTS = 50;
@@ -69,6 +69,7 @@ function matchFieldLabel(field: SearchField): string {
     case "tool_result":
       return "tool result";
   }
+  return field;
 }
 
 function formatSessionDate(timestamp: string): string {
@@ -273,11 +274,12 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const query = params.query.trim();
       if (!query) {
         return {
           content: [{ type: "text", text: "Query cannot be empty." }],
+          details: undefined,
           isError: true,
         };
       }
@@ -299,6 +301,7 @@ export default function (pi: ExtensionAPI) {
               text: `No sessions found matching "${query}"${scopeText}. Try a different keyword, a partial UUID, or enable search_tools for tool output.`,
             },
           ],
+          details: undefined,
         };
       }
 
@@ -330,6 +333,7 @@ export default function (pi: ExtensionAPI) {
               "Use session_read with the file path to read the matching session. If a result includes Entry ID, pass it as entry_id to read the matching branch.",
           },
         ],
+        details: undefined,
       };
     },
   });
@@ -367,7 +371,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       let filePath: string;
       try {
         filePath = await resolveSessionFilePath(params.file);
@@ -375,6 +379,7 @@ export default function (pi: ExtensionAPI) {
         const message = error instanceof Error ? error.message : "Unknown error";
         return {
           content: [{ type: "text", text: `Failed to resolve session file: ${message}` }],
+          details: undefined,
           isError: true,
         };
       }
@@ -383,6 +388,7 @@ export default function (pi: ExtensionAPI) {
       if (!loaded) {
         return {
           content: [{ type: "text", text: "Failed to parse session file." }],
+          details: undefined,
           isError: true,
         };
       }
@@ -390,6 +396,7 @@ export default function (pi: ExtensionAPI) {
       if (params.entry_id && !hasEntryId(loaded.parsed, params.entry_id)) {
         return {
           content: [{ type: "text", text: `Entry ID ${params.entry_id} was not found in that session.` }],
+          details: undefined,
           isError: true,
         };
       }
@@ -413,11 +420,13 @@ export default function (pi: ExtensionAPI) {
       if (!conversation.text.trim()) {
         return {
           content: [{ type: "text", text: `${headerInfo}\n\n(No conversation messages found on that branch.)` }],
+          details: undefined,
         };
       }
 
       return {
         content: [{ type: "text", text: `${headerInfo}\n\n---\n${conversation.text}` }],
+        details: undefined,
       };
     },
   });
@@ -445,7 +454,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const limit = clampPositiveInteger(params.limit, 20, MAX_LIST_RESULTS);
       const summaries = filterByCwd(await loadSessionSummaries(), params.cwd_filter).slice(0, limit);
 
@@ -459,6 +468,7 @@ export default function (pi: ExtensionAPI) {
                 : "No sessions found.",
             },
           ],
+          details: undefined,
         };
       }
 
@@ -481,6 +491,7 @@ export default function (pi: ExtensionAPI) {
             text: `**${summaries.length} session(s):**\n\n${text}\n\nUse session_read with the file path to read a session's conversation.`,
           },
         ],
+        details: undefined,
       };
     },
   });
