@@ -85,7 +85,8 @@ export interface TaskResult {
 
 export const DEFAULT_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"];
 
-export const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<unknown>> = {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- tool registry needs generic param to avoid contravariance on execute()
+export const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<any>> = {
   read: createReadTool,
   bash: createBashTool,
   edit: createEditTool,
@@ -208,7 +209,7 @@ export function loadSkill(name: string, cwd: string): string | null {
 
 // ── Model Resolution ──────────────────────────────────────────────────────
 
-export function resolveModel(spec: string | undefined, registry: ModelRegistry, parentModel: Model<Api>): Model<Api> | undefined {
+export function resolveModel(spec: string | undefined, registry: ModelRegistry, parentModel: Model<Api> | undefined): Model<Api> | undefined {
   if (!spec) return parentModel;
   const idx = spec.indexOf("/");
   if (idx === -1) {
@@ -244,7 +245,7 @@ async function runAgent(
 
   const tools = config.tools
     .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
-    .filter(Boolean) as AgentTool<unknown>[];
+    .filter(Boolean) as AgentTool[];
 
   let tokens = 0;
   const agent = new Agent({
@@ -468,7 +469,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
         // Resolve model (falls back to parent model if specification fails to resolve)
         const modelSpec = t.model ?? agent?.model;
-        const model = resolveModel(modelSpec, ctx.modelRegistry, ctx.model) ?? ctx.model;
+        const resolvedModel = resolveModel(modelSpec, ctx.modelRegistry, ctx.model) ?? ctx.model;
+        if (!resolvedModel) {
+          throw new Error(`Task ${i}: no model available — parent session has no model set.`);
+        }
+        const model = resolvedModel;
 
         // Resolve tools — warn about unknown tool names
         const tools = t.tools ?? agent?.tools ?? DEFAULT_TOOLS;

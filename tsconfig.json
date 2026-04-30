@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "pi/**/*.ts",
+    "opencode/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "pi/reference",
+    "**/*.test.ts",
+    "**/__tests__/**"
+  ]
+}
