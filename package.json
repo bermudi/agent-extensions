@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "bun test"
+    "test": "bun test --path-ignore-patterns='pi/reference'"
   },
   "devDependencies": {
     "@marcfargas/pi-test-harness": "^0.5.0",

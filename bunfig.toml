@@ -1,0 +1,4 @@
+[test]
+# Reference material — not our code, not our tests
+# Note: bunfig.toml doesn't support exclude_paths yet, so we pass the flag in the script
+# This file exists as a placeholder in case bun adds support later.
