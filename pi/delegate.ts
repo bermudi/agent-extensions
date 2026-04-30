@@ -365,39 +365,37 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     name: "delegate",
     label: "Delegate",
     description:
-      "Delegate tasks to subagents running in-process with their own system prompt, skills, and tool restrictions. " +
-      "Each task runs independently with a clean context window. " +
-      "Only pi core tools are available: read, write, edit, bash. " +
-      "Reference a named agent from .pi/agents/*.md (project) or ~/.pi/agent/agents/*.md (user), or supply systemPrompt/tools/skills inline. " +
-      "All fields except prompt are optional — missing values fall back to the agent definition or parent defaults.",
+      "Run subagent tasks in parallel. Each gets its own context, system prompt, tools, and skills. " +
+      "Subagents only get pi core tools: read, write, edit, bash, grep, find, ls. " +
+      "Reference a named agent or supply config inline. Prompt is required; all other fields fall back to defaults.",
     parameters: Type.Object({
       tasks: Type.Array(
         Type.Object({
           prompt: Type.String({ description: "The task for this subagent to perform." }),
           agent: Type.Optional(Type.String({
-            description: "Named agent to load from .pi/agents/*.md (project) or ~/.pi/agent/agents/*.md (user). All other fields override the agent definition.",
+            description: "Named agent from .pi/agents/*.md (project) or ~/.pi/agent/agents/*.md (user). Inline fields override agent defaults.",
           })),
           model: Type.Optional(Type.String({
-            description: "Model override (e.g. 'anthropic/claude-sonnet-4'). Falls back to agent default, then parent model.",
+            description: "Model (e.g. 'anthropic/claude-sonnet-4'). Falls back to agent default, then parent model.",
           })),
           skills: Type.Optional(Type.Array(Type.String(), {
-            description: "Skill names to inject into the subagent's system prompt. Searched in .agents/skills/, .pi/skills/ (project), ~/.agents/skills/, ~/.pi/agent/skills/ (user).",
+            description: "Skill names to inject into the system prompt.",
           })),
           tools: Type.Optional(Type.Array(Type.String(), {
-            description: "Tools the subagent can use. Defaults to agent definition or all standard tools.",
+            description: "Tools the subagent may use: read, write, edit, bash, grep, find, ls.",
           })),
           thinking: Type.Optional(Type.String({
-            description: "Thinking level: off, minimal, low, medium, high, xhigh. Defaults to agent definition or off.",
+            description: "Thinking level: off, minimal, low, medium, high, xhigh. Defaults to agent or off.",
           })),
           systemPrompt: Type.Optional(Type.String({
-            description: "System prompt override. Replaces the agent definition's prompt entirely.",
+            description: "System prompt. Replaces agent system prompt entirely if set.",
           })),
           cwd: Type.Optional(Type.String({
-            description: "Working directory override. Defaults to parent session cwd.",
+            description: "Working directory. Defaults to parent session cwd.",
           })),
           context: Type.Optional(Type.String({
             enum: ["fresh", "inherit"],
-            description: "'fresh' (default) gives the subagent a clean context. 'inherit' injects the full parent session transcript so the subagent can reference prior conversation for deeper investigation.",
+            description: "'fresh' for clean context, 'inherit' to include parent session transcript.",
           })),
         }),
         { minItems: 1, description: "Tasks to run in parallel. Each gets an independent subagent instance." },
@@ -415,7 +413,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       if (unknown.length) {
         const names = [...agents.keys()];
         return {
-          content: [{ type: "text", text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}` }],
+          content: [{ type: "text", text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Agents live in .pi/agents/*.md (project) and ~/.pi/agent/agents/*.md (user).` }],
           details: { tasks: params.tasks, results: [], progress: [] },
         };
       }
