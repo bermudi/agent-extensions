@@ -6,9 +6,10 @@
     "test": "bun test"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "/home/daniel/.pi/agent/git/github.com/badlogic/pi-telegram/node_modules/@mariozechner/pi-coding-agent",
+    "@marcfargas/pi-test-harness": "^0.5.0",
     "@mariozechner/pi-agent-core": "/home/daniel/.pi/agent/git/github.com/badlogic/pi-telegram/node_modules/@mariozechner/pi-agent-core",
     "@mariozechner/pi-ai": "/home/daniel/.pi/agent/git/github.com/badlogic/pi-telegram/node_modules/@mariozechner/pi-ai",
+    "@mariozechner/pi-coding-agent": "/home/daniel/.pi/agent/git/github.com/badlogic/pi-telegram/node_modules/@mariozechner/pi-coding-agent",
     "@mariozechner/pi-tui": "/home/daniel/.pi/agent/git/github.com/badlogic/pi-telegram/node_modules/@mariozechner/pi-tui"
   }
 }

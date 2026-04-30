@@ -34,7 +34,7 @@ import { Type } from "@sinclair/typebox";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
-interface AgentConfig {
+export interface AgentConfig {
   name: string;
   description: string;
   model?: string;
@@ -44,7 +44,7 @@ interface AgentConfig {
   systemPrompt: string;
 }
 
-interface TaskDef {
+export interface TaskDef {
   prompt: string;
   agent?: string;
   model?: string;
@@ -56,7 +56,7 @@ interface TaskDef {
   context?: "fresh" | "inherit";
 }
 
-interface TaskProgress {
+export interface TaskProgress {
   index: number;
   agent: string;
   task: string;
@@ -67,13 +67,13 @@ interface TaskProgress {
   error?: string;
 }
 
-interface DelegateDetails {
+export interface DelegateDetails {
   tasks: TaskDef[];
   results: (TaskResult | { error: string })[];
   progress: TaskProgress[];
 }
 
-interface TaskResult {
+export interface TaskResult {
   agent: string;
   output: string;
   error?: string;
@@ -83,9 +83,9 @@ interface TaskResult {
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
-const DEFAULT_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"];
+export const DEFAULT_TOOLS = ["read", "grep", "find", "ls", "bash", "edit", "write"];
 
-const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<unknown>> = {
+export const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<unknown>> = {
   read: createReadTool,
   bash: createBashTool,
   edit: createEditTool,
@@ -95,11 +95,11 @@ const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<unknown>> = {
   ls: createLsTool,
 };
 
-const VALID_THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+export const VALID_THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 // ── Frontmatter ───────────────────────────────────────────────────────────
 
-function parseFrontmatter(content: string): { data: Record<string, string>; body: string } {
+export function parseFrontmatter(content: string): { data: Record<string, string>; body: string } {
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!m) return { data: {}, body: content.trim() };
   const data: Record<string, string> = {};
@@ -113,7 +113,7 @@ function parseFrontmatter(content: string): { data: Record<string, string>; body
 
 // ── Agent Discovery ───────────────────────────────────────────────────────
 
-function findProjectRoot(cwd: string): string | null {
+export function findProjectRoot(cwd: string): string | null {
   let dir = cwd;
   while (true) {
     if (fs.existsSync(path.join(dir, ".pi", "agents"))) return dir;
@@ -123,7 +123,7 @@ function findProjectRoot(cwd: string): string | null {
   }
 }
 
-function loadAgentFile(filePath: string): AgentConfig | null {
+export function loadAgentFile(filePath: string): AgentConfig | null {
   let content: string;
   try { content = fs.readFileSync(filePath, "utf-8"); } catch { return null; }
   const { data, body } = parseFrontmatter(content);
@@ -139,7 +139,7 @@ function loadAgentFile(filePath: string): AgentConfig | null {
   };
 }
 
-function discoverAgents(cwd: string): Map<string, AgentConfig> {
+export function discoverAgents(cwd: string): Map<string, AgentConfig> {
   const dirs: string[] = [];
   const userDir = path.join(os.homedir(), ".pi", "agent", "agents");
   const projectRoot = findProjectRoot(cwd);
@@ -161,7 +161,7 @@ function discoverAgents(cwd: string): Map<string, AgentConfig> {
 
 // ── Parent Context ────────────────────────────────────────────────────────
 
-function buildParentTranscript(entries: SessionEntry[], leafId: string | null): string | null {
+export function buildParentTranscript(entries: SessionEntry[], leafId: string | null): string | null {
   try {
     const ctx = buildSessionContext(entries, leafId);
     const lines: string[] = [];
@@ -180,7 +180,7 @@ function buildParentTranscript(entries: SessionEntry[], leafId: string | null): 
   }
 }
 
-function extractTextContent(content: string | Array<{ type: string; text?: string }>): string {
+export function extractTextContent(content: string | Array<{ type: string; text?: string }>): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
@@ -191,7 +191,7 @@ function extractTextContent(content: string | Array<{ type: string; text?: strin
 
 // ── Skill Loading ─────────────────────────────────────────────────────────
 
-function loadSkill(name: string, cwd: string): string | null {
+export function loadSkill(name: string, cwd: string): string | null {
   const candidates = [
     // Project (standard → pi-specific)
     path.join(cwd, ".agents", "skills", name, "SKILL.md"),
@@ -208,7 +208,7 @@ function loadSkill(name: string, cwd: string): string | null {
 
 // ── Model Resolution ──────────────────────────────────────────────────────
 
-function resolveModel(spec: string | undefined, registry: ModelRegistry, parentModel: Model<Api>): Model<Api> | undefined {
+export function resolveModel(spec: string | undefined, registry: ModelRegistry, parentModel: Model<Api>): Model<Api> | undefined {
   if (!spec) return parentModel;
   const idx = spec.indexOf("/");
   if (idx === -1) {
@@ -310,7 +310,7 @@ async function runAgent(
 
 // ── Output Extraction ────────────────────────────────────────────────────
 
-function extractOutput(messages: AgentMessage[]): string {
+export function extractOutput(messages: AgentMessage[]): string {
   const parts: string[] = [];
   for (const msg of messages) {
     if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
@@ -321,7 +321,7 @@ function extractOutput(messages: AgentMessage[]): string {
   return parts.join("\n\n");
 }
 
-function extractUsage(messages: AgentMessage[]) {
+export function extractUsage(messages: AgentMessage[]) {
   const usage = { input: 0, output: 0, cacheRead: 0, total: 0 };
   for (const msg of messages) {
     if (msg.role !== "assistant" || !msg.usage) continue;
@@ -337,7 +337,7 @@ function extractUsage(messages: AgentMessage[]) {
 
 // ── Formatting ────────────────────────────────────────────────────────────
 
-function fmtDuration(ms: number): string {
+export function fmtDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const s = ms / 1000;
   if (s < 60) return `${s.toFixed(1)}s`;
@@ -346,16 +346,16 @@ function fmtDuration(ms: number): string {
   return `${mins}m${secs}s`;
 }
 
-function fmtTokens(n: number): string {
+export function fmtTokens(n: number): string {
   return n < 1000 ? `${n}` : n < 10000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`;
 }
 
-function trunc(s: string, n: number): string {
+export function trunc(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
 
-const tree = (i: number, n: number) => i === n - 1 ? "└─" : "├─";
-const indent = (i: number, n: number) => i === n - 1 ? "   " : "│  ";
+export const tree = (i: number, n: number) => i === n - 1 ? "└─" : "├─";
+export const indent = (i: number, n: number) => i === n - 1 ? "   " : "│  ";
 
 // ── Extension ─────────────────────────────────────────────────────────────
 
