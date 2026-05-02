@@ -732,13 +732,41 @@ describe("delegate extension integration", () => {
 		expect(toolDef!.description).toContain("subagent");
 	});
 
-	test("has tasks array parameter with minItems 1", async () => {
+	test("has tasks array parameter with minItems 0 (allows help mode)", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 		const schema = toolDef!.parameters as any;
 		expect(schema.type).toBe("object");
 		expect(schema.properties.tasks.type).toBe("array");
-		expect(schema.properties.tasks.minItems).toBe(1);
+		expect(schema.properties.tasks.minItems).toBe(0);
+	});
+
+	test("promptSnippet and promptGuidelines are set", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+		expect(toolDef!.promptSnippet).toBeDefined();
+		expect(toolDef!.promptSnippet).toContain("subagent");
+		expect(toolDef!.promptGuidelines).toBeDefined();
+		expect(toolDef!.promptGuidelines.length).toBeGreaterThanOrEqual(2);
+	});
+
+	test("execute returns help when tasks is empty", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "delegate");
+
+		const result = await toolDef!.execute(
+			"tc-help",
+			{ tasks: [] },
+			undefined,
+			undefined,
+			ts.session.extensionRunner as any,
+		);
+
+		const text = result.content[0].text;
+		expect(text).toContain("Delegate Help");
+		expect(text).toContain("Available Agents");
+		expect(text).toContain("Task Fields");
+		expect(text).toContain("```markdown");
 	});
 
 	test("task schema has prompt as required string", async () => {
@@ -761,7 +789,7 @@ describe("delegate extension integration", () => {
 		expect(taskSchema.required).toEqual(["prompt"]);
 	});
 
-	test("execute rejects unknown agents", async () => {
+	test("execute rejects unknown agents and suggests help", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "delegate");
 
@@ -776,6 +804,7 @@ describe("delegate extension integration", () => {
 		const text = result.content[0].text;
 		expect(text).toContain("Unknown agent");
 		expect(text).toContain("nonexistent-agent-xyz");
+		expect(text).toContain("Call delegate with no tasks for full help");
 	});
 
 	test("execute throws when no system prompt and no agent", async () => {
