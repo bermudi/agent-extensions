@@ -627,14 +627,6 @@ export function formatSessionDate(timestamp: string): string {
   return new Date(timestamp).toLocaleString();
 }
 
-export function formatSessionChoiceLabel(summary: SessionSummary): string {
-  const date = new Date(summary.timestamp).toLocaleDateString("en-US", {
-    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
-  });
-  const label = summary.name || summary.firstUserMessage || "(empty)";
-  return `${date}  ${label.slice(0, 80)} · ${summary.id.slice(0, 8)}`;
-}
-
 export function filterByCwd(summaries: readonly SessionSummary[], cwdFilter?: string): SessionSummary[] {
   const normalizedFilter = cwdFilter?.trim().toLowerCase();
   if (!normalizedFilter) return [...summaries];

@@ -18,6 +18,7 @@ const DB_PATH = path.join(INDEX_DIR, "index.db");
 export interface SearchResult {
 	sessionPath: string;
 	project: string;
+	cwd: string;
 	timestamp: string;
 	snippet: string;
 	rank: number;
@@ -53,6 +54,7 @@ function getDb(): Database.Database {
 		CREATE TABLE IF NOT EXISTS sessions (
 			path TEXT PRIMARY KEY,
 			project TEXT NOT NULL,
+			cwd TEXT NOT NULL DEFAULT '',
 			session_ts TEXT NOT NULL,
 			mtime_ms INTEGER NOT NULL,
 			first_user_message TEXT
@@ -69,6 +71,13 @@ function getDb(): Database.Database {
 			value TEXT
 		);
 	`);
+
+	// Migrate: add cwd column if missing (existing databases from before cwd was stored)
+	try {
+		_db.exec("ALTER TABLE sessions ADD COLUMN cwd TEXT NOT NULL DEFAULT ''");
+	} catch {
+		/* column already exists */
+	}
 
 	return _db;
 }
@@ -265,18 +274,20 @@ function yieldTick(): Promise<void> {
  * Read a file asynchronously and extract indexable content.
  * Same logic as extractContent but non-blocking.
  */
-async function extractContentAsync(filePath: string): Promise<{ chunks: string[]; firstUserMessage: string | null }> {
+async function extractContentAsync(filePath: string): Promise<{ chunks: string[]; firstUserMessage: string | null; cwd: string }> {
 	const chunks: string[] = [];
 	let firstUserMessage: string | null = null;
+	let cwd = "";
 
 	let data: string;
 	try {
 		data = await fsp.readFile(filePath, "utf-8");
 	} catch {
-		return { chunks, firstUserMessage };
+		return { chunks, firstUserMessage, cwd };
 	}
 
 	const lines = data.split("\n");
+	let isFirstLine = true;
 
 	for (const line of lines) {
 		if (!line.trim()) continue;
@@ -285,8 +296,15 @@ async function extractContentAsync(filePath: string): Promise<{ chunks: string[]
 		try {
 			entry = JSON.parse(line);
 		} catch {
+			isFirstLine = false;
 			continue;
 		}
+
+		// Extract cwd from session header (first non-empty line)
+		if (isFirstLine && entry.type === "session" && typeof entry.cwd === "string") {
+			cwd = entry.cwd;
+		}
+		isFirstLine = false;
 
 		if (entry.type !== "message") continue;
 
@@ -310,7 +328,7 @@ async function extractContentAsync(filePath: string): Promise<{ chunks: string[]
 		}
 	}
 
-	return { chunks, firstUserMessage };
+	return { chunks, firstUserMessage, cwd };
 }
 
 const BATCH_SIZE = 20; // files per batch before yielding to event loop
@@ -384,8 +402,8 @@ export async function updateIndex(onProgress?: (msg: string) => void): Promise<n
 	onProgress?.(`Indexing ${toIndex.length} session${toIndex.length > 1 ? "s" : ""}...`);
 
 	const upsertSession = db.prepare(`
-		INSERT OR REPLACE INTO sessions (path, project, session_ts, mtime_ms, first_user_message)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT OR REPLACE INTO sessions (path, project, cwd, session_ts, mtime_ms, first_user_message)
+		VALUES (?, ?, ?, ?, ?, ?)
 	`);
 	const deleteFts = db.prepare("DELETE FROM session_fts WHERE session_path = ?");
 	const insertFts = db.prepare("INSERT INTO session_fts (content, session_path) VALUES (?, ?)");
@@ -415,12 +433,12 @@ export async function updateIndex(onProgress?: (msg: string) => void): Promise<n
 			for (const item of batchData) {
 				if (!item) continue;
 
-				const { file, mtime, chunks, firstUserMessage } = item;
+				const { file, mtime, chunks, firstUserMessage, cwd } = item;
 				const project = projectFromDir(file.dirName, getCodeDirsCached);
 				const sessionTs = timestampFromFilename(file.filename);
 
 				deleteFts.run(file.path);
-				upsertSession.run(file.path, project, sessionTs, mtime, firstUserMessage);
+				upsertSession.run(file.path, project, cwd, sessionTs, mtime, firstUserMessage);
 
 				const combined = chunks.join("\n\n");
 				if (!combined.trim()) continue;
@@ -519,6 +537,7 @@ export function search(query: string, limit = 20): SearchResult[] {
 		SELECT
 			bm.session_path,
 			s.project,
+			s.cwd,
 			s.session_ts,
 			s.first_user_message,
 			bm.best_rank as rank,
@@ -534,6 +553,7 @@ export function search(query: string, limit = 20): SearchResult[] {
 	const raw = stmt.all({ query: safeQuery, limit }) as {
 		session_path: string;
 		project: string;
+		cwd: string;
 		session_ts: string;
 		first_user_message: string | null;
 		snippet: string;
@@ -543,6 +563,7 @@ export function search(query: string, limit = 20): SearchResult[] {
 	return raw.map((row) => ({
 		sessionPath: row.session_path,
 		project: row.project,
+		cwd: row.cwd ?? "",
 		timestamp: row.session_ts,
 		snippet: row.snippet ?? "",
 		rank: row.rank,
@@ -580,7 +601,7 @@ export function listRecent(limit = 20): SearchResult[] {
 	const db = getDb();
 
 	const stmt = db.prepare(`
-		SELECT path, project, session_ts, first_user_message
+		SELECT path, project, cwd, session_ts, first_user_message
 		FROM sessions
 		ORDER BY session_ts DESC
 		LIMIT ?
@@ -589,6 +610,7 @@ export function listRecent(limit = 20): SearchResult[] {
 	const rows = stmt.all(limit) as {
 		path: string;
 		project: string;
+		cwd: string;
 		session_ts: string;
 		first_user_message: string | null;
 	}[];
@@ -596,6 +618,7 @@ export function listRecent(limit = 20): SearchResult[] {
 	return rows.map((row) => ({
 		sessionPath: row.path,
 		project: row.project,
+		cwd: row.cwd ?? "",
 		timestamp: row.session_ts,
 		snippet: "",
 		rank: 0,

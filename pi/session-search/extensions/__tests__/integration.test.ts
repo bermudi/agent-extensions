@@ -137,15 +137,14 @@ describe("session-search extension", () => {
     });
   });
 
-  // ── 2. Extension registers both commands ────────────────────────
+  // ── 2. Extension registers the /search command ──────────────────
 
   describe("command registration", () => {
-    it("registers /sessions and /search commands", async () => {
+    it("registers /search command", async () => {
       ts = await createTestSession({ extensions: [EXTENSION] });
       const commands = getExtensionCommands(ts);
       const names = commands.map((c: any) => c.command.name);
 
-      expect(names).toContain("sessions");
       expect(names).toContain("search");
     });
 
@@ -153,10 +152,8 @@ describe("session-search extension", () => {
       ts = await createTestSession({ extensions: [EXTENSION] });
       const commands = getExtensionCommands(ts);
 
-      const sessions = commands.find((c: any) => c.command.name === "sessions");
       const search = commands.find((c: any) => c.command.name === "search");
 
-      expect(sessions?.command.description).toBeTruthy();
       expect(search?.command.description).toBeTruthy();
     });
   });

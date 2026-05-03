@@ -12,6 +12,7 @@ import { handleSearchInput, renderSearch } from "./screens/search";
 import { handlePreviewInput, renderPreview } from "./screens/preview";
 import { handlePromptInput, renderPromptInput } from "./screens/prompt-input";
 import { search as indexerSearch, getSessionSnippets, getStats, listRecent } from "./indexer";
+import { isSameProjectPath } from "./session-utils";
 
 const BOX_WIDTH = 82;
 
@@ -26,6 +27,7 @@ export class SessionSearchComponent {
 		private done: (action: PaletteAction) => void,
 		private tui: { requestRender(): void },
 		private theme: Theme,
+		private projectCwd?: string,
 	) {
 		let totalSessions = 0;
 		try {
@@ -189,7 +191,13 @@ export class SessionSearchComponent {
 
 	private loadRecent(): void {
 		try {
-			this.searchState.results = listRecent(20);
+			const all = listRecent(20);
+			if (this.projectCwd) {
+				const sameProject = all.filter((r) => isSameProjectPath(r.cwd, this.projectCwd!));
+				this.searchState.results = sameProject.length > 0 ? sameProject : all;
+			} else {
+				this.searchState.results = all;
+			}
 			this.searchState.selected = 0;
 		} catch {
 			/* index may not be ready */

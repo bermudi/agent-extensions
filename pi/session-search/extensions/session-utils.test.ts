@@ -9,7 +9,6 @@ import {
   filterByCwd,
   findSessionMatch,
   formatConversation,
-  formatSessionChoiceLabel,
   formatSessionDate,
   hasEntryId,
   isPathWithinDir,
@@ -642,54 +641,6 @@ describe("formatSessionDate", () => {
     const result = formatSessionDate("2026-04-15T00:00:00.000Z");
     expect(typeof result).toBe("string");
     expect(result.length).toBeGreaterThan(0);
-  });
-});
-
-describe("formatSessionChoiceLabel", () => {
-  test("includes name when present", () => {
-    const summary: SessionSummary = {
-      file: "/tmp/s.jsonl",
-      id: "abc-123-def",
-      timestamp: "2026-04-15T00:00:00.000Z",
-      cwd: "/project",
-      firstUserMessage: "hello",
-      name: "My Session",
-      latestLeafId: null,
-      segments: [],
-    };
-    const label = formatSessionChoiceLabel(summary);
-    expect(label).toContain("My Session");
-    expect(label).toContain("abc-123");
-  });
-
-  test("falls back to firstUserMessage when name is absent", () => {
-    const summary: SessionSummary = {
-      file: "/tmp/s.jsonl",
-      id: "abc-123-def",
-      timestamp: "2026-04-15T00:00:00.000Z",
-      cwd: "/project",
-      firstUserMessage: "hello world",
-      name: null,
-      latestLeafId: null,
-      segments: [],
-    };
-    const label = formatSessionChoiceLabel(summary);
-    expect(label).toContain("hello world");
-  });
-
-  test("falls back to (empty) when both name and firstUserMessage are absent", () => {
-    const summary: SessionSummary = {
-      file: "/tmp/s.jsonl",
-      id: "abc-123-def",
-      timestamp: "2026-04-15T00:00:00.000Z",
-      cwd: "/project",
-      firstUserMessage: "",
-      name: null,
-      latestLeafId: null,
-      segments: [],
-    };
-    const label = formatSessionChoiceLabel(summary);
-    expect(label).toContain("(empty)");
   });
 });
 

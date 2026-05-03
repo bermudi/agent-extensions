@@ -24,14 +24,12 @@ import {
   formatConversation,
   hasEntryId,
   isPathWithinDir,
-  isSameProjectPath,
   parseSessionText,
   type ParsedSession,
   type SessionSummary,
   type SessionMatch,
   matchFieldLabel,
   formatSessionDate,
-  formatSessionChoiceLabel,
   filterByCwd,
   searchSessions,
   extractText,
@@ -470,41 +468,6 @@ export default function sessionSearch(pi: ExtensionAPI): void {
     },
   });
 
-  // ── /sessions command ───────────────────────────────────────────────
-
-  pi.registerCommand("sessions", {
-    description: "Browse and list past sessions",
-    handler: async (args, ctx) => {
-      const summaries = await loadSessionSummaries();
-      if (summaries.length === 0) {
-        ctx.ui.notify("No sessions found.", "info");
-        return;
-      }
-
-      const limit = clampPositiveInteger(args ? Number.parseInt(args, 10) : undefined, 20, MAX_LIST_RESULTS);
-      const sameProject = summaries.filter((summary) => isSameProjectPath(summary.cwd, ctx.cwd));
-      const hits = (sameProject.length > 0 ? sameProject : summaries).slice(0, limit);
-
-      if (hits.length === 0) {
-        ctx.ui.notify("No sessions found for this project.", "info");
-        return;
-      }
-
-      const labelToFile = new Map<string, string>();
-      const items = hits.map((summary) => {
-        const label = formatSessionChoiceLabel(summary);
-        labelToFile.set(label, summary.file);
-        return label;
-      });
-
-      const choice = await ctx.ui.select("Sessions:", items);
-      const file = choice ? labelToFile.get(choice) : undefined;
-      if (file) {
-        await ctx.switchSession(file);
-      }
-    },
-  });
-
   // ── Hooks ───────────────────────────────────────────────────────────
 
   pi.on("session_start", async (event, ctx) => {
@@ -599,7 +562,7 @@ export default function sessionSearch(pi: ExtensionAPI): void {
     }
 
     const action = await ctx.ui.custom<PaletteAction>(
-      (tui, theme, _kb, done) => new SessionSearchComponent(done, tui, theme),
+      (tui, theme, _kb, done) => new SessionSearchComponent(done, tui, theme, ctx.cwd),
       {
         overlay: true,
         overlayOptions: {

@@ -39,6 +39,7 @@ describe("handleSearchInput", () => {
 				{
 					sessionPath: "/test",
 					project: "test",
+					cwd: "",
 					timestamp: "",
 					snippet: "",
 					rank: 0,
