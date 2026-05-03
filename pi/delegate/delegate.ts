@@ -65,12 +65,14 @@ export interface TaskProgress {
   tokens: number;
   toolUses: number;
   error?: string;
+  model?: string;
 }
 
 export interface DelegateDetails {
   tasks: TaskDef[];
   results: (TaskResult | { error: string })[];
   progress: TaskProgress[];
+  parentModel?: string;
 }
 
 export interface TaskResult {
@@ -407,6 +409,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     }),
 
     async execute(_id, params: { tasks: TaskDef[] }, signal, onUpdate, ctx) {
+      const parentModelId = ctx.model?.id;
       const agents = discoverAgents(ctx.cwd);
 
       // ── Help mode ─────────────────────────────────────────────────
@@ -458,7 +461,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             "- `cwd` — Working directory. Default: parent session cwd.",
             "- `context` — 'fresh' (default) or 'inherit' to include parent session transcript.",
           ].join("\n") }],
-          details: { tasks: [], results: [], progress: [] },
+          details: { tasks: [], results: [], progress: [], parentModel: parentModelId },
         };
       }
 
@@ -471,7 +474,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const names = [...agents.keys()];
         return {
           content: [{ type: "text", text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with no tasks for full help.` }],
-          details: { tasks: params.tasks, results: [], progress: [] },
+          details: { tasks: params.tasks, results: [], progress: [], parentModel: parentModelId },
         };
       }
 
@@ -555,17 +558,18 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         durationMs: 0,
         tokens: 0,
         toolUses: 0,
+        model: t.model?.id,
       }));
       const fire = () => onUpdate?.({
         content: [{ type: "text", text: `Running ${resolved.length} subagent${resolved.length > 1 ? "s" : ""}…` }],
-        details: { tasks: params.tasks, results: [], progress: [...progress] },
+        details: { tasks: params.tasks, results: [], progress: [...progress], parentModel: parentModelId },
       });
       fire();
 
       // ── Run parallel ──────────────────────────────────────────────
       const results = await Promise.allSettled(resolved.map(async (t, i) => {
         const p = progress[i]!;
-        p.status = "running"; fire();
+        p.status = "running"; p.model = t.model?.id; fire();
         try {
           const r = await runAgent(
             { systemPrompt: t.systemPrompt, model: t.model, thinking: t.thinking, tools: t.tools, cwd: t.cwd },
@@ -613,7 +617,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       return {
         content: [{ type: "text", text: parts.join("\n\n") }],
-        details: { tasks: params.tasks, results: finalResults, progress },
+        details: { tasks: params.tasks, results: finalResults, progress, parentModel: parentModelId },
       };
     },
 
@@ -663,18 +667,19 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         for (let i = 0; i < total; i++) {
           const p = progress[i]!;
           const stats = (parts: string[]) => parts.length ? theme.fg("muted", ` · ${parts.join(" · ")}`) : "";
+          const modelTag = p.model && p.model !== details.parentModel ? theme.fg("accent", ` ${p.model}`) : "";
           switch (p.status) {
             case "done":
-              lines.push(`${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${stats([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`);
+              lines.push(`${tree(i, total)} ${theme.fg("success", "✓")} ${theme.bold(p.agent)}${modelTag}${stats([fmtDuration(p.durationMs), `${fmtTokens(p.tokens)} tokens`])}`);
               break;
             case "failed":
-              lines.push(`${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`);
+              lines.push(`${tree(i, total)} ${theme.fg("error", "✗")} ${theme.bold(p.agent)}${modelTag}${p.error ? theme.fg("error", ` ${p.error}`) : ""}`);
               break;
             case "running":
-              lines.push(`${tree(i, total)} ${theme.fg("warning", "●")} ${theme.bold(p.agent)}${stats(p.toolUses > 0 ? [`${p.toolUses} tool use${p.toolUses > 1 ? "s" : ""}`, `${fmtTokens(p.tokens)} tokens`] : [])}`);
+              lines.push(`${tree(i, total)} ${theme.fg("warning", "●")} ${theme.bold(p.agent)}${modelTag}${stats(p.toolUses > 0 ? [`${p.toolUses} tool use${p.toolUses > 1 ? "s" : ""}`, `${fmtTokens(p.tokens)} tokens`] : [])}`);
               break;
             default:
-              lines.push(`${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)} ${theme.fg("muted", "waiting…")}`);
+              lines.push(`${tree(i, total)} ${theme.fg("muted", "○")} ${theme.bold(p.agent)}${modelTag} ${theme.fg("muted", "waiting…")}`);
           }
         }
         if (done > 0 && done < total) lines.push("", theme.fg("muted", `${done}/${total} complete`));
