@@ -2,3 +2,6 @@ node_modules/
 *.bundle.mjs
 .agents/
 .pi/extensions/
+
+# LLM context dumps
+.pi/llm-dump/
