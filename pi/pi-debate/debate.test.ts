@@ -441,4 +441,31 @@ describe("debate renderResult", () => {
     expect(out).toContain("[ERR]✗");
     expect(out).toContain("Round 1 — B");
   });
+
+  test("returns Container with Markdown children when expanded", async () => {
+    ts = await createTestSession({ extensions: [EXTENSION] });
+    const toolDef = getToolDef(ts, "debate");
+    const theme = mockTheme();
+    const ctx = mockRenderCtx({ executionStarted: true, state: { startedAt: Date.now() - 5000 } });
+
+    const result = {
+      content: [{ type: "text", text: "Done" }],
+      details: {
+        topic: "Rust vs Go",
+        rounds: 1,
+        transcript: [
+          { round: 1, speaker: "A" as const, model: "anthropic/claude", output: "Rust is faster.", durationMs: 2000, tokens: 50 },
+          { round: 1, speaker: "B" as const, model: "openai/gpt", output: "Go is simpler.", durationMs: 1800, tokens: 45 },
+        ],
+        judgeVerdict: "**Winner: Draw**\nBoth made good points.",
+        progress: [
+          { phase: "done" as const, round: 1, totalRounds: 1, speaker: "A" as const, tokens: 95, durationMs: 3800 },
+        ],
+      },
+    };
+
+    const component = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
+    // Expanded returns a Container, not a Text
+    expect(component.constructor.name).toBe("Container");
+  });
 });

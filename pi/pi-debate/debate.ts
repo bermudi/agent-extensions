@@ -26,10 +26,12 @@ import {
   createWriteTool,
   type ExtensionAPI,
   type ExtensionContext,
+  getMarkdownTheme,
+  keyHint,
   type ModelRegistry,
   type SessionEntry,
 } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -614,7 +616,6 @@ export default function debateExtension(pi: ExtensionAPI): void {
 
     renderResult(result, options, theme, ctx) {
       const state = ctx.state as { startedAt?: number };
-      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const details = result.details as DebateDetails | undefined;
 
       if (!details?.progress?.length) {
@@ -622,16 +623,18 @@ export default function debateExtension(pi: ExtensionAPI): void {
           ?.filter((c) => c.type === "text")
           .map((c) => c.text)
           .join("\n") ?? "";
+        const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
         text.setText(content ? `\n${content}` : "");
         return text;
       }
 
       const { progress, transcript } = details;
-      const lines: string[] = [""];
       const elapsed = state.startedAt ? ` · ${fmtDuration(Date.now() - state.startedAt)}` : "";
 
+      // ── Partial (still running) ────────────────────────────────
       if (options.isPartial) {
-        lines.push(theme.fg("muted", `Debating${elapsed}`), "");
+        const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+        const lines: string[] = ["", theme.fg("muted", `Debating${elapsed}`), ""];
 
         for (const p of progress) {
           switch (p.phase) {
@@ -654,39 +657,84 @@ export default function debateExtension(pi: ExtensionAPI): void {
         if (done > 0 && done < total) {
           lines.push("", theme.fg("muted", `${done}/${total} turns complete`));
         }
-      } else {
-        const totalTokens = transcript.reduce((sum, e) => sum + e.tokens, 0);
-        const totalMs = transcript.reduce((sum, e) => sum + e.durationMs, 0);
-        const wallTime = state.startedAt ? fmtDuration(Date.now() - state.startedAt) : fmtDuration(totalMs);
+        text.setText(lines.join("\n"));
+        return text;
+      }
 
-        lines.push(theme.fg("muted", `${transcript.length}/${details.rounds * 2} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`));
-        lines.push("");
+      // ── Complete — expanded (Ctrl+O) ──────────────────────────
+      const totalTokens = transcript.reduce((sum, e) => sum + e.tokens, 0);
+      const totalMs = transcript.reduce((sum, e) => sum + e.durationMs, 0);
+      const wallTime = state.startedAt ? fmtDuration(Date.now() - state.startedAt) : fmtDuration(totalMs);
 
+      if (options.expanded) {
+        const mdTheme = getMarkdownTheme();
+        const container = new Container();
+
+        // Header
+        container.addChild(new Text(
+          theme.fg("muted", `${transcript.length}/${details.rounds * 2} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`),
+          0, 0,
+        ));
+        container.addChild(new Spacer(1));
+
+        // Full transcript
         for (const entry of transcript) {
-          const icon = entry.error
-            ? theme.fg("error", "✗")
-            : theme.fg("success", "✓");
-          const label = `Round ${entry.round} — ${entry.speaker}`;
-          lines.push(
-            `${icon} ${theme.bold(label)} ${theme.fg("muted", `(${entry.model})`)}` +
-            theme.fg("muted", ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`),
-          );
+          const icon = entry.error ? theme.fg("error", "✗") : theme.fg("success", "✓");
+          const label = `Round ${entry.round} — Participant ${entry.speaker}`;
+          container.addChild(new Text(
+            `${icon} ${theme.bold(label)} ${theme.fg("muted", `(${entry.model})`)}${theme.fg("muted", ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`)}`,
+            0, 0,
+          ));
+          container.addChild(new Markdown(entry.output, 1, 0, mdTheme));
+          container.addChild(new Spacer(1));
         }
 
+        // Judge verdict
         if (details.judgeVerdict) {
-          lines.push("");
-          const verdictLines = details.judgeVerdict.trim().split("\n");
-          lines.push(theme.bold("Judge:"));
-          const maxLines = options.expanded ? verdictLines.length : 6;
-          for (const line of verdictLines.slice(0, maxLines)) {
-            lines.push(`  ${theme.fg("toolOutput", line)}`);
-          }
-          if (verdictLines.length > maxLines) {
-            lines.push(`  ${theme.fg("muted", `… ${verdictLines.length - maxLines} more lines`)}`);
-          }
+          container.addChild(new Text(theme.bold("Judge:"), 0, 0));
+          container.addChild(new Markdown(details.judgeVerdict, 1, 0, mdTheme));
+        }
+
+        return container;
+      }
+
+      // ── Complete — collapsed (default) ────────────────────────
+      // Reuse lastComponent only if it's a Text; expanded path returns Container
+      const last = ctx.lastComponent as Record<string, unknown> | undefined;
+      const text = (last && "setText" in last ? ctx.lastComponent as Text : undefined) ?? new Text("", 0, 0);
+      const lines: string[] = [
+        "",
+        theme.fg("muted", `${transcript.length}/${details.rounds * 2} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`),
+        "",
+      ];
+
+      for (const entry of transcript) {
+        const icon = entry.error ? theme.fg("error", "✗") : theme.fg("success", "✓");
+        const label = `Round ${entry.round} — ${entry.speaker}`;
+        lines.push(
+          `${icon} ${theme.bold(label)} ${theme.fg("muted", `(${entry.model})`)}` +
+          theme.fg("muted", ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`),
+        );
+      }
+
+      if (details.judgeVerdict) {
+        lines.push("");
+        const verdictLines = details.judgeVerdict.trim().split("\n");
+        lines.push(theme.bold("Judge:"));
+        const maxLines = 4;
+        for (const line of verdictLines.slice(0, maxLines)) {
+          lines.push(`  ${theme.fg("toolOutput", line)}`);
+        }
+        if (verdictLines.length > maxLines) {
+          lines.push(`  ${theme.fg("muted", `… ${verdictLines.length - maxLines} more lines`)}`);
         }
       }
 
+      try {
+        lines.push("", theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`));
+      } catch {
+        lines.push("", theme.fg("muted", "(Ctrl+O to expand)"));
+      }
       text.setText(lines.join("\n"));
       return text;
     },
