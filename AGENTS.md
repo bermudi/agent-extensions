@@ -8,7 +8,8 @@ Personal repo for coding agent extensions.
 ## Conventions
 
 - `pi/reference/` — third-party extensions kept for study. **Read-only.** Not imported, not tested, not edited.
-- `bun run test` — runs the test suite (excludes `pi/reference/`). Plain `bun test` also works but will include reference tests.
+- test your extension. `bun run test` and `.agents/skills/pi-test-harness`
+- extension live under `pi/` for Pi and `opencode/` for OpenCode
 
 ## Extension install locations
 
@@ -20,4 +21,5 @@ Both locations are auto-discovered by pi at session start. Symlink source files 
 | `~/.pi/agent/extensions/*.ts` | Global (all projects) | `ln -s pi/<ext>/<file>.ts ~/.pi/agent/extensions/<file>.ts` |
 
 - `pi/reference/` — third-party extensions kept for study. **Read-only.** Not installed.
+- Extensions live in `pi/<name>/` during development. **Do not** symlink/install globally until bermudi says it's ready.
 - Extensions load at session start. Use `/reload` to pick up changes mid-session.
