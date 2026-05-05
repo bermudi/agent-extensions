@@ -15,11 +15,9 @@ import {
   convertToLlm,
   type ExtensionAPI,
   type ExtensionContext,
-  getMarkdownTheme,
-  keyHint,
   type ModelRegistry,
 } from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, matchesKey, Spacer, Text, truncateToWidth } from "@mariozechner/pi-tui";
+import { matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -672,9 +670,40 @@ export default function fusionExtension(pi: ExtensionAPI): void {
         const totalDuration = totalSourceDuration + fusionResult.durationMs;
         const totalTokens = totalSourceTokens + fusionResult.tokens;
 
-        // Content = what the LLM sees on next turn. Keep it tight: just the fused answer.
-        // Details = what the renderer shows (analysis, sources, full stats).
-        const content = fusionResult.fused;
+        // Content = full inline markdown — no custom renderer, no expand/collapse.
+        const parts: string[] = [];
+        parts.push(`# Fusion Result`);
+        parts.push(
+          `**Sources:** ${sourceResults.length} models · **Fused by:** ${fuseModel.provider}/${fuseModel.id}`,
+        );
+        parts.push(`**Time:** ${fmtDuration(totalDuration)} · **Tokens:** ${fmtTokens(totalTokens)}`);
+        parts.push("");
+
+        if (fusionResult.analysis) {
+          parts.push("## Analysis");
+          parts.push(fusionResult.analysis);
+          parts.push("");
+        }
+
+        parts.push("## Fused Answer");
+        parts.push(fusionResult.fused);
+        parts.push("");
+
+        parts.push("## Source Responses");
+        for (const src of sourceResults) {
+          const ok = !src.error;
+          const status = ok
+            ? `${fmtDuration(src.durationMs)} · ${fmtTokens(src.tokens)} tok`
+            : `failed · ${src.error!}`;
+          parts.push(`### ${ok ? "✓" : "✗"} ${src.model.provider}/${src.model.id} — ${status}`);
+          if (ok && src.output) {
+            parts.push("");
+            parts.push(src.output);
+          }
+          parts.push("");
+        }
+
+        const content = parts.join("\n");
 
         const details: FusionDetails = {
           prompt,
@@ -690,12 +719,7 @@ export default function fusionExtension(pi: ExtensionAPI): void {
         pi.appendEntry("fusion-result", { details });
 
         pi.sendMessage(
-          {
-            customType: "fusion",
-            content,
-            display: true,
-            details,
-          },
+          { customType: "fusion", content, display: true },
           { triggerTurn: false },
         );
 
@@ -747,108 +771,5 @@ export default function fusionExtension(pi: ExtensionAPI): void {
         ctx.ui.notify("Fusion result injected into conversation context", "info");
       }
     },
-  });
-
-  // ── Message Renderer ───────────────────────────────────────────
-
-  pi.registerMessageRenderer("fusion", (message, options, theme) => {
-    const details = message.details as FusionDetails | undefined;
-    if (!details) {
-      const text = typeof message.content === "string" ? message.content : "";
-      return new Text(text, 0, 0);
-    }
-
-    const mdTheme = getMarkdownTheme();
-    const container = new Container();
-    const okCount = details.sources.filter((s) => !s.error).length;
-
-    // ── Header ──────────────────────────────────────────────────
-    container.addChild(new Text(theme.fg("accent", theme.bold("🔥 Model Fusion")), 0, 0));
-    container.addChild(
-      new Text(
-        theme.fg(
-          "muted",
-          `${okCount}/${details.sources.length} sources · ${details.fuseModel} · ${fmtTokens(details.totalTokens)} tok · ${fmtDuration(details.totalDurationMs)}`,
-        ),
-        0,
-        0,
-      ),
-    );
-    container.addChild(new Spacer(1));
-
-    if (options.expanded) {
-      // ── Analysis ─────────────────────────────────────────────
-      if (details.analysis) {
-        container.addChild(new Text(theme.fg("accent", theme.bold("▸ Analysis")), 0, 0));
-        container.addChild(new Markdown(details.analysis, 1, 0, mdTheme));
-        container.addChild(new Spacer(1));
-      }
-
-      // ── Fused Answer ─────────────────────────────────────────
-      container.addChild(new Text(theme.fg("accent", theme.bold("▸ Fused Answer")), 0, 0));
-      container.addChild(new Markdown(details.fused, 1, 0, mdTheme));
-      container.addChild(new Spacer(1));
-
-      // ── Sources ──────────────────────────────────────────────
-      container.addChild(new Text(theme.fg("accent", theme.bold("▸ Sources")), 0, 0));
-      for (const src of details.sources) {
-        const icon = src.error ? theme.fg("error", "✗") : theme.fg("success", "✓");
-        const status = src.error
-          ? theme.fg("error", `failed · ${src.error}`)
-          : theme.fg("muted", `${fmtDuration(src.durationMs)} · ${fmtTokens(src.tokens)} tok`);
-        container.addChild(
-          new Text(
-            `${icon} ${theme.bold(`${src.model.provider}/${src.model.id}`)}  ${status}`,
-            0,
-            0,
-          ),
-        );
-        if (!src.error && src.output && src.output !== "(no output)") {
-          const lines = src.output.split("\n");
-          const capped = lines.slice(0, 80).join("\n");
-          container.addChild(new Markdown(capped, 1, 0, mdTheme));
-          if (lines.length > 80) {
-            container.addChild(new Text(theme.fg("muted", `  … ${lines.length - 80} more lines`), 1, 0));
-          }
-        } else if (!src.error) {
-          container.addChild(new Text(theme.fg("warning", "  (no output)"), 1, 0));
-        }
-        container.addChild(new Spacer(1));
-      }
-
-      // ── Continue hint ────────────────────────────────────────
-      let continueHint: string;
-      try {
-        continueHint = keyHint("app.tools.expand", "to collapse");
-      } catch {
-        continueHint = "Ctrl+O to collapse";
-      }
-      container.addChild(new Text(theme.fg("dim", `(${continueHint} · /fusion-continue to discuss)`), 0, 0));
-    } else {
-      // ── Collapsed: compact fused preview ─────────────────────
-      const fusedLines = details.fused.split("\n");
-      const preview = fusedLines.slice(0, 4).join("\n");
-      container.addChild(new Markdown(preview, 1, 0, mdTheme));
-      if (fusedLines.length > 4) {
-        container.addChild(new Text(theme.fg("muted", `… ${fusedLines.length - 4} more lines`), 1, 0));
-      }
-      container.addChild(new Spacer(1));
-
-      let expandHint: string;
-      try {
-        expandHint = keyHint("app.tools.expand", "to expand");
-      } catch {
-        expandHint = "Ctrl+O to expand";
-      }
-      container.addChild(
-        new Text(
-          theme.fg("dim", `(${expandHint} · /fusion-continue to discuss result)`),
-          0,
-          0,
-        ),
-      );
-    }
-
-    return container;
   });
 }
