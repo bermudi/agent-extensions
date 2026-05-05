@@ -1,0 +1,1 @@
+../../pi/zed/zed.ts
