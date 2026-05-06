@@ -166,7 +166,7 @@ const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 1200;
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 const GET_UPDATES_TIMEOUT_MS = 35000;
 const API_CALL_TIMEOUT_MS = 15000;
-const MAX_RETRIES = 3;
+const MAX_API_ATTEMPTS = 4;
 const RATE_LIMIT_DELAY_MS = 30;
 const MAX_BACKOFF_MS = 60000;
 const CONFIG_DEBOUNCE_MS = 500;
@@ -379,42 +379,44 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus("telegram", `${label} ${theme.fg("success", "connected")}`);
 	}
 
-	function composeAbortSignal(...signals: (AbortSignal | null | undefined)[]): AbortSignal {
-		const controller = new AbortController();
-		for (const signal of signals) {
-			if (!signal) continue;
-			if (signal.aborted) {
-				controller.abort();
-				break;
-			}
-			signal.addEventListener("abort", () => controller.abort(), { once: true });
-		}
-		return controller.signal;
-	}
-
 	async function telegramFetch(url: string, init?: RequestInit & { timeout?: number }): Promise<Response> {
 		const timeout = init?.timeout ?? API_CALL_TIMEOUT_MS;
-		const fetchInit: RequestInit & { dispatcher?: unknown } = {
-			...init,
-			signal: composeAbortSignal(init?.signal, AbortSignal.timeout(timeout)),
-			dispatcher: httpsAgent,
-		};
-		return await fetch(url, fetchInit);
+		const controller = new AbortController();
+		const onExternalAbort = () => controller.abort();
+		const external = init?.signal;
+		if (external) {
+			if (external.aborted) controller.abort();
+			else external.addEventListener("abort", onExternalAbort, { once: true });
+		}
+		const timeoutId = setTimeout(() => controller.abort(), timeout);
+		try {
+			const fetchInit: RequestInit & { dispatcher?: unknown } = {
+				...init,
+				signal: controller.signal,
+				dispatcher: httpsAgent,
+			};
+			return await fetch(url, fetchInit);
+		} finally {
+			clearTimeout(timeoutId);
+			if (external && !external.aborted) {
+				external.removeEventListener("abort", onExternalAbort);
+			}
+		}
 	}
 
-	async function withRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
+	async function withRetry<T>(fn: () => Promise<T>, maxAttempts = MAX_API_ATTEMPTS): Promise<T> {
 		let lastError: Error | undefined;
-		for (let i = 0; i <= retries; i++) {
+		for (let i = 0; i < maxAttempts; i++) {
 			try {
 				return await fn();
 			} catch (error) {
 				lastError = error instanceof Error ? error : new Error(String(error));
 				const code = (lastError as any).code as number | undefined;
-				if (i >= retries) break;
+				if (i >= maxAttempts - 1) break;
 				if (code === 401 || code === 403) throw lastError;
 				if (code === 429) {
 					const retryAfter = (lastError as any).retryAfter as number | undefined;
-					await new Promise((res) => setTimeout(res, (retryAfter ?? 1) * 1000));
+					await new Promise((res) => setTimeout(res, (retryAfter !== undefined && Number.isFinite(retryAfter) ? retryAfter : 1) * 1000));
 					continue;
 				}
 				const base = Math.min(1000 * Math.pow(2, i), MAX_BACKOFF_MS);
@@ -445,7 +447,7 @@ export default function (pi: ExtensionAPI) {
 		watchdogTimer = setInterval(() => {
 			if (config.botToken && !pollingPromise && pollingState !== "stopped" && pollingState !== "unauthorized") {
 				updateStatus(ctx, "watchdog: restarting poll loop");
-				void startPolling(ctx);
+				void startPolling(ctx).catch(() => {});
 			}
 		}, WATCHDOG_INTERVAL_MS);
 	}
@@ -475,11 +477,12 @@ export default function (pi: ExtensionAPI) {
 			if (!data.ok || data.result === undefined) {
 				const err = new Error(data.description || `Telegram API ${method} failed`);
 				(err as any).code = data.error_code;
-				(err as any).retryAfter = data.error_code === 429 ? parseInt(response.headers.get("retry-after") ?? "1", 10) : undefined;
+				const retryAfterRaw = data.error_code === 429 ? parseInt(response.headers.get("retry-after") ?? "", 10) : undefined;
+				(err as any).retryAfter = Number.isFinite(retryAfterRaw) ? retryAfterRaw : 1;
 				throw err;
 			}
 			return data.result;
-		}, options?.retries ?? MAX_RETRIES));
+		}, options?.retries ?? MAX_API_ATTEMPTS));
 	}
 
 	async function callTelegramMultipart<TResponse>(
@@ -508,11 +511,12 @@ export default function (pi: ExtensionAPI) {
 			if (!data.ok || data.result === undefined) {
 				const err = new Error(data.description || `Telegram API ${method} failed`);
 				(err as any).code = data.error_code;
-				(err as any).retryAfter = data.error_code === 429 ? parseInt(response.headers.get("retry-after") ?? "1", 10) : undefined;
+				const retryAfterRaw = data.error_code === 429 ? parseInt(response.headers.get("retry-after") ?? "", 10) : undefined;
+				(err as any).retryAfter = Number.isFinite(retryAfterRaw) ? retryAfterRaw : 1;
 				throw err;
 			}
 			return data.result;
-		}, options?.retries ?? MAX_RETRIES));
+		}, options?.retries ?? MAX_API_ATTEMPTS));
 	}
 
 	async function downloadTelegramFile(fileId: string, suggestedName: string, fileSize?: number): Promise<string> {
@@ -520,7 +524,7 @@ export default function (pi: ExtensionAPI) {
 		if (fileSize !== undefined && fileSize > MAX_FILE_SIZE) {
 			throw new Error(`File too large (${(fileSize / 1024 / 1024).toFixed(1)}MB > ${MAX_FILE_SIZE / 1024 / 1024}MB)`);
 		}
-		const file = await callTelegram<TelegramGetFileResult>("getFile", { file_id: fileId }, { retries: MAX_RETRIES });
+		const file = await callTelegram<TelegramGetFileResult>("getFile", { file_id: fileId }, { retries: MAX_API_ATTEMPTS });
 		await mkdir(TEMP_DIR, { recursive: true });
 		const targetPath = join(TEMP_DIR, `${Date.now()}-${sanitizeFileName(suggestedName)}`);
 		const response = await telegramFetch(
@@ -546,9 +550,9 @@ export default function (pi: ExtensionAPI) {
 			}
 		};
 
-		void sendTyping();
+		void sendTyping().catch(() => {});
 		typingInterval = setInterval(() => {
-			void sendTyping();
+			void sendTyping().catch(() => {});
 		}, 4000);
 	}
 
@@ -607,8 +611,12 @@ export default function (pi: ExtensionAPI) {
 				state.mode = "draft";
 				state.lastSentText = truncated;
 				return;
-			} catch {
-				draftSupport = "unsupported";
+			} catch (error) {
+				const code = (error as any).code as number | undefined;
+				const msg = error instanceof Error ? error.message.toLowerCase() : "";
+				if (code === 400 || msg.includes("method not found") || msg.includes("not supported") || msg.includes("unknown method")) {
+					draftSupport = "unsupported";
+				}
 			}
 		}
 
@@ -641,7 +649,7 @@ export default function (pi: ExtensionAPI) {
 	function schedulePreviewFlush(chatId: number): void {
 		if (!previewState || previewState.flushTimer) return;
 		previewState.flushTimer = setTimeout(() => {
-			void flushPreview(chatId);
+			void flushPreview(chatId).catch(() => {});
 		}, PREVIEW_THROTTLE_MS);
 	}
 
@@ -673,7 +681,7 @@ export default function (pi: ExtensionAPI) {
 				reply_to_message_id: replyToMessageId,
 			};
 			try {
-				const sent = await callTelegram<TelegramSentMessage>("sendMessage", body, { retries: MAX_RETRIES });
+				const sent = await callTelegram<TelegramSentMessage>("sendMessage", body, { retries: MAX_API_ATTEMPTS });
 				lastMessageId = sent.message_id;
 			} catch (error) {
 				const err = error instanceof Error ? error : new Error(String(error));
@@ -682,7 +690,7 @@ export default function (pi: ExtensionAPI) {
 					const sent = await callTelegram<TelegramSentMessage>("sendMessage", {
 						chat_id: chatId,
 						text: chunk,
-					}, { retries: MAX_RETRIES });
+					}, { retries: MAX_API_ATTEMPTS });
 					lastMessageId = sent.message_id;
 				} else {
 					throw error;
@@ -706,7 +714,7 @@ export default function (pi: ExtensionAPI) {
 					fieldName,
 					attachment.path,
 					attachment.fileName,
-					{ retries: MAX_RETRIES },
+					{ retries: MAX_API_ATTEMPTS },
 				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -1040,20 +1048,21 @@ export default function (pi: ExtensionAPI) {
 			const key = `${message.chat.id}:${message.media_group_id}`;
 			const existing = mediaGroups.get(key) ?? { messages: [] };
 			existing.messages.push(message);
+			if (existing.messages.length === 1) {
+				existing.hardDeadline = setTimeout(() => {
+					const state = mediaGroups.get(key);
+					mediaGroups.delete(key);
+					if (!state) return;
+					void dispatchAuthorizedTelegramMessages(state.messages, ctx).catch(() => {});
+				}, MEDIA_GROUP_MAX_AGE_MS);
+			}
 			if (existing.flushTimer) clearTimeout(existing.flushTimer);
-			if (existing.hardDeadline) clearTimeout(existing.hardDeadline);
 			existing.flushTimer = setTimeout(() => {
 				const state = mediaGroups.get(key);
 				mediaGroups.delete(key);
 				if (!state) return;
-				void dispatchAuthorizedTelegramMessages(state.messages, ctx);
+				void dispatchAuthorizedTelegramMessages(state.messages, ctx).catch(() => {});
 			}, TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS);
-			existing.hardDeadline = setTimeout(() => {
-				const state = mediaGroups.get(key);
-				mediaGroups.delete(key);
-				if (!state) return;
-				void dispatchAuthorizedTelegramMessages(state.messages, ctx);
-			}, MEDIA_GROUP_MAX_AGE_MS);
 			mediaGroups.set(key, existing);
 			return;
 		}
@@ -1194,14 +1203,16 @@ export default function (pi: ExtensionAPI) {
 			if (!activeTelegramTurn) {
 				throw new Error("telegram_attach can only be used while replying to an active Telegram turn");
 			}
+			if (activeTelegramTurn.queuedAttachments.length + params.paths.length > MAX_ATTACHMENTS_PER_TURN) {
+				throw new Error(
+					`Would exceed attachment limit (${MAX_ATTACHMENTS_PER_TURN}), currently have ${activeTelegramTurn.queuedAttachments.length}`,
+				);
+			}
 			const added: string[] = [];
 			for (const inputPath of params.paths) {
 				const stats = await stat(inputPath);
 				if (!stats.isFile()) {
 					throw new Error(`Not a file: ${inputPath}`);
-				}
-				if (activeTelegramTurn.queuedAttachments.length >= MAX_ATTACHMENTS_PER_TURN) {
-					throw new Error(`Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN})`);
 				}
 				activeTelegramTurn.queuedAttachments.push({ path: inputPath, fileName: basename(inputPath) });
 				added.push(inputPath);
@@ -1360,7 +1371,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (finalText && finalText.length <= MAX_MESSAGE_LENGTH) {
 			const finalized = await finalizePreview(turn.chatId);
-			if (!finalized && turn.queuedAttachments.length > 0 && !finalText) {
+			if (!finalized && turn.queuedAttachments.length > 0) {
 				await sendTextReply(turn.chatId, turn.replyToMessageId, "Attached requested file(s).");
 			}
 		} else {
