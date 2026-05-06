@@ -1,7 +1,6 @@
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { homedir } from "node:os";
-import { Agent } from "node:https";
 
 import type { ImageContent, TextContent } from "@mariozechner/pi-ai";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
@@ -321,7 +320,6 @@ export default function (pi: ExtensionAPI) {
 	let rateLimitQueue: Promise<void> = Promise.resolve();
 	let watchdogTimer: ReturnType<typeof setInterval> | undefined;
 	const processedUpdateIds = new Set<number>();
-	const httpsAgent = new Agent({ keepAlive: true, keepAliveMsecs: 30000 });
 
 	function scheduleConfigWrite(): void {
 		if (configWriteTimer) clearTimeout(configWriteTimer);
@@ -390,12 +388,10 @@ export default function (pi: ExtensionAPI) {
 		}
 		const timeoutId = setTimeout(() => controller.abort(), timeout);
 		try {
-			const fetchInit: RequestInit & { dispatcher?: unknown } = {
+			return await fetch(url, {
 				...init,
 				signal: controller.signal,
-				dispatcher: httpsAgent,
-			};
-			return await fetch(url, fetchInit);
+			});
 		} finally {
 			clearTimeout(timeoutId);
 			if (external && !external.aborted) {
