@@ -9,9 +9,9 @@ export default function (pi: ExtensionAPI) {
 	const zedBin = process.platform === "linux" ? "zeditor" : "zed";
 
 	pi.registerCommand("z", {
-		description: "Open Zed editor on cwd",
+		description: "Open Zed editor on cwd (new window)",
 		handler: async (_args, ctx) => {
-			const child = spawn(zedBin, [ctx.cwd], {
+			const child = spawn(zedBin, ["--new", ctx.cwd], {
 				detached: true,
 				stdio: "ignore",
 			});
