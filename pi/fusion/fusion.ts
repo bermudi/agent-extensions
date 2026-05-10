@@ -17,7 +17,7 @@ import {
   type ExtensionContext,
   type ModelRegistry,
 } from "@mariozechner/pi-coding-agent";
-import { matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -84,16 +84,37 @@ function showFusionProgress(
     // Keep spinner animate even without input
     timer = setInterval(() => tui.requestRender(), 120);
 
+    const pad = (s: string, len: number): string => {
+      const vis = visibleWidth(s);
+      return s + " ".repeat(Math.max(0, len - vis));
+    };
+
     return {
       render(width: number): string[] {
         frame++;
-        const entries = [...state.values()];
+        const entries = Array.from(state.values());
         const doneCount = entries.filter((e) => e.status === "done" || e.status === "error").length;
         const spinner = spinnerFrames[frame % spinnerFrames.length]!;
+        const bg = (s: string) => theme.bg("toolPendingBg", s);
 
         const lines: string[] = [];
-        lines.push(theme.fg("accent", theme.bold(` Fusion  ${doneCount}/${entries.length} sources `)));
-        lines.push("");
+
+        // Top border with centered title
+        const title = ` Fusion ${doneCount}/${entries.length} sources `;
+        const titleVis = visibleWidth(title);
+        const titlePad = Math.max(0, width - titleVis);
+        const titleLeft = Math.floor(titlePad / 2);
+        const titleRight = titlePad - titleLeft;
+        lines.push(
+          bg(
+            theme.fg("borderAccent", "─".repeat(titleLeft)) +
+              theme.fg("accent", theme.bold(title)) +
+              theme.fg("borderAccent", "─".repeat(titleRight)),
+          ),
+        );
+
+        // Empty padding row
+        lines.push(bg(" ".repeat(width)));
 
         for (const entry of entries) {
           let icon: string;
@@ -110,7 +131,7 @@ function showFusionProgress(
                 ? theme.fg("accent", "streaming…")
                 : theme.fg("dim", "waiting…");
 
-          lines.push(`${icon} ${theme.bold(entry.key)}  ${status}`);
+          lines.push(bg(pad(`${icon} ${theme.bold(entry.key)}  ${status}`, width)));
 
           // Show last 2 lines of streaming output
           if (entry.output && (entry.status === "running" || entry.status === "done")) {
@@ -118,23 +139,30 @@ function showFusionProgress(
             const preview = outLines.slice(-2);
             for (const pl of preview) {
               if (pl.trim()) {
-                const trimmed = truncateToWidth(pl.trim(), width - 6);
-                lines.push(theme.fg("dim", `  │ ${trimmed}`));
+                const trimmed = truncateToWidth(pl.trim(), width - 4);
+                lines.push(bg(pad(theme.fg("dim", `  │ ${trimmed}`), width)));
               }
             }
           } else if (entry.status === "error" && entry.error) {
-            const trimmed = truncateToWidth(entry.error, width - 6);
-            lines.push(theme.fg("error", `  │ ${trimmed}`));
+            const trimmed = truncateToWidth(entry.error, width - 4);
+            lines.push(bg(pad(theme.fg("error", `  │ ${trimmed}`), width)));
           }
         }
 
-        lines.push("");
-        if (doneCount >= entries.length) {
-          lines.push(theme.fg("muted", "All sources complete · closing…"));
-        } else {
-          lines.push(theme.fg("dim", "Esc to abort · models streaming in parallel"));
-        }
-        return lines.map((l) => truncateToWidth(l, width));
+        // Footer padding row
+        lines.push(bg(" ".repeat(width)));
+
+        // Status / help line
+        const footer =
+          doneCount >= entries.length
+            ? theme.fg("muted", "All sources complete · closing…")
+            : theme.fg("dim", "Esc to abort · models streaming in parallel");
+        lines.push(bg(pad(footer, width)));
+
+        // Bottom border
+        lines.push(bg(theme.fg("borderAccent", "─".repeat(width))));
+
+        return lines;
       },
 
       handleInput(data: string) {
@@ -144,9 +172,7 @@ function showFusionProgress(
         }
       },
 
-      invalidate() {
-        if (timer) { clearInterval(timer); timer = undefined; }
-      },
+      invalidate() {},
     };
   }, {
     overlay: true,
@@ -258,10 +284,31 @@ async function showModelPicker(
 
       return {
         render(width: number): string[] {
+          const bg = (s: string) => theme.bg("toolPendingBg", s);
+          const pad = (s: string, len: number): string => {
+            const vis = visibleWidth(s);
+            return s + " ".repeat(Math.max(0, len - vis));
+          };
+
           const lines: string[] = [];
-          lines.push(theme.fg("accent", theme.bold(" Model Fusion ")));
-          lines.push(theme.fg("muted", ` Select 2+ models (${checked.size} selected) `));
-          lines.push("");
+
+          // Top border with title
+          const title = " Model Fusion ";
+          const titleVis = visibleWidth(title);
+          const titlePad = Math.max(0, width - titleVis);
+          const titleLeft = Math.floor(titlePad / 2);
+          const titleRight = titlePad - titleLeft;
+          lines.push(
+            bg(
+              theme.fg("borderAccent", "─".repeat(titleLeft)) +
+                theme.fg("accent", theme.bold(title)) +
+                theme.fg("borderAccent", "─".repeat(titleRight)),
+            ),
+          );
+
+          // Subtitle
+          lines.push(bg(pad(theme.fg("muted", ` Select 2+ models (${checked.size} selected) `), width)));
+          lines.push(bg(" ".repeat(width)));
 
           const maxVisible = Math.min(available.length, 20);
           const start = Math.max(0, Math.min(selectedIndex - Math.floor(maxVisible / 2), available.length - maxVisible));
@@ -275,16 +322,20 @@ async function showModelPicker(
             const label = `${model.provider}/${model.id}`;
             const cursor = isCursor ? theme.fg("accent", "> ") : "  ";
             const color = isCursor ? "accent" : "text";
-            lines.push(`${cursor}${theme.fg(color, `${prefix} ${label}`)}`);
+            lines.push(bg(pad(`${cursor}${theme.fg(color, `${prefix} ${label}`)}`, width)));
           }
 
           if (available.length > maxVisible) {
-            lines.push(theme.fg("dim", `  … ${available.length - maxVisible} more`));
+            lines.push(bg(pad(theme.fg("dim", `  … ${available.length - maxVisible} more`), width)));
           }
 
-          lines.push("");
-          lines.push(theme.fg("dim", "↑↓ navigate • Space toggle • Enter confirm • Esc cancel"));
-          return lines.map((l) => truncateToWidth(l, width));
+          lines.push(bg(" ".repeat(width)));
+          lines.push(bg(pad(theme.fg("dim", "↑↓ navigate • Space toggle • Enter confirm • Esc cancel"), width)));
+
+          // Bottom border
+          lines.push(bg(theme.fg("borderAccent", "─".repeat(width))));
+
+          return lines;
         },
 
         handleInput(data: string) {
