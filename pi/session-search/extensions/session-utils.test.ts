@@ -420,10 +420,10 @@ describe("formatConversation", () => {
 
   test("includeTools shows tool calls and results", () => {
     const parsed = parseSessionText(TOOL_RESULT_SESSION)!;
-    const withTools = formatConversation(parsed, { includeTools: true, maxTurns: 10 });
+    const withTools = formatConversation(parsed, { includeTools: true, maxTurns: 10, detail: "full" });
     expect(withTools.text).toContain("[Result (bash): super-secret-needle]");
 
-    const withoutTools = formatConversation(parsed, { includeTools: false, maxTurns: 10 });
+    const withoutTools = formatConversation(parsed, { includeTools: false, maxTurns: 10, detail: "full" });
     expect(withoutTools.text).not.toContain("super-secret-needle");
   });
 
@@ -449,8 +449,173 @@ describe("formatConversation", () => {
       },
     ]);
     const parsed = parseSessionText(data)!;
-    const formatted = formatConversation(parsed, { includeTools: true, maxTurns: 10 });
+    const formatted = formatConversation(parsed, { includeTools: true, maxTurns: 10, detail: "full" });
     expect(formatted.text).toContain("[Tool: bash(");
+  });
+});
+
+describe("formatConversation detail levels", () => {
+  const MULTI_TURN = jsonl([
+    { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/project" },
+    {
+      type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+      message: { role: "user", content: textBlock("first user message here") },
+    },
+    {
+      type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+      message: {
+        role: "assistant",
+        content: [
+          ...textBlock("Long assistant response that definitely exceeds one hundred and fifty characters so we can verify truncation behavior works correctly in outline mode which is why we need this to be very long indeed.",
+          ),
+          { type: "toolCall", name: "bash", arguments: { command: "ls -la /very/long/path" } },
+          { type: "toolCall", name: "read", arguments: { path: "/some/file.ts" } },
+        ],
+      },
+    },
+    {
+      type: "message", id: "t1", parentId: "a1", timestamp: "2026-01-01T00:00:03Z",
+      message: { role: "toolResult", toolName: "bash", content: textBlock("tool output result that should be hidden in outline") },
+    },
+    {
+      type: "message", id: "u2", parentId: "t1", timestamp: "2026-01-01T00:00:04Z",
+      message: { role: "user", content: textBlock("second user turn about something") },
+    },
+    {
+      type: "message", id: "a2", parentId: "u2", timestamp: "2026-01-01T00:00:05Z",
+      message: { role: "assistant", content: textBlock("short reply") },
+    },
+    {
+      type: "message", id: "u3", parentId: "a2", timestamp: "2026-01-01T00:00:06Z",
+      message: { role: "user", content: textBlock("third turn") },
+    },
+    {
+      type: "message", id: "a3", parentId: "u3", timestamp: "2026-01-01T00:00:07Z",
+      message: { role: "assistant", content: textBlock("third answer") },
+    },
+  ]);
+
+  test("outline truncates user messages to ~150 chars", () => {
+    const parsed = parseSessionText(MULTI_TURN)!;
+    const formatted = formatConversation(parsed, { detail: "outline", maxTurns: 10 });
+    // User messages should include entry IDs
+    expect(formatted.text).toContain("id: u1");
+    expect(formatted.text).toContain("id: u2");
+    // First user message should be truncated
+    expect(formatted.text).toContain("first user message here");
+  });
+
+  test("outline shows tool names but not tool results", () => {
+    const parsed = parseSessionText(MULTI_TURN)!;
+    const formatted = formatConversation(parsed, { detail: "outline", maxTurns: 10 });
+    expect(formatted.text).toContain("[Tool: bash]");
+    expect(formatted.text).toContain("[Tool: read]");
+    expect(formatted.text).not.toContain("super-secret-needle");
+    expect(formatted.text).not.toContain("tool output result");
+  });
+
+  test("outline truncates assistant text to ~150 chars", () => {
+    const parsed = parseSessionText(MULTI_TURN)!;
+    const formatted = formatConversation(parsed, { detail: "outline", maxTurns: 10 });
+    // The long text should be truncated (150 char limit + ellipsis)
+    expect(formatted.text).toContain("id: a1");
+    // Should NOT contain text that falls beyond the 150-char truncation point
+    expect(formatted.text).not.toContain("in outline mode which is why we need this to be very long indeed");
+  });
+
+  test("compact shows ~500 chars per message and truncated tool results", () => {
+    const parsed = parseSessionText(MULTI_TURN)!;
+    const formatted = formatConversation(parsed, { detail: "compact", includeTools: true, maxTurns: 10 });
+    expect(formatted.text).toContain("id: u1");
+    expect(formatted.text).toContain("id: a1");
+    // Tool results should appear in compact with includeTools
+    expect(formatted.text).toContain("tool output result");
+  });
+
+  test("full mode is unchanged (backward compat)", () => {
+    const parsed = parseSessionText(MULTI_TURN)!;
+    const formatted = formatConversation(parsed, { detail: "full", includeTools: true, maxTurns: 10 });
+    // No entry IDs in full mode
+    expect(formatted.text).not.toContain("id: u1");
+    // Full text present
+    expect(formatted.text).toContain("truncation behavior works correctly");
+  });
+
+  test("default detail is outline when not specified", () => {
+    const parsed = parseSessionText(BRANCHED_SESSION)!;
+    const formatted = formatConversation(parsed, { maxTurns: 10 });
+    // Outline mode: entry IDs present, text truncated
+    expect(formatted.text).toContain("id: ");
+    expect(formatted.text).toContain("new leaf mentions zeroclaw");
+  });
+
+  test("window returns turns around entry_id", () => {
+    const parsed = parseSessionText(MULTI_TURN)!;
+    // u2 is the second user turn. window=1 gives anchor(u2) + 1 before(u1) + 1 after(u3) = all turns
+    // So use u2 with window=0 to get only the anchor turn (no neighbor user turns)
+    const formatted = formatConversation(parsed, {
+      detail: "outline",
+      entryId: "u2",
+      window: 0,
+      maxTurns: 10,
+    });
+    expect(formatted.text).toContain("second user turn");
+    // With window=0, only the anchor turn + its trailing assistant, everything else omitted
+    expect(formatted.text).toContain("earlier turns omitted");
+    expect(formatted.text).toContain("later turns omitted");
+    expect(formatted.text).not.toContain("first user message");
+    expect(formatted.text).not.toContain("third turn");
+  });
+
+  test("window=1 with anchor at start includes anchor + 1 forward", () => {
+    const parsed = parseSessionText(MULTI_TURN)!;
+    const formatted = formatConversation(parsed, {
+      detail: "outline",
+      entryId: "u1",
+      window: 1,
+      maxTurns: 10,
+    });
+    expect(formatted.text).toContain("first user message");
+    // No earlier marker since we're at the start
+    expect(formatted.text).not.toContain("earlier turns omitted");
+    // window=1 from u1 should include 1 turn forward = u2
+    expect(formatted.text).toContain("second user turn");
+    // u3 is beyond the window
+    expect(formatted.text).toContain("later turns omitted");
+    expect(formatted.text).not.toContain("third turn");
+  });
+
+  test("window without entry_id is ignored", () => {
+    const parsed = parseSessionText(MULTI_TURN)!;
+    const formatted = formatConversation(parsed, {
+      detail: "outline",
+      window: 1,
+      maxTurns: 10,
+    });
+    // All turns should be present
+    expect(formatted.text).toContain("first user message");
+    expect(formatted.text).toContain("third turn");
+    expect(formatted.text).not.toContain("omitted");
+  });
+
+  test("outline with tool-call-only assistant shows tool names", () => {
+    const data = jsonl([
+      { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/" },
+      {
+        type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+        message: { role: "user", content: textBlock("run it") },
+      },
+      {
+        type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "bash", arguments: { command: "echo hello" } }],
+        },
+      },
+    ]);
+    const parsed = parseSessionText(data)!;
+    const formatted = formatConversation(parsed, { detail: "outline", maxTurns: 10 });
+    expect(formatted.text).toContain("[Tool: bash]");
   });
 });
 

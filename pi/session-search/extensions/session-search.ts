@@ -64,6 +64,11 @@ interface CachedSession {
 
 const sessionCache = new Map<string, CachedSession>();
 
+function parseDetail(raw: unknown): "outline" | "compact" | "full" | undefined {
+  if (raw === "outline" || raw === "compact" || raw === "full") return raw;
+  return undefined;
+}
+
 async function getAllSessionFiles(): Promise<string[]> {
   const dirs = await fsp.readdir(SESSIONS_DIR).catch(() => [] as string[]);
   const files: string[] = [];
@@ -306,7 +311,7 @@ export default function sessionSearch(pi: ExtensionAPI): void {
     name: "session_read",
     label: "Read Session",
     description:
-      "Read the conversation from a past Pi session file. Provide the session file path from session_search or session_list. Optionally pass entry_id to read the branch containing a specific matched entry.",
+      "Read the conversation from a past Pi session file. Progressive disclosure: start with detail='outline' (default) to get the conversation skeleton with entry IDs, then drill into specific entries using entry_id + window. Provide the session file path from session_search or session_list.",
     parameters: Type.Object({
       file: Type.String({
         description: "Absolute path to the session .jsonl file",
@@ -314,6 +319,19 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       entry_id: Type.Optional(
         Type.String({
           description: "Optional entry ID from session_search. Reads the branch anchored at that matching entry.",
+        }),
+      ),
+      detail: Type.Optional(
+        Type.Union([Type.Literal("outline"), Type.Literal("compact"), Type.Literal("full")], {
+          description:
+            "Detail level. 'outline' (default): conversation skeleton with entry IDs, user/assistant text truncated to ~150 chars, tool names only, no results — ideal for surveying a session. 'compact': ~500 chars per message, truncated tool args/results. 'full': untruncated. Use outline first, then drill into specific entry_ids with window.",
+          default: "outline",
+        }),
+      ),
+      window: Type.Optional(
+        Type.Number({
+          description:
+            "When entry_id is given, return this many user turns around it instead of the whole branch. E.g. window=3 returns 3 turns before + 3 after the entry. Default: all turns on the branch.",
         }),
       ),
       max_turns: Type.Optional(
@@ -324,7 +342,7 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       ),
       include_tools: Type.Optional(
         Type.Boolean({
-          description: "Include tool calls and results (default false)",
+          description: "Include tool calls and results (default false). Ignored in outline mode — tool names are always shown.",
           default: false,
         }),
       ),
@@ -364,6 +382,8 @@ export default function sessionSearch(pi: ExtensionAPI): void {
         includeTools: params.include_tools ?? false,
         maxTurns,
         entryId: params.entry_id,
+        detail: parseDetail(params.detail),
+        window: params.window,
       });
 
       const headerInfo = [

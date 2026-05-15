@@ -85,10 +85,15 @@ export interface SessionMatch {
   entryId?: string;
 }
 
+export type DetailLevel = "outline" | "compact" | "full";
+
 export interface FormatConversationOptions {
   includeTools?: boolean;
   maxTurns?: number;
   entryId?: string;
+  detail?: DetailLevel;
+  /** When entry_id is given, return N turns around it (default: all turns on the branch). */
+  window?: number;
 }
 
 export interface FormattedConversation {
@@ -566,39 +571,150 @@ export function buildSessionSummary(file: string, session: ParsedSession): Sessi
   };
 }
 
+function windowAroundIndex(messages: MessageEntry[], anchorIndex: number, window: number): { start: number; end: number } {
+  // window = number of neighbor user turns on each side of the anchor.
+  // window=0 → anchor + trailing non-user only (no neighbor user turns).
+  // window=1 → anchor + 1 user turn before + 1 after (and all messages between them).
+  // Non-user messages (assistant, toolResult) between counted user turns are always included.
+
+  // Collect user-turn indices
+  const userIndices: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].message.role === "user") userIndices.push(i);
+  }
+  const anchorUserRank = userIndices.indexOf(anchorIndex);
+
+  // Determine which user turns to include based on window budget
+  let firstUserIdx: number;
+  let lastUserIdx: number;
+  if (anchorUserRank >= 0) {
+    // Anchor is a user turn — window neighbor turns around it
+    const lo = Math.max(0, anchorUserRank - window);
+    const hi = Math.min(userIndices.length - 1, anchorUserRank + window);
+    firstUserIdx = userIndices[lo];
+    lastUserIdx = userIndices[hi];
+  } else {
+    // Anchor is not a user turn (assistant/tool) — include nearest user turns within window
+    let lo = -1;
+    for (let i = userIndices.length - 1; i >= 0; i--) {
+      if (userIndices[i] <= anchorIndex) { lo = i; break; }
+    }
+    const startRank = lo >= 0 ? Math.max(0, lo - window + 1) : 0;
+    const endRank = lo >= 0 ? Math.min(userIndices.length - 1, lo + window) : Math.min(userIndices.length - 1, window - 1);
+    firstUserIdx = userIndices[startRank] ?? anchorIndex;
+    lastUserIdx = userIndices[endRank] ?? anchorIndex;
+  }
+
+  // The span includes all messages from firstUserIdx to lastUserIdx + trailing non-user
+  const start = Math.min(firstUserIdx, anchorIndex);
+  let end = Math.max(lastUserIdx, anchorIndex);
+  while (end + 1 < messages.length && messages[end + 1].message.role !== "user") {
+    end++;
+  }
+
+  return { start, end };
+}
+
 export function formatConversation(session: ParsedSession, options: FormatConversationOptions = {}): FormattedConversation {
   const maxTurns = options.maxTurns ?? 50;
+  const detail = options.detail ?? "outline";
   const branchMessages = selectBranchMessages(session, options.entryId);
   const leafEntryId = selectLeafEntryId(session, options.entryId);
   let turnCount = 0;
   const out: string[] = [];
 
-  for (const entry of branchMessages) {
+  // Determine the slice of messages to render
+  let messages = branchMessages;
+  if (options.entryId && options.window !== undefined) {
+    const anchorIdx = branchMessages.findIndex((m) => m.id === options.entryId);
+    if (anchorIdx >= 0) {
+      const { start, end } = windowAroundIndex(branchMessages, anchorIdx, options.window);
+      messages = branchMessages.slice(start, end + 1);
+      if (start > 0) out.push("… (earlier turns omitted) …");
+    } else {
+      out.push(`Note: entry_id ${options.entryId} not on this branch; showing full branch.`);
+    }
+  }
+
+  for (const entry of messages) {
     const msg = entry.message;
     if (msg.role === "user") {
       turnCount += 1;
       if (turnCount > maxTurns) break;
       const text = extractText(msg.content);
-      if (text) out.push(`\n### User\n${text}`);
+      if (!text) continue;
+
+      if (detail === "outline") {
+        out.push(`\n### User (id: ${entry.id})\n${limitText(collapseWhitespace(text), 150)}`);
+      } else if (detail === "compact") {
+        out.push(`\n### User (id: ${entry.id})\n${limitText(text, 500)}`);
+      } else {
+        out.push(`\n### User\n${text}`);
+      }
       continue;
     }
 
     if (msg.role === "assistant") {
       const text = extractText(msg.content);
-      if (text) out.push(`\n### Assistant\n${text}`);
-      if (options.includeTools) {
-        for (const toolCall of extractToolCalls(msg.content)) {
-          out.push(`\n[Tool: ${toolCall.name}(${toolCall.arguments.slice(0, 300)})]`);
+      const toolCalls = detail !== "outline" && options.includeTools ? extractToolCalls(msg.content) : [];
+
+      if (detail === "outline") {
+        const parts: string[] = [];
+        if (text) parts.push(limitText(collapseWhitespace(text), 150));
+        // Always show tool names in outline (cheap, high signal)
+        for (const tc of extractToolCalls(msg.content)) {
+          parts.push(`[Tool: ${tc.name}]`);
+        }
+        if (parts.length > 0) {
+          out.push(`\n### Assistant (id: ${entry.id})\n${parts.join(" ")}`);
+        }
+      } else if (detail === "compact") {
+        const parts: string[] = [];
+        if (text) parts.push(limitText(text, 500));
+        for (const tc of toolCalls) {
+          parts.push(`[Tool: ${tc.name}(${limitText(tc.arguments, 200)})]`);
+        }
+        if (parts.length > 0) {
+          out.push(`\n### Assistant (id: ${entry.id})\n${parts.join("\n")}`);
+        }
+      } else {
+        if (text) out.push(`\n### Assistant\n${text}`);
+        for (const tc of toolCalls) {
+          out.push(`\n[Tool: ${tc.name}(${tc.arguments.slice(0, 300)})]`);
         }
       }
       continue;
     }
 
-    if (msg.role === "toolResult" && options.includeTools) {
-      const text = extractText(msg.content);
-      if (text) {
-        out.push(`\n[Result (${msg.toolName ?? "tool"}): ${limitText(text, 500)}]`);
+    if (msg.role === "toolResult") {
+      if (detail === "outline") {
+        // Skip tool results in outline
+        continue;
       }
+      if (detail === "compact") {
+        if (options.includeTools) {
+          const text = extractText(msg.content);
+          if (text) {
+            out.push(`\n[Result (${msg.toolName ?? "tool"}): ${limitText(text, 300)}]`);
+          }
+        }
+        continue;
+      }
+      // full
+      if (options.includeTools) {
+        const text = extractText(msg.content);
+        if (text) {
+          out.push(`\n[Result (${msg.toolName ?? "tool"}): ${limitText(text, 500)}]`);
+        }
+      }
+    }
+  }
+
+  if (options.entryId && options.window !== undefined) {
+    const anchorIdx = branchMessages.findIndex((m) => m.id === options.entryId);
+    if (anchorIdx >= 0) {
+      const { end } = windowAroundIndex(branchMessages, anchorIdx, options.window);
+      if (end < branchMessages.length - 1) out.push("… (later turns omitted) …");
     }
   }
 
