@@ -46,6 +46,7 @@ The extension registers three tools the LLM can call directly:
 | `/search resume <path>` | Resume a session by file path |
 | `/search reindex` | Rebuild FTS5 index from scratch |
 | `/search stats` | Show index statistics |
+| `/handoff [goal]` | Goal-directed context extraction to a new session |
 | `/sessions` | Browse recent sessions in a picker |
 
 ### Other features
@@ -54,6 +55,7 @@ The extension registers three tools the LLM can call directly:
 - **Branch awareness** — understands pi's `parentId` tree. Reads the correct conversation branch, not a flat concatenation.
 - **Preview & actions** — overlay shows matched snippets, then Resume / Summarize / New + Context.
 - **LLM summarization** — summarize a past session into your current context with optional focus prompt.
+- **Handoff** — goal-directed context extraction from the current session into a new one. Uses the compaction engine's transcript builder with a handoff-specific prompt. The new session is linked to the original via `parentSession` (appears as a cascade in the session selector). The handoff summary includes the session ID so the model can revisit the source session with `session_read`.
 - **Path security** — `realpath` + traversal guards on all agent-facing file reads.
 - **TypeBox schemas** — all tool parameters validated at runtime.
 
@@ -92,6 +94,7 @@ extensions/
   session-utils.ts        ← pure domain logic (types, tree parsing, scoring, security)
   indexer.ts              ← SQLite FTS5 engine (incremental indexing, WAL mode)
   summarizer.ts           ← LLM-powered session summarization
+  handoff.ts              ← /handoff command (goal-directed context extraction)
   jsonl-parser.ts         ← JSONL parser for compaction engine
   resume.ts               ← /search resume argument parser
   types.ts                ← TUI types

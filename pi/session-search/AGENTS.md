@@ -33,7 +33,8 @@ Screen module pattern (from pi-subagents):
 - `screens/search.ts`, `screens/preview.ts`, `screens/prompt-input.ts` — State, handleInput() → Action, render()
 - `lib/render-helpers.ts` — theme-aware box drawing
 - `component.ts` — SessionSearchComponent with screen routing
-- `summarizer.ts` — OpenRouter/Gemini API for session summaries
+- `summarizer.ts` — LLM-powered session summarization (reuses compaction-engine)
+- `handoff.ts` — /handoff command: goal-directed context extraction from current session
 - `indexer.ts` — SQLite FTS5 index (updateIndex, rebuildIndex, search)
 - `index.ts` — thin entry: lifecycle + commands only
 - All rendering uses `theme.fg()` — no raw ANSI escapes

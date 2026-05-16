@@ -49,6 +49,7 @@ import { formatDate, shortenProject } from "./types";
 import { SessionSearchComponent } from "./component";
 import { summarizeSession } from "./summarizer";
 import { parseSearchResumePath, quoteCommandArg } from "./resume";
+import { generateHandoffPrompt } from "./handoff";
 
 const SESSIONS_DIR = path.join(os.homedir(), ".pi/agent/sessions");
 const MAX_SEARCH_RESULTS = 50;
@@ -735,6 +736,100 @@ export default function sessionSearch(pi: ExtensionAPI): void {
     },
   });
 
+  // ── /handoff command ──────────────────────────────────────────────────
+
+  pi.registerCommand("handoff", {
+    description: "Generate a goal-directed handoff from the current session to a new one",
+    handler: async (args, ctx) => {
+      const commandCtx = ctx as ExtensionCommandContext;
+      const currentFile = ctx.sessionManager.getSessionFile();
+      if (!currentFile) {
+        ctx.ui.notify("No active session to handoff from", "warning");
+        return;
+      }
+
+      const sessionId = ctx.sessionManager.getSessionId();
+      const cwd = ctx.cwd;
+
+      // Extract timestamp from the session file header (first line)
+      // instead of loading the full session through loadSession.
+      let timestamp: string;
+      try {
+        const headerLine = (await fsp.readFile(currentFile, "utf8")).split("\n")[0];
+        const header = JSON.parse(headerLine);
+        timestamp = header.timestamp ?? new Date().toISOString();
+      } catch {
+        timestamp = new Date().toISOString();
+      }
+
+      const goal = args?.trim() || undefined;
+      const MAX_GOAL_LENGTH = 2000;
+      if (goal && goal.length > MAX_GOAL_LENGTH) {
+        ctx.ui.notify(`Goal too long (${goal.length} chars, max ${MAX_GOAL_LENGTH})`, "warning");
+        return;
+      }
+      const project = shortenProject(cwd, 40);
+
+      ctx.ui.setStatus("session-search", `🔄 Generating handoff${goal ? ` for: ${goal.slice(0, 50)}` : ""}...`);
+      ctx.ui.notify(`Generating handoff from ${project}...`, "info");
+
+      try {
+        const handoffPrompt = await generateHandoffPrompt(
+          currentFile,
+          sessionId,
+          cwd,
+          timestamp,
+          ctx as ExtensionContext,
+          goal,
+        );
+
+        // Create new session linked to current via parentSession.
+        // Cast to access withSession — available at runtime but not in the
+        // installed @mariozechner/pi-coding-agent type definitions.
+        const result = await (commandCtx as any).newSession({
+          parentSession: currentFile,
+          withSession: async (newCtx: any) => {
+            // Inject handoff summary as a custom message (visible to model)
+            // ReplacedSessionContext has sendMessage + ui — available at runtime
+            // but not in the installed type definitions.
+            await newCtx.sendMessage(
+              {
+                customType: "session-search-handoff",
+                content:
+                  `## Handoff from ${project}\n` +
+                  `**Session:** ${sessionId} | **Date:** ${formatDate(timestamp)}\n\n` +
+                  handoffPrompt,
+                display: true,
+              },
+              { triggerTurn: false, deliverAs: "followUp" },
+            );
+
+            // Pre-fill editor with the goal or continuation prompt
+            const editorText = goal || "Continue from where we left off";
+            newCtx.ui.setEditorText(editorText);
+            newCtx.ui.notify(
+              `Handoff ready — review the context above, edit the prompt below, and press Enter`,
+              "info",
+            );
+          },
+        });
+
+        if (result.cancelled) {
+          ctx.ui.notify("Handoff cancelled", "warning");
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(`Handoff failed: ${msg}`, "error");
+      } finally {
+        try {
+          ctx.ui.setStatus("session-search", undefined);
+        } catch {
+          /* stale context after session switch */
+        }
+      }
+    },
+  });
+
   // ── Custom message renderer ─────────────────────────────────────────
 
   pi.registerMessageRenderer("session-search-context", (message, options, theme) => {
@@ -776,6 +871,51 @@ export default function sessionSearch(pi: ExtensionAPI): void {
     const header =
       theme.fg("accent", "🔍 ") +
       theme.fg("customMessageLabel", theme.bold("Session context: ")) +
+      theme.fg("accent", project) +
+      (date ? theme.fg("muted", ` (${date})`) : "");
+
+    return new Text(header, 0, 0);
+  });
+
+  pi.registerMessageRenderer("session-search-handoff", (message, options, theme) => {
+    const rawContent =
+      typeof message.content === "string"
+        ? message.content
+        : Array.isArray(message.content)
+          ? extractText(message.content)
+          : "";
+
+    const summaryMatch = rawContent.match(/Handoff from\s+(.+)/);
+    const project = summaryMatch?.[1]?.trim() || "session";
+    const sessionMatch = rawContent.match(/\*\*Session:\*\*\s*([^|*]+)/);
+    const dateMatch = rawContent.match(/\*\*Date:\*\*\s*([^*\n]+)/);
+    const sessionId = sessionMatch?.[1]?.trim() || "";
+    const date = dateMatch?.[1]?.trim() || "";
+
+    if (options.expanded) {
+      const lines: string[] = [];
+      lines.push(
+        theme.fg("accent", "\u{1F504} ") +
+          theme.fg("customMessageLabel", theme.bold("Handoff: ")) +
+          theme.fg("accent", project) +
+          (date ? theme.fg("muted", ` (${date})`) : ""),
+      );
+
+      const bodyStart = rawContent.indexOf("\n\n");
+      if (bodyStart >= 0) {
+        const body = rawContent.slice(bodyStart + 2).trim();
+        if (body) {
+          lines.push("");
+          lines.push(theme.fg("muted", body));
+        }
+      }
+
+      return new Text(lines.join("\n"), 0, 0);
+    }
+
+    const header =
+      theme.fg("accent", "\u{1F504} ") +
+      theme.fg("customMessageLabel", theme.bold("Handoff: ")) +
       theme.fg("accent", project) +
       (date ? theme.fg("muted", ` (${date})`) : "");
 
