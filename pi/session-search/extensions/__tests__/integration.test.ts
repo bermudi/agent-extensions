@@ -233,7 +233,7 @@ describe("session-search extension", () => {
       expect(result.content[0].text).toContain("~/.pi/agent/sessions");
     });
 
-    it("rejects non-.jsonl files", async () => {
+    it("rejects non-.jsonl files that are not valid UUIDs", async () => {
       ts = await createTestSession({ extensions: [EXTENSION] });
 
       const toolDef = getToolDef(ts, "session_read");
@@ -248,7 +248,28 @@ describe("session-search extension", () => {
       );
 
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("must end in .jsonl");
+      expect(result.content[0].text).toContain(".jsonl file path or a session UUID");
+    });
+
+    it("accepts UUID-like input and attempts resolution", async () => {
+      ts = await createTestSession({ extensions: [EXTENSION] });
+
+      const toolDef = getToolDef(ts, "session_read");
+      expect(toolDef).toBeDefined();
+
+      // This UUID won't resolve since no real session has this UUID,
+      // but the tool should attempt UUID resolution (not reject as non-.jsonl).
+      const result = await toolDef!.execute(
+        "tc-read-uuid-1",
+        { file: "019e338d-68e4-710d-a791-10acb0a42dec" },
+        undefined,
+        undefined,
+        ts.session.extensionRunner as any,
+      );
+
+      // Should attempt UUID resolution, not reject as "must end in .jsonl"
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("No session found with UUID");
     });
 
     it("rejects non-existent session files", async () => {
@@ -390,8 +411,7 @@ describe("session-search extension", () => {
       const schema = toolDef!.parameters as any;
 
       const desc = schema.properties.file.description ?? "";
-      expect(desc).toContain("Absolute path");
-      expect(desc).toContain(".jsonl");
+      expect(desc).toContain("UUID");
     });
 
     it("session_search search_tools has boolean type", async () => {
@@ -589,11 +609,11 @@ describe("session-search extension", () => {
       expect(toolDef!.description).toContain("full-text");
     });
 
-    it("session_read description mentions entry_id and session file path", async () => {
+    it("session_read description mentions entry_id and UUID support", async () => {
       ts = await createTestSession({ extensions: [EXTENSION] });
       const toolDef = getToolDef(ts, "session_read");
       expect(toolDef!.description).toContain("entry_id");
-      expect(toolDef!.description).toContain("session file path");
+      expect(toolDef!.description).toContain("UUID");
     });
 
     it("session_list description mentions sorted by timestamp", async () => {

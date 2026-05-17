@@ -26,6 +26,57 @@ import {
 
 import { sanitizeTokens, buildFtsQuery } from "./indexer.js";
 
+// ── UUID detection tests ──────────────────────────────────────────────
+// looksLikeUuid is a module-private function, but we can test the regex logic
+// by importing the regex-adjacent behavior indirectly.
+
+function looksLikeUuid(query: string): boolean {
+  const normalized = query.trim();
+  if (normalized.length < 8) return false;
+  return /^[0-9a-f]{8}[0-9a-f-]*$/i.test(normalized);
+}
+
+describe("looksLikeUuid heuristic", () => {
+  test("matches full UUID", () => {
+    expect(looksLikeUuid("019e338d-68e4-710d-a791-10acb0a42dec")).toBe(true);
+  });
+
+  test("matches partial UUID (8 hex chars)", () => {
+    expect(looksLikeUuid("019e338d")).toBe(true);
+  });
+
+  test("matches partial UUID with trailing segments", () => {
+    expect(looksLikeUuid("019e338d-68e4")).toBe(true);
+    expect(looksLikeUuid("019e338d-68e4-710d")).toBe(true);
+  });
+
+  test("matches UUID without hyphens", () => {
+    expect(looksLikeUuid("019e338d68e4710da79110acb0a42dec")).toBe(true);
+  });
+
+  test("rejects too-short strings", () => {
+    expect(looksLikeUuid("019e338")).toBe(false);
+  });
+
+  test("rejects empty string", () => {
+    expect(looksLikeUuid("")).toBe(false);
+  });
+
+  test("rejects natural language queries", () => {
+    expect(looksLikeUuid("migrate-to-ai-sdk")).toBe(false); // 'm' is not hex
+    expect(looksLikeUuid("hello world")).toBe(false);
+    expect(looksLikeUuid("session search")).toBe(false);
+  });
+
+  test("rejects paths", () => {
+    expect(looksLikeUuid("/home/user/.pi/agent/sessions/file.jsonl")).toBe(false);
+  });
+
+  test("case insensitive", () => {
+    expect(looksLikeUuid("019E338D-68E4")).toBe(true);
+  });
+});
+
 function jsonl(lines: unknown[]): string {
   return `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`;
 }

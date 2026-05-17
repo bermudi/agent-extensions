@@ -65,6 +65,51 @@ interface CachedSession {
 
 const sessionCache = new Map<string, CachedSession>();
 
+// ── UUID resolution ────────────────────────────────────────────────────
+
+/**
+ * Check if a query looks like a UUID (full or partial).
+ * Requires at least 8 hex chars at the start, optionally followed by
+ * hyphens and more hex chars. This avoids false positives on words
+ * like "migrate-to-ai-sdk" (which contains non-hex letters like m, g, t).
+ */
+function looksLikeUuid(query: string): boolean {
+  const normalized = query.trim();
+  if (normalized.length < 8) return false;
+  return /^[0-9a-f]{8}[0-9a-f-]*$/i.test(normalized);
+}
+
+/**
+ * Resolve a UUID (full or partial prefix) to session file paths.
+ * Scans session directory filenames for matching UUIDs.
+ * Filenames follow the pattern: `timestamp_UUID.jsonl`
+ */
+async function resolveSessionByUuid(uuidPrefix: string): Promise<string[]> {
+  const normalized = uuidPrefix.toLowerCase().trim();
+  const dirs = await fsp.readdir(SESSIONS_DIR).catch(() => [] as string[]);
+  const matches: string[] = [];
+
+  for (const dir of dirs) {
+    const dirPath = path.join(SESSIONS_DIR, dir);
+    try {
+      const entries = await fsp.readdir(dirPath);
+      for (const entry of entries) {
+        if (!entry.endsWith(".jsonl")) continue;
+        // UUID is in the filename after the underscore: timestamp_UUID.jsonl
+        const underscoreIdx = entry.indexOf("_");
+        if (underscoreIdx < 0) continue;
+        const fileUuid = entry.slice(underscoreIdx + 1, -6).toLowerCase(); // strip .jsonl
+        if (fileUuid.startsWith(normalized)) {
+          matches.push(path.join(dirPath, entry));
+        }
+      }
+    } catch {
+      // skip unreadable directories
+    }
+  }
+  return matches;
+}
+
 function parseDetail(raw: unknown): "outline" | "compact" | "full" | undefined {
   if (raw === "outline" || raw === "compact" || raw === "full") return raw;
   return undefined;
@@ -147,8 +192,23 @@ async function loadSessionSummaries(): Promise<SessionSummary[]> {
 }
 
 async function resolveSessionFilePath(requestedFile: string): Promise<string> {
+  // Accept bare UUIDs — resolve to session file path
   if (!requestedFile.endsWith(".jsonl")) {
-    throw new Error("Session files must end in .jsonl");
+    if (looksLikeUuid(requestedFile)) {
+      const matches = await resolveSessionByUuid(requestedFile.trim());
+      if (matches.length === 1) {
+        return matches[0];
+      }
+      if (matches.length > 1) {
+        throw new Error(
+          `Multiple sessions match UUID prefix "${requestedFile}". Use a longer prefix or the full UUID.`,
+        );
+      }
+      throw new Error(`No session found with UUID "${requestedFile}".`);
+    }
+    throw new Error(
+      "Provide an absolute .jsonl file path or a session UUID (8+ hex characters).",
+    );
   }
 
   const resolvedSessionsDir = await fsp.realpath(SESSIONS_DIR).catch(() => SESSIONS_DIR);
@@ -199,10 +259,11 @@ export default function sessionSearch(pi: ExtensionAPI): void {
     name: "session_search",
     label: "Search Sessions",
     description:
-      "Search past Pi sessions by keyword, partial UUID, cwd path, date, or transcript content. Returns ranked matches with snippets and file paths. Uses a fast full-text index when available.",
+      "Search past Pi sessions by keyword, partial UUID, cwd path, date, or transcript content. Returns ranked matches with snippets and file paths. Supports direct UUID lookup (full or partial, 8+ hex chars). Uses a fast full-text index when available.",
     parameters: Type.Object({
       query: Type.String({
-        description: "Search query: keyword, partial UUID, date, cwd path substring, or transcript text.",
+        description:
+          "Search query: keyword, partial/full UUID (8+ hex chars), date, cwd path substring, or transcript text.",
       }),
       limit: Type.Optional(
         Type.Number({
@@ -233,6 +294,12 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       }
 
       const limit = clampPositiveInteger(params.limit, 10, MAX_SEARCH_RESULTS);
+      const isUuidQuery = looksLikeUuid(query);
+
+      // Resolve UUID candidates directly from file system.
+      // UUIDs are not indexed in FTS5 content, so FTS5 can't find them.
+      const uuidFiles = isUuidQuery ? await resolveSessionByUuid(query) : [];
+
       let candidatePaths: string[];
 
       if (indexReady) {
@@ -247,6 +314,16 @@ export default function sessionSearch(pi: ExtensionAPI): void {
         }
       } else {
         candidatePaths = await getAllSessionFiles();
+      }
+
+      // Merge UUID file matches into the candidate pool.
+      // Without this, UUID queries return 0 results when FTS5 is warm
+      // because session UUIDs are not in the FTS5 content index.
+      if (uuidFiles.length > 0) {
+        const existing = new Set(candidatePaths);
+        for (const f of uuidFiles) {
+          if (!existing.has(f)) candidatePaths.push(f);
+        }
       }
 
       // Enrich candidates into SessionSummary objects (cached reads)
@@ -312,10 +389,10 @@ export default function sessionSearch(pi: ExtensionAPI): void {
     name: "session_read",
     label: "Read Session",
     description:
-      "Read the conversation from a past Pi session file. Progressive disclosure: start with detail='outline' (default) to get the conversation skeleton with entry IDs, then drill into specific entries using entry_id + window. Provide the session file path from session_search or session_list.",
+      "Read the conversation from a past Pi session. Accepts an absolute .jsonl file path or a bare session UUID (8+ hex characters). Progressive disclosure: start with detail='outline' (default) to get the conversation skeleton with entry IDs, then drill into specific entries using entry_id + window.",
     parameters: Type.Object({
       file: Type.String({
-        description: "Absolute path to the session .jsonl file",
+        description: "Absolute path to the session .jsonl file, or a bare session UUID (8+ hex characters)",
       }),
       entry_id: Type.Optional(
         Type.String({
