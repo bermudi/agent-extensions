@@ -8,9 +8,9 @@
   },
   "devDependencies": {
     "@marcfargas/pi-test-harness": "^0.5.0",
-    "@mariozechner/pi-agent-core": "/home/daniel/.pi/agent/git/github.com/badlogic/pi-telegram/node_modules/@mariozechner/pi-agent-core",
-    "@mariozechner/pi-ai": "/home/daniel/.pi/agent/git/github.com/badlogic/pi-telegram/node_modules/@mariozechner/pi-ai",
-    "@mariozechner/pi-coding-agent": "/home/daniel/.pi/agent/git/github.com/badlogic/pi-telegram/node_modules/@mariozechner/pi-coding-agent",
-    "@mariozechner/pi-tui": "/home/daniel/.pi/agent/git/github.com/badlogic/pi-telegram/node_modules/@mariozechner/pi-tui"
+    "@mariozechner/pi-agent-core": "npm:@earendil-works/pi-agent-core@^0.75.3",
+    "@mariozechner/pi-ai": "npm:@earendil-works/pi-ai@^0.75.3",
+    "@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@^0.75.3",
+    "@mariozechner/pi-tui": "npm:@earendil-works/pi-tui@^0.75.3"
   }
 }
