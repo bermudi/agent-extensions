@@ -94,6 +94,8 @@ export interface FormatConversationOptions {
   detail?: DetailLevel;
   /** When entry_id is given, return N turns around it (default: all turns on the branch). */
   window?: number;
+  /** Include thinking blocks from assistant messages (only in detail: "full"). */
+  includeThinking?: boolean;
 }
 
 export interface FormattedConversation {
@@ -194,6 +196,18 @@ export function extractTextFlat(content: unknown): string {
     }
   }
   return texts.join(" ");
+}
+
+export function extractThinking(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== "thinking") continue;
+    const text = asString(block.thinking);
+    if (text) parts.push(text);
+  }
+  return parts.join("\n\n");
 }
 
 export function extractToolCalls(content: unknown): Array<{ name: string; arguments: string }> {
@@ -678,9 +692,15 @@ export function formatConversation(session: ParsedSession, options: FormatConver
           out.push(`\n### Assistant (id: ${entry.id})\n${parts.join("\n")}`);
         }
       } else {
-        if (text) out.push(`\n### Assistant\n${text}`);
-        for (const tc of toolCalls) {
-          out.push(`\n[Tool: ${tc.name}(${tc.arguments.slice(0, 300)})]`);
+        const thinking = options.includeThinking ? extractThinking(msg.content) : "";
+        const hasContent = thinking || text || toolCalls.length > 0;
+        if (hasContent) {
+          out.push(`\n### Assistant`);
+          if (thinking) out.push(`[thinking]\n${thinking}\n[/thinking]`);
+          if (text) out.push(text);
+          for (const tc of toolCalls) {
+            out.push(`\n[Tool: ${tc.name}(${tc.arguments.slice(0, 300)})]`);
+          }
         }
       }
       continue;

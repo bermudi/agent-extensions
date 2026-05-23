@@ -5,6 +5,7 @@ import {
   clampPositiveInteger,
   compareTimestampDesc,
   extractText,
+  extractThinking,
   extractToolCalls,
   filterByCwd,
   findSessionMatch,
@@ -1055,6 +1056,59 @@ describe("formatConversation empty text blocks", () => {
   });
 });
 
+describe("tool-call-only assistant in full mode", () => {
+  test("renders with ### Assistant header when includeTools=true", () => {
+    const data = jsonl([
+      { type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/test" },
+      {
+        type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+        message: { role: "user", content: textBlock("go") },
+      },
+      {
+        type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "bash", arguments: { cmd: "ls" } }],
+        },
+      },
+    ]);
+    const parsed = parseSessionText(data)!;
+    const formatted = formatConversation(parsed, {
+      detail: "full",
+      includeTools: true,
+      maxTurns: 10,
+    });
+    expect(formatted.text).toContain("### Assistant");
+    expect(formatted.text).toContain("[Tool: bash(");
+    expect(formatted.text.match(/### Assistant/g)?.length).toBe(1);
+  });
+
+  test("produces no assistant output when includeTools=false", () => {
+    const data = jsonl([
+      { type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/test" },
+      {
+        type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+        message: { role: "user", content: textBlock("go") },
+      },
+      {
+        type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "bash", arguments: { cmd: "ls" } }],
+        },
+      },
+    ]);
+    const parsed = parseSessionText(data)!;
+    const formatted = formatConversation(parsed, {
+      detail: "full",
+      includeTools: false,
+      maxTurns: 10,
+    });
+    expect(formatted.text).not.toContain("### Assistant");
+    expect(formatted.text).not.toContain("[Tool:");
+  });
+});
+
 describe("buildSessionSummary edge cases", () => {
   test("no user messages sets firstUserMessage to empty string", () => {
     const data = jsonl([
@@ -1100,5 +1154,166 @@ describe("extractTextFlat", () => {
     expect(extractTextFlat(42)).toBe("");
     expect(extractTextFlat(null)).toBe("");
     expect(extractTextFlat([])).toBe("");
+  });
+});
+
+describe("extractThinking", () => {
+  test("extracts thinking blocks", () => {
+    const thinking = extractThinking([
+      { type: "thinking", thinking: "I need to check the file first." },
+      { type: "toolCall", name: "bash", arguments: { cmd: "ls" } },
+    ]);
+    expect(thinking).toBe("I need to check the file first.");
+  });
+
+  test("joins multiple thinking blocks with double newline", () => {
+    const thinking = extractThinking([
+      { type: "thinking", thinking: "step one" },
+      { type: "text", text: "visible output" },
+      { type: "thinking", thinking: "step two" },
+    ]);
+    expect(thinking).toBe("step one\n\nstep two");
+  });
+
+  test("returns empty string when no thinking blocks", () => {
+    expect(extractThinking([{ type: "text", text: "hello" }])).toBe("");
+    expect(extractThinking("plain string")).toBe("");
+    expect(extractThinking([])).toBe("");
+  });
+
+  test("ignores non-string thinking values", () => {
+    expect(extractThinking([{ type: "thinking", thinking: null }])).toBe("");
+    expect(extractThinking([{ type: "thinking" }])).toBe("");
+  });
+});
+
+describe("formatConversation includeThinking", () => {
+  const THINKING_SESSION = jsonl([
+    { type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/test" },
+    {
+      type: "message",
+      id: "u1",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:01Z",
+      message: { role: "user", content: textBlock("fix the bug") },
+    },
+    {
+      type: "message",
+      id: "a1",
+      parentId: "u1",
+      timestamp: "2026-01-01T00:00:02Z",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "The bug is in deriveEnabledGuides." },
+          { type: "text", text: "I'll fix the validation." },
+        ],
+      },
+    },
+  ]);
+
+  test("includeThinking=true with detail full shows thinking", () => {
+    const parsed = parseSessionText(THINKING_SESSION)!;
+    const formatted = formatConversation(parsed, {
+      detail: "full",
+      includeThinking: true,
+      maxTurns: 10,
+    });
+    expect(formatted.text).toContain("[thinking]");
+    expect(formatted.text).toContain("The bug is in deriveEnabledGuides.");
+    expect(formatted.text).toContain("[/thinking]");
+    expect(formatted.text).toContain("I'll fix the validation.");
+    // Structural: only one ### Assistant header per turn
+    expect(formatted.text.match(/### Assistant/g)?.length).toBe(1);
+  });
+
+  test("includeThinking=false (default) hides thinking even in full mode", () => {
+    const parsed = parseSessionText(THINKING_SESSION)!;
+    const formatted = formatConversation(parsed, {
+      detail: "full",
+      maxTurns: 10,
+    });
+    expect(formatted.text).not.toContain("[thinking]");
+    expect(formatted.text).not.toContain("deriveEnabledGuides");
+    expect(formatted.text).toContain("I'll fix the validation.");
+  });
+
+  test("includeThinking=true in outline mode does not show thinking", () => {
+    const parsed = parseSessionText(THINKING_SESSION)!;
+    const formatted = formatConversation(parsed, {
+      detail: "outline",
+      includeThinking: true,
+      maxTurns: 10,
+    });
+    expect(formatted.text).not.toContain("[thinking]");
+    expect(formatted.text).not.toContain("deriveEnabledGuides");
+  });
+
+  test("includeThinking=true in compact mode does not show thinking", () => {
+    const parsed = parseSessionText(THINKING_SESSION)!;
+    const formatted = formatConversation(parsed, {
+      detail: "compact",
+      includeThinking: true,
+      maxTurns: 10,
+    });
+    expect(formatted.text).not.toContain("[thinking]");
+    expect(formatted.text).not.toContain("deriveEnabledGuides");
+  });
+
+  test("thinking-only assistant (no text) renders with single header", () => {
+    const data = jsonl([
+      { type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/test" },
+      {
+        type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+        message: { role: "user", content: textBlock("go") },
+      },
+      {
+        type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "Planning my approach..." }],
+        },
+      },
+    ]);
+    const parsed = parseSessionText(data)!;
+    const formatted = formatConversation(parsed, {
+      detail: "full",
+      includeThinking: true,
+      maxTurns: 10,
+    });
+    expect(formatted.text).toContain("[thinking]");
+    expect(formatted.text).toContain("Planning my approach...");
+    expect(formatted.text.match(/### Assistant/g)?.length).toBe(1);
+  });
+
+  test("thinking + tool calls (no text) renders correctly", () => {
+    const data = jsonl([
+      { type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/test" },
+      {
+        type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+        message: { role: "user", content: textBlock("go") },
+      },
+      {
+        type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Need to read the file." },
+            { type: "toolCall", name: "bash", arguments: { cmd: "cat foo.txt" } },
+          ],
+        },
+      },
+    ]);
+    const parsed = parseSessionText(data)!;
+    const formatted = formatConversation(parsed, {
+      detail: "full",
+      includeThinking: true,
+      includeTools: true,
+      maxTurns: 10,
+    });
+    expect(formatted.text).toContain("[thinking]");
+    expect(formatted.text).toContain("Need to read the file.");
+    expect(formatted.text).toContain("[Tool: bash(");
+    expect(formatted.text.match(/### Assistant/g)?.length).toBe(1);
   });
 });

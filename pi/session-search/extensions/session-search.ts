@@ -424,6 +424,12 @@ export default function sessionSearch(pi: ExtensionAPI): void {
           default: false,
         }),
       ),
+      include_thinking: Type.Optional(
+        Type.Boolean({
+          description: "Include thinking/reasoning blocks from assistant messages (default false). Only shown in detail: 'full'.",
+          default: false,
+        }),
+      ),
     }),
     async execute(_toolCallId, params) {
       let filePath: string;
@@ -462,6 +468,7 @@ export default function sessionSearch(pi: ExtensionAPI): void {
         entryId: params.entry_id,
         detail: parseDetail(params.detail),
         window: params.window,
+        includeThinking: params.include_thinking ?? false,
       });
 
       const headerInfo = [
