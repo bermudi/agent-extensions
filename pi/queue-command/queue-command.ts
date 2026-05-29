@@ -9,7 +9,7 @@
  *   /queue and then update the docs
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("queue", {
@@ -21,12 +21,10 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			if (ctx.isIdle()) {
-				// Not streaming — send immediately
-				pi.sendUserMessage(text);
-			} else {
-				// Streaming — queue as follow-up
-				pi.sendUserMessage(text, { deliverAs: "followUp" });
+			// Always queue as followUp — when idle, pi sends immediately anyway
+			pi.sendUserMessage(text, { deliverAs: "followUp" });
+
+			if (!ctx.isIdle()) {
 				ctx.ui.notify("Queued ✓", "info");
 			}
 		},
