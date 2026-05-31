@@ -300,6 +300,9 @@ class Daemon {
         const name = String(req.name ?? "");
         const session = this.sessions.get(name);
         if (!session) return { ...base, ok: false, error: `session not found: ${name}` };
+        if (!session.killedAt) {
+          try { session.kill(); } catch {}
+        }
         this.sessions.delete(name);
         return { ...base, ok: true };
       }

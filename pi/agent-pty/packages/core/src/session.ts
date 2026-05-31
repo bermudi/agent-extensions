@@ -54,10 +54,6 @@ export class Session {
     });
   }
 
-  get lastSnapshotId(): number {
-    return this.snapshotCount;
-  }
-
   static async create(
     name: string,
     command: string,
