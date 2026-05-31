@@ -260,7 +260,8 @@ export default function oracleExtension(pi: ExtensionAPI): void {
     label: "Oracle",
     description: [
       "Consult a deep-thinking oracle (Qwen) for analysis, reasoning, or second opinions.",
-      "No tools — pure reasoning. Attach files for context.",
+      "The oracle is a bare reasoning engine — it has no tools, no search, no access to documentation or external information, and no knowledge of your project.",
+      "It only knows what you explicitly give it. Attach files for context.",
       "Use for: architecture decisions, debugging hypotheses, code review, security analysis, algorithmic puzzles, anything requiring deep thought.",
       "Always attach relevant source files so the oracle can reason over the actual code, not just a description of it.",
     ].join(" "),
@@ -290,7 +291,17 @@ export default function oracleExtension(pi: ExtensionAPI): void {
 
       // Build messages with file attachments
       const contentParts = buildContentParts(params.question, files, ctx.cwd);
-      const messages = [{ role: "user", content: contentParts }];
+      const messages = [
+        {
+          role: "system",
+          content: [
+            "You are a reasoning engine. You have no tools, no search, no internet access, and no knowledge of any specific project, framework, or codebase.",
+            "Only reason about what is explicitly provided in the user message. Never fabricate APIs, function names, documentation references, or external sources.",
+            "If you don't have enough information, say so instead of guessing.",
+          ].join(" "),
+        },
+        { role: "user", content: contentParts },
+      ];
 
       const attachedNames = files.map((f) => shortenPath(path.isAbsolute(f) ? f : path.resolve(ctx.cwd, f)));
 
