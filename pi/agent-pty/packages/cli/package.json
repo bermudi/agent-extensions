@@ -1,0 +1,19 @@
+{
+  "name": "@agent-pty/cli",
+  "version": "0.1.0",
+  "module": "src/index.ts",
+  "type": "module",
+  "bin": {
+    "agent-pty": "src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "@agent-pty/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
