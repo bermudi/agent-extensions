@@ -1,7 +1,23 @@
 import { Type } from "@sinclair/typebox";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type {
+  AgentToolResult,
+  ExtensionAPI,
+  Theme,
+  ToolRenderResultOptions,
+} from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { sendCommand, ensureDaemon } from "@agent-pty/core";
+import {
+  deriveStatus,
+  deriveStatusFromResult,
+  formatRuntime,
+  formatSessionStatus,
+  statusColor,
+  statusIcon,
+  statusLabel,
+  truncate,
+  type SessionListEntry,
+} from "../utils/format.js";
 
 const PTY_ACTIONS = [
   "spawn",
@@ -187,6 +203,8 @@ function getTimeout(action: string, params: Record<string, unknown>): number {
   }
 }
 
+// ── Tool registration ────────────────────────────────────────────────────
+
 export function setupPtyTools(pi: ExtensionAPI) {
   pi.registerTool<typeof PtyParams, PtyDetails>({
     name: "pty",
@@ -228,23 +246,251 @@ export function setupPtyTools(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme, _context) {
-      let text = theme.bold(theme.fg("toolTitle", "pty "));
-      text += theme.fg("accent", args.action);
-      if (args.name) {
-        text += ` ${theme.fg("muted", String(args.name))}`;
-      }
-      return new Text(text, 0, 0);
+      return renderPtyCall(args as Record<string, unknown>, theme);
     },
 
-    renderResult(result, _options, theme, _context) {
-      const details = result.details as PtyDetails | undefined;
-      if (!details) {
-        return new Text(theme.fg("dim", "No details"), 0, 0);
-      }
-      if (details.success) {
-        return new Text(theme.fg("success", "OK"), 0, 0);
-      }
-      return new Text(theme.fg("error", details.message), 0, 0);
+    renderResult(result, options, theme, _context) {
+      return renderPtyResult(result, options, theme);
     },
   });
+}
+
+// ── renderCall dispatch ──────────────────────────────────────────────────
+
+function renderPtyCall(args: Record<string, unknown>, theme: Theme): Text {
+  const action = String(args.action ?? "unknown");
+  const name = args.name ? String(args.name) : undefined;
+
+  const boldPty = theme.bold(theme.fg("toolTitle", "pty"));
+  const actionStr = theme.fg("accent", action);
+
+  switch (action) {
+    case "spawn": {
+      const cmd = args.command ? String(args.command) : "?";
+      const main = name ? `"${name}" ${cmd}` : cmd;
+      return new Text(`${boldPty} ${actionStr} ${main}`, 0, 0);
+    }
+    case "type": {
+      const text = args.text ? String(args.text) : "";
+      const preview = text.length > 30 ? `${text.slice(0, 30)}…` : text;
+      return new Text(`${boldPty} ${actionStr} ${name ? `"${name}"` : ""} "${preview}"`, 0, 0);
+    }
+    case "key": {
+      const key = args.key ? String(args.key) : "?";
+      return new Text(`${boldPty} ${actionStr} ${name ? `"${name}"` : ""} ${key}`, 0, 0);
+    }
+    case "snapshot":
+    case "scroll":
+    case "wait_for":
+    case "await_change":
+    case "wait_for_exit":
+    case "kill":
+    case "remove": {
+      return new Text(`${boldPty} ${actionStr} ${name ? `"${name}"` : ""}`, 0, 0);
+    }
+    case "list_sessions": {
+      return new Text(`${boldPty} ${actionStr}`, 0, 0);
+    }
+    default: {
+      return new Text(`${boldPty} ${actionStr} ${name ? `"${name}"` : ""}`, 0, 0);
+    }
+  }
+}
+
+// ── renderResult dispatch ─────────────────────────────────────────────────
+
+function renderPtyResult(
+  result: AgentToolResult<PtyDetails>,
+  _options: ToolRenderResultOptions,
+  theme: Theme,
+): Text {
+  const details = result.details;
+
+  if (!details) {
+    return new Text(theme.fg("dim", "No details"), 0, 0);
+  }
+
+  if (!details.success) {
+    return new Text(theme.fg("error", details.message), 0, 0);
+  }
+
+  const res = (details.result ?? {}) as Record<string, unknown>;
+
+  switch (details.action) {
+    case "spawn":
+      return renderSpawnResult(res, theme);
+    case "list_sessions":
+      return renderListResult(res, theme);
+    case "snapshot":
+      return renderSnapshotResult(res, theme);
+    case "scroll":
+      return renderScrollResult(res, theme);
+    case "wait_for":
+      return renderWaitForResult(res, theme);
+    case "await_change":
+      return renderAwaitChangeResult(res, theme);
+    case "wait_for_exit":
+      return renderWaitForExitResult(res, theme);
+    case "type":
+      return renderTypeResult(res, theme);
+    case "key":
+      return renderKeyResult(res, theme);
+    case "kill":
+      return renderKillResult(res, theme);
+    case "remove":
+      return renderRemoveResult(res, theme);
+    default:
+      return new Text(theme.fg("success", "OK"), 0, 0);
+  }
+}
+
+// ── Per-action renderResult implementations ────────────────────────────────
+
+function renderSpawnResult(res: Record<string, unknown>, theme: Theme): Text {
+  const name = String(res.name ?? "?");
+  const pid = typeof res.pid === "number" ? res.pid : "?";
+  const lines: string[] = [
+    theme.fg("success", "Started PTY session"),
+    `  name: ${theme.fg("accent", name)}`,
+    `  pid: ${String(pid)}`,
+  ];
+  return new Text(lines.join("\n"), 0, 0);
+}
+
+function renderListResult(res: Record<string, unknown>, theme: Theme): Text {
+  const sessions = [...(res.sessions ?? []) as SessionListEntry[]];
+  if (sessions.length === 0) {
+    return new Text(theme.fg("dim", "No PTY sessions"), 0, 0);
+  }
+
+  // Sort: running first, then killed, then exited; newest first within each group
+  const statusRank = (s: SessionListEntry): number => {
+    const st = deriveStatus(s).status;
+    return st === "running" ? 0 : st === "killed" ? 1 : 2;
+  };
+  sessions.sort((a, b) => {
+    const rankDiff = statusRank(a) - statusRank(b);
+    if (rankDiff !== 0) return rankDiff;
+    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  });
+
+  const dim = (s: string) => theme.fg("dim", s);
+  const lines: string[] = [
+    theme.fg("success", `${sessions.length} session(s)`),
+    "",
+  ];
+
+  for (const s of sessions) {
+    const status = deriveStatus(s);
+    const statusText = formatSessionStatus(status, theme);
+    const runtime = formatRuntime(s.createdAt, s.killedAt);
+    const cmd = truncate(s.command, 30);
+    lines.push(
+      `- ${theme.fg("accent", s.name)} ${dim(`(${s.pid})`)}  ${statusText}  ${dim(runtime)}`,
+    );
+    lines.push(`  ${dim(cmd)}`);
+  }
+
+  return new Text(lines.join("\n"), 0, 0);
+}
+
+function renderSnapshotResult(res: Record<string, unknown>, theme: Theme): Text {
+  const snapshotId = typeof res.snapshotId === "number" ? res.snapshotId : "?";
+  const size = res.size as { cols?: number; rows?: number } | undefined;
+  const cursor = res.cursor as { row?: number; col?: number } | undefined;
+  const contentHash = String(res.contentHash ?? "?");
+  const text = String(res.text ?? "");
+
+  const dim = (s: string) => theme.fg("dim", s);
+  const lines: string[] = [
+    `Snapshot #${snapshotId}  ${dim(`${size?.cols ?? "?"}×${size?.rows ?? "?"}`)}  cursor(${cursor?.row ?? "?"},${cursor?.col ?? "?"})  ${dim(contentHash)}`,
+    "",
+    text,
+  ];
+
+  return new Text(lines.join("\n"), 0, 0);
+}
+
+function renderScrollResult(res: Record<string, unknown>, theme: Theme): Text {
+  const scrollLines = (res.lines ?? []) as string[];
+  const text = String(res.text ?? "");
+  const lines: string[] = [
+    theme.fg("success", `Scrollback (${scrollLines.length} lines)`),
+    "",
+    text,
+  ];
+  return new Text(lines.join("\n"), 0, 0);
+}
+
+function renderWaitForResult(res: Record<string, unknown>, theme: Theme): Text {
+  const matched = res.matched === true;
+  const timedOut = res.timedOut === true;
+  const elapsed = typeof res.elapsed === "number" ? `${res.elapsed}ms` : "";
+
+  if (matched) {
+    return new Text(theme.fg("success", `Pattern matched (${elapsed})`), 0, 0);
+  }
+  if (timedOut) {
+    return new Text(theme.fg("warning", `Timed out (${elapsed})`), 0, 0);
+  }
+  return new Text(theme.fg("dim", "No match"), 0, 0);
+}
+
+function renderAwaitChangeResult(res: Record<string, unknown>, theme: Theme): Text {
+  const changed = res.changed === true;
+  const settled = res.settled === true;
+  const timedOut = res.timedOut === true;
+  const elapsed = typeof res.elapsed === "number" ? `${res.elapsed}ms` : "";
+
+  if (changed && settled) {
+    return new Text(theme.fg("success", `Screen changed and settled (${elapsed})`), 0, 0);
+  }
+  if (changed && !settled) {
+    return new Text(theme.fg("success", `Screen changed (${elapsed})`), 0, 0);
+  }
+  if (timedOut) {
+    return new Text(theme.fg("warning", `No change — timed out (${elapsed})`), 0, 0);
+  }
+  return new Text(theme.fg("dim", "No change"), 0, 0);
+}
+
+function renderWaitForExitResult(res: Record<string, unknown>, theme: Theme): Text {
+  const exited = res.exited === true;
+  const timedOut = res.timedOut === true;
+  const elapsed = typeof res.elapsed === "number" ? `${res.elapsed}ms` : "";
+
+  if (!exited && timedOut) {
+    return new Text(theme.fg("warning", `Still running — timed out (${elapsed})`), 0, 0);
+  }
+
+  const status = deriveStatusFromResult(res);
+  const icon = statusIcon(status);
+  const label = statusLabel(status);
+  const color = statusColor(status);
+  const statusText = theme.fg(color, `${icon} ${label}`);
+
+  return new Text(`${statusText}  ${theme.fg("dim", elapsed)}`, 0, 0);
+}
+
+function renderTypeResult(_res: Record<string, unknown>, theme: Theme): Text {
+  return new Text(theme.fg("success", "Sent"), 0, 0);
+}
+
+function renderKeyResult(res: Record<string, unknown>, theme: Theme): Text {
+  const sent = res.sent ? String(res.sent) : "";
+  const preview = sent ? ` (${sent})` : "";
+  return new Text(theme.fg("success", `Sent${preview}`), 0, 0);
+}
+
+function renderKillResult(res: Record<string, unknown>, theme: Theme): Text {
+  const killedAt = res.killedAt ? String(res.killedAt) : undefined;
+  const lines: string[] = [theme.fg("warning", "Session killed")];
+  if (killedAt) {
+    lines.push(`  ${theme.fg("dim", killedAt)}`);
+  }
+  return new Text(lines.join("\n"), 0, 0);
+}
+
+function renderRemoveResult(_res: Record<string, unknown>, theme: Theme): Text {
+  return new Text(theme.fg("dim", "Session removed"), 0, 0);
 }

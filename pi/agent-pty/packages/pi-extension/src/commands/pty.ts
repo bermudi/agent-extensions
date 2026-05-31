@@ -1,5 +1,11 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { sendCommand, ensureDaemon } from "@agent-pty/core";
+import {
+  deriveStatus,
+  formatRuntime,
+  statusIcon,
+  statusLabel,
+} from "../utils/format.js";
 
 function makeId(): string {
   return crypto.randomUUID();
@@ -30,14 +36,18 @@ export function setupPtyCommands(pi: ExtensionAPI): void {
         return;
       }
 
-      const text = sessions
-        .map((s) => {
-          const status = s.killedAt ? `killed ${s.killedAt}` : `PID ${s.pid}`;
-          return `- ${s.name}: ${s.command} in ${s.cwd} (${status})`;
-        })
-        .join("\n");
+      const lines: string[] = ["PTY sessions:"];
+      for (const s of sessions) {
+        const status = deriveStatus(s);
+        const icon = statusIcon(status);
+        const label = statusLabel(status);
+        const runtime = formatRuntime(s.createdAt, s.killedAt);
+        lines.push(
+          `- ${s.name}: ${s.command} in ${s.cwd} (${icon} ${label}, ${runtime})`,
+        );
+      }
 
-      ctx.ui.notify(`PTY sessions:\n${text}`, "info");
+      ctx.ui.notify(lines.join("\n"), "info");
     },
   });
 
