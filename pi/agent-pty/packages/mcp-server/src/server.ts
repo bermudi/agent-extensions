@@ -4,6 +4,26 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { sendCommand, ensureDaemon } from "@agent-pty/core";
 
+async function rpc(
+  payload: { id: string; cmd: string; [key: string]: unknown },
+  timeout?: number,
+): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  try {
+    const res = await sendCommand(payload, timeout);
+    return { content: [{ type: "text", text: JSON.stringify(res) }] };
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ ok: false, error: err }),
+        },
+      ],
+    };
+  }
+}
+
 async function main() {
   await ensureDaemon();
 
@@ -38,8 +58,8 @@ async function main() {
         rows: z.number().int().min(1).optional().describe("Terminal rows (default 24)"),
       }),
     },
-    async (args) => {
-      const res = await sendCommand({
+    async (args) =>
+      rpc({
         id: crypto.randomUUID(),
         cmd: "spawn",
         name: args.name,
@@ -48,9 +68,7 @@ async function main() {
         cwd: args.cwd ?? process.cwd(),
         cols: args.cols ?? 80,
         rows: args.rows ?? 24,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
-    },
+      }),
   );
 
   // ── type ────────────────────────────────────────────────────────────────
@@ -63,15 +81,13 @@ async function main() {
         text: z.string().describe("Text to type"),
       }),
     },
-    async (args) => {
-      const res = await sendCommand({
+    async (args) =>
+      rpc({
         id: crypto.randomUUID(),
         cmd: "type",
         name: args.name,
         text: args.text,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
-    },
+      }),
   );
 
   // ── key ─────────────────────────────────────────────────────────────────
@@ -85,15 +101,13 @@ async function main() {
         key: z.string().describe("Key name to send"),
       }),
     },
-    async (args) => {
-      const res = await sendCommand({
+    async (args) =>
+      rpc({
         id: crypto.randomUUID(),
         cmd: "key",
         name: args.name,
         key: args.key,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
-    },
+      }),
   );
 
   // ── snapshot ────────────────────────────────────────────────────────────
@@ -107,15 +121,13 @@ async function main() {
         format: z.enum(["text", "full"]).optional().describe("'full' includes grid array"),
       }),
     },
-    async (args) => {
-      const res = await sendCommand({
+    async (args) =>
+      rpc({
         id: crypto.randomUUID(),
         cmd: "snapshot",
         name: args.name,
         format: args.format ?? "text",
-      });
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
-    },
+      }),
   );
 
   // ── scroll ──────────────────────────────────────────────────────────────
@@ -129,15 +141,13 @@ async function main() {
         lines: z.number().int().optional().describe("Max lines to return (default: all)"),
       }),
     },
-    async (args) => {
-      const res = await sendCommand({
+    async (args) =>
+      rpc({
         id: crypto.randomUUID(),
         cmd: "scroll",
         name: args.name,
         lines: args.lines ?? 0,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
-    },
+      }),
   );
 
   // ── wait_for ────────────────────────────────────────────────────────────
@@ -156,7 +166,7 @@ async function main() {
     },
     async (args) => {
       const t = args.timeout ?? 30000;
-      const res = await sendCommand(
+      return rpc(
         {
           id: crypto.randomUUID(),
           cmd: "wait-for",
@@ -168,7 +178,6 @@ async function main() {
         },
         t + 5000,
       );
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
     },
   );
 
@@ -186,7 +195,7 @@ async function main() {
     },
     async (args) => {
       const t = args.timeout ?? 30000;
-      const res = await sendCommand(
+      return rpc(
         {
           id: crypto.randomUUID(),
           cmd: "await-change",
@@ -196,7 +205,6 @@ async function main() {
         },
         t + 5000,
       );
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
     },
   );
 
@@ -212,7 +220,7 @@ async function main() {
     },
     async (args) => {
       const t = args.timeout ?? 30000;
-      const res = await sendCommand(
+      return rpc(
         {
           id: crypto.randomUUID(),
           cmd: "wait-for-exit",
@@ -221,7 +229,6 @@ async function main() {
         },
         t + 5000,
       );
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
     },
   );
 
@@ -236,15 +243,13 @@ async function main() {
         signal: z.string().optional().describe("Signal to send (default: SIGHUP)"),
       }),
     },
-    async (args) => {
-      const res = await sendCommand({
+    async (args) =>
+      rpc({
         id: crypto.randomUUID(),
         cmd: "kill",
         name: args.name,
         ...(args.signal ? { signal: args.signal } : {}),
-      });
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
-    },
+      }),
   );
 
   // ── remove ──────────────────────────────────────────────────────────────
@@ -256,14 +261,12 @@ async function main() {
         name: z.string().describe("Session name"),
       }),
     },
-    async (args) => {
-      const res = await sendCommand({
+    async (args) =>
+      rpc({
         id: crypto.randomUUID(),
         cmd: "remove",
         name: args.name,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
-    },
+      }),
   );
 
   // ── list_sessions ───────────────────────────────────────────────────────
@@ -273,19 +276,18 @@ async function main() {
       description: "List all sessions including killed ones.",
       inputSchema: z.object({}),
     },
-    async () => {
-      const res = await sendCommand({
+    async () =>
+      rpc({
         id: crypto.randomUUID(),
         cmd: "list-sessions",
-      });
-      return { content: [{ type: "text", text: JSON.stringify(res) }] };
-    },
+      }),
   );
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // Keep alive until stdin closes
+  // StdioServerTransport keeps the event loop alive via stdin reading.
+  // When the parent process closes the pipe or sends SIGTERM, we exit.
   await new Promise(() => {});
 }
 
