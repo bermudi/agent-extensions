@@ -182,9 +182,9 @@ export default function mcpExtension(pi: ExtensionAPI) {
     name: "mcp",
     label: "MCP",
     description:
-      "Call any configured MCP server tool (tavily, deepwiki, grep, context7, poe-research, zai-vision, next-devtools). " +
+      "Call any configured MCP server tool via mcporter. " +
       "Pass tool arguments as a JSON object in the 'args' parameter. " +
-      "The MCP Tools section in the system prompt lists all available server.tool combinations.",
+      "Use mcp_list to discover available servers and their tools, or check the MCP Tools section in the system prompt.",
     promptSnippet: "Call external MCP tools (web search, code search, vision, research, docs)",
     promptGuidelines: [
       "Use mcp for web search (tavily), code search (grep), image analysis (zai-vision), " +
