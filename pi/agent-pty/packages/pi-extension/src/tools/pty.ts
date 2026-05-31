@@ -8,6 +8,7 @@ const PTY_ACTIONS = [
   "type",
   "key",
   "snapshot",
+  "scroll",
   "wait_for",
   "await_change",
   "wait_for_exit",
@@ -19,7 +20,7 @@ const PTY_ACTIONS = [
 const PtyParams = Type.Object({
   action: Type.String({
     description:
-      "PTY action to perform: spawn, type, key, snapshot, wait_for, await_change, wait_for_exit, kill, list_sessions",
+      "PTY action to perform: spawn, type, key, snapshot, scroll, wait_for, await_change, wait_for_exit, kill, list_sessions",
   }),
   name: Type.Optional(Type.String({ description: "Session name" })),
   command: Type.Optional(
@@ -50,14 +51,19 @@ const PtyParams = Type.Object({
       description: "Snapshot format: 'text' or 'full' (for snapshot action, default 'text')",
     }),
   ),
+  lines: Type.Optional(
+    Type.Number({
+      description: "Number of scrollback lines to return (for scroll action, 0 = all)",
+    }),
+  ),
   pattern: Type.Optional(
     Type.String({ description: "Pattern to wait for (for wait_for action)" }),
   ),
   regex: Type.Optional(
     Type.Boolean({ description: "Treat pattern as regex (for wait_for action, default false)" }),
   ),
-  skip_existing: Type.Optional(
-    Type.Boolean({ description: "Skip immediate match, only match new data (for wait_for action, default false)" }),
+  since: Type.Optional(
+    Type.Number({ description: "Snapshot ID to skip immediate check; only match on data after this snapshot (for wait_for action)" }),
   ),
   timeout: Type.Optional(
     Type.Number({ description: "Timeout in milliseconds (default 30000)" }),
@@ -126,11 +132,16 @@ function buildCommand(
       payload.format = params.format ?? "text";
       break;
     }
+    case "scroll": {
+      payload.name = params.name;
+      payload.lines = params.lines ?? 0;
+      break;
+    }
     case "wait_for": {
       payload.name = params.name;
       payload.pattern = params.pattern;
       payload.regex = params.regex ?? false;
-      payload.skipExisting = params.skip_existing ?? false;
+      if (params.since !== undefined) payload.since = params.since;
       payload.timeout = params.timeout ?? 30000;
       break;
     }
@@ -183,7 +194,7 @@ export function setupPtyTools(pi: ExtensionAPI) {
     description:
       "Spawn and control pseudo-terminal sessions. " +
       "Actions: spawn (start a session), type (send text), key (send special key), " +
-      "snapshot (capture screen), wait_for (wait for text/pattern), " +
+      "snapshot (capture screen), scroll (retrieve scrollback), wait_for (wait for text/pattern), " +
       "await_change (wait for screen to change), wait_for_exit (wait for process exit), " +
       "kill (terminate session), list_sessions (list active sessions).",
     parameters: PtyParams,

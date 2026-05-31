@@ -3,6 +3,7 @@ import { WasmBridge, type CellData, type CursorState } from "@wterm/core";
 
 export interface Snapshot {
   snapshotId: number;
+  at: string;
   size: { cols: number; rows: number };
   cursor: CursorState;
   text: string;
@@ -24,6 +25,7 @@ export class Session {
   command: string;
   cwd: string;
   createdAt: Date;
+  killedAt: Date | null;
   private snapshotCount = 0;
 
   private constructor(
@@ -39,6 +41,7 @@ export class Session {
     this.pty = pty;
     this.bridge = bridge;
     this.createdAt = new Date();
+    this.killedAt = null;
 
     pty.onData((data: string) => {
       bridge.writeString(data);
@@ -94,6 +97,7 @@ export class Session {
 
     const result: Snapshot & { grid?: string[][] } = {
       snapshotId: this.snapshotCount,
+      at: new Date().toISOString(),
       size: { cols, rows },
       cursor,
       text,
@@ -111,7 +115,25 @@ export class Session {
     return this.snapshot("text").text;
   }
 
+  scrollback(maxLines: number = 0): { lines: string[]; text: string } {
+    const count = this.bridge.getScrollbackCount();
+    const take = maxLines > 0 ? Math.min(maxLines, count) : count;
+    const lines: string[] = [];
+    // offset 0 is the oldest scrollback line; count-1 is the newest
+    for (let i = count - take; i < count; i++) {
+      const lineLen = this.bridge.getScrollbackLineLen(i);
+      const chars: string[] = [];
+      for (let c = 0; c < lineLen; c++) {
+        const cell = this.bridge.getScrollbackCell(i, c);
+        chars.push(String.fromCharCode(cell.char));
+      }
+      lines.push(chars.join("").replace(/\s+$/, ""));
+    }
+    return { lines, text: lines.join("\n") };
+  }
+
   kill(signal?: string): void {
     this.pty.kill(signal);
+    this.killedAt = new Date();
   }
 }

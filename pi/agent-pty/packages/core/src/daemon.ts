@@ -149,6 +149,7 @@ class Daemon {
         const pattern = String(req.pattern ?? "");
         const timeout = Number(req.timeout ?? 30000);
         const useRegex = Boolean(req.regex);
+        const since = req.since !== undefined ? Number(req.since) : undefined;
         const session = this.sessions.get(name);
         if (!session) return { ...base, ok: false, error: `session not found: ${name}` };
         if (!pattern) return { ...base, ok: false, error: "missing pattern" };
@@ -156,9 +157,11 @@ class Daemon {
         const re = useRegex ? new RegExp(pattern) : new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
         const start = Date.now();
 
-        // Immediate check
-        if (re.test(session.getScreenText())) {
-          return { ...base, ok: true, matched: true, elapsed: 0 };
+        // Immediate check (skipped when --since is used)
+        if (since === undefined) {
+          if (re.test(session.getScreenText())) {
+            return { ...base, ok: true, matched: true, elapsed: 0 };
+          }
         }
 
         return new Promise((resolve) => {
@@ -174,7 +177,9 @@ class Daemon {
 
           dataDisposable = session.pty.onData(() => {
             if (disposed) return;
-            if (re.test(session.getScreenText())) {
+            const snap = session.snapshot("text");
+            if (since !== undefined && snap.snapshotId <= since) return;
+            if (re.test(snap.text)) {
               disposed = true;
               if (dataDisposable) dataDisposable.dispose();
               clearTimeout(timer);
@@ -288,8 +293,24 @@ class Daemon {
         const session = this.sessions.get(name);
         if (!session) return { ...base, ok: false, error: `session not found: ${name}` };
         session.kill(signal);
+        return { ...base, ok: true, killedAt: session.killedAt!.toISOString() };
+      }
+
+      case "remove": {
+        const name = String(req.name ?? "");
+        const session = this.sessions.get(name);
+        if (!session) return { ...base, ok: false, error: `session not found: ${name}` };
         this.sessions.delete(name);
         return { ...base, ok: true };
+      }
+
+      case "scroll": {
+        const name = String(req.name ?? "");
+        const lines = Number(req.lines ?? 0);
+        const session = this.sessions.get(name);
+        if (!session) return { ...base, ok: false, error: `session not found: ${name}` };
+        const scroll = session.scrollback(lines);
+        return { ...base, ok: true, lines: scroll.lines, text: scroll.text };
       }
 
       case "list-sessions": {
@@ -299,6 +320,7 @@ class Daemon {
           cwd: s.cwd,
           pid: s.pty.pid,
           createdAt: s.createdAt.toISOString(),
+          ...(s.killedAt ? { killedAt: s.killedAt.toISOString() } : {}),
         }));
         return { ...base, ok: true, sessions: list };
       }

@@ -35,22 +35,28 @@ bun packages/cli/src/index.ts spawn --name <n> [--cwd <dir>] <command> [args...]
 bun packages/cli/src/index.ts type -s <name> <text>
 bun packages/cli/src/index.ts key -s <name> <key>
 bun packages/cli/src/index.ts snapshot -s <name> [-f full|text]
-bun packages/cli/src/index.ts wait-for -s <name> <pattern> [-r] [-t <ms>]
+bun packages/cli/src/index.ts scroll -s <name> [--lines N]
+bun packages/cli/src/index.ts wait-for -s <name> <pattern> [-r] [-t <ms>] [--since <snapshotId>]
 bun packages/cli/src/index.ts await-change -s <name> [-t <ms>] [--settle <ms>]
-bun packages/cli/src/index.ts kill -s <name>
+bun packages/cli/src/index.ts kill -s <name> [--signal <sig>]
+bun packages/cli/src/index.ts remove -s <name>
 bun packages/cli/src/index.ts list-sessions
 bun packages/cli/src/index.ts stop          # shutdown daemon
+
+# Or use the root-level wrapper (works from anywhere if invoked by absolute path)
+./agent-pty spawn --name <n> bash
 ```
 
 ## Example
 
 ```bash
-bun packages/cli/src/index.ts spawn --name demo bash
-bun packages/cli/src/index.ts type -s demo 'echo hello'
-bun packages/cli/src/index.ts key -s demo enter
+./agent-pty spawn --name demo bash
+./agent-pty type -s demo 'echo hello'
+./agent-pty key -s demo enter
 sleep 0.3
-bun packages/cli/src/index.ts snapshot -s demo
-bun packages/cli/src/index.ts kill -s demo
+./agent-pty snapshot -s demo
+./agent-pty kill -s demo
+./agent-pty remove -s demo
 ```
 
 ## Key map
@@ -81,6 +87,6 @@ cd packages/core && bun run build   # tsc -p tsconfig.build.json
 
 ## TODO
 
-- [ ] Add `scroll` / scrollback access
+- [x] Add `scroll` / scrollback access
 - [ ] Add `resize` command
 - [x] Integration tests

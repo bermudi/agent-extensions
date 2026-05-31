@@ -46,7 +46,7 @@ async function main() {
 
   if (!command) {
     console.error("Usage: agent-pty <command> [options]");
-    console.error("Commands: daemon, spawn, type, key, snapshot, wait-for, await-change, kill, list-sessions");
+    console.error("Commands: daemon, spawn, type, key, snapshot, scroll, wait-for, await-change, kill, remove, list-sessions");
     process.exit(1);
   }
 
@@ -133,11 +133,24 @@ async function main() {
       break;
     }
 
+    case "scroll": {
+      const name = String(flags.s ?? flags.session ?? "");
+      const lines = Number(flags.lines ?? 0);
+      if (!name) {
+        console.error("Missing -s/--session");
+        process.exit(1);
+      }
+      const res = await sendCommand({ id, cmd: "scroll", name, lines });
+      printJson(res);
+      break;
+    }
+
     case "wait-for": {
       const name = String(flags.s ?? flags.session ?? "");
       const pattern = positional[0];
       const timeout = Number(flags.t ?? flags.timeout ?? 30000);
       const regex = Boolean(flags.r ?? flags.regex ?? false);
+      const since = flags.since !== undefined ? Number(flags.since) : undefined;
       if (!name) {
         console.error("Missing -s/--session");
         process.exit(1);
@@ -146,7 +159,7 @@ async function main() {
         console.error("Missing pattern argument");
         process.exit(1);
       }
-      const res = await sendCommand({ id, cmd: "wait-for", name, pattern, timeout, regex }, timeout + 5000);
+      const res = await sendCommand({ id, cmd: "wait-for", name, pattern, timeout, regex, ...(since !== undefined ? { since } : {}) }, timeout + 5000);
       printJson(res);
       break;
     }
@@ -172,6 +185,17 @@ async function main() {
         process.exit(1);
       }
       const res = await sendCommand({ id, cmd: "kill", name, ...(signal ? { signal } : {}) });
+      printJson(res);
+      break;
+    }
+
+    case "remove": {
+      const name = String(flags.s ?? flags.session ?? "");
+      if (!name) {
+        console.error("Missing -s/--session");
+        process.exit(1);
+      }
+      const res = await sendCommand({ id, cmd: "remove", name });
       printJson(res);
       break;
     }

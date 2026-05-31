@@ -49,11 +49,28 @@ describe("session management", () => {
     expect(res.ok).toBe(false);
   });
 
-  test("kill removes session", async () => {
+  test("kill marks session killed but keeps record", async () => {
     await harness.cmd("kill", { name: "happy" });
     const list = await harness.cmd("list-sessions");
     expect(list.ok).toBe(true);
+    expect(list.sessions).toHaveLength(1);
+    const s = (list.sessions as Array<{ name: string; killedAt?: string }>)[0];
+    expect(s!.name).toBe("happy");
+    expect(s!.killedAt).toBeDefined();
+    expect(new Date(s!.killedAt!).toISOString()).toBe(s!.killedAt!);
+  });
+
+  test("remove actually deletes session", async () => {
+    await harness.cmd("remove", { name: "happy" });
+    const list = await harness.cmd("list-sessions");
+    expect(list.ok).toBe(true);
     expect(list.sessions).toHaveLength(0);
+  });
+
+  test("remove non-existent session", async () => {
+    const res = await harness.cmd("remove", { name: "ghost" });
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/not found/);
   });
 
   test("kill terminates child process", async () => {

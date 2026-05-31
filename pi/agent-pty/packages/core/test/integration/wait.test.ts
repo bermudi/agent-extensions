@@ -93,6 +93,49 @@ describe("wait-for and await-change", () => {
     expect(res.ok).toBe(false);
   });
 
+  test("wait-for: since skips immediate match and times out if no new data", async () => {
+    await d.spawnShell("wf-since");
+    await typeLine("wf-since", "echo SINCE_TEST");
+    await d.cmd("wait-for", { name: "wf-since", pattern: "SINCE_TEST", timeout: 3000 });
+
+    const snap = await d.cmd("snapshot", { name: "wf-since" });
+    const sinceId = snap.snapshotId as number;
+
+    // Pattern is already on screen, but --since should skip immediate check
+    const res = await d.cmd("wait-for", {
+      name: "wf-since",
+      pattern: "SINCE_TEST",
+      since: sinceId,
+      timeout: 500,
+    }, 2000);
+    expect(res.ok).toBe(true);
+    expect(res.matched).toBe(false);
+    expect(res.timedOut).toBe(true);
+  });
+
+  test("wait-for: since matches on new data after snapshot", async () => {
+    await d.spawnShell("wf-since-match");
+    await typeLine("wf-since-match", "echo OLD");
+    await d.cmd("wait-for", { name: "wf-since-match", pattern: "OLD", timeout: 3000 });
+
+    const snap = await d.cmd("snapshot", { name: "wf-since-match" });
+    const sinceId = snap.snapshotId as number;
+
+    const p = d.cmd("wait-for", {
+      name: "wf-since-match",
+      pattern: "NEW",
+      since: sinceId,
+      timeout: 3000,
+    }, 5000);
+
+    await Bun.sleep(100);
+    await typeLine("wf-since-match", "echo NEW");
+
+    const res = await p;
+    expect(res.ok).toBe(true);
+    expect(res.matched).toBe(true);
+  });
+
   // --- await-change ---
 
   test("await-change: detects screen change", async () => {

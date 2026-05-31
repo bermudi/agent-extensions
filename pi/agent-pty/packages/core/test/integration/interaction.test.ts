@@ -35,6 +35,8 @@ describe("PTY interaction", () => {
     const res = await harness.cmd("snapshot", { name: s });
     expect(res.ok).toBe(true);
     expect(typeof res.snapshotId).toBe("number");
+    expect(typeof res.at).toBe("string");
+    expect(new Date(res.at as string).toISOString()).toBe(res.at as string);
     expect(typeof res.text).toBe("string");
     expect(res.size).toEqual({ cols: 80, rows: 24 });
     expect(res).toHaveProperty("cursor");
@@ -107,6 +109,73 @@ describe("PTY interaction", () => {
     expect(res.matched).toBe(true);
 
     await harness.cmd("kill", { name: s });
+  });
+
+  test("snapshot on killed session returns forensic state", async () => {
+    const s = "forensic";
+    await harness.spawnShell(s);
+    await harness.cmd("type", { name: s, text: "echo FORENSIC_TEST" });
+    await harness.cmd("key", { name: s, key: "enter" });
+    await harness.cmd("wait-for", { name: s, pattern: "FORENSIC_TEST", timeout: 3000 });
+
+    await harness.cmd("kill", { name: s });
+    const snap = await harness.cmd("snapshot", { name: s });
+    expect(snap.ok).toBe(true);
+    expect(typeof snap.text).toBe("string");
+    expect((snap.text as string)).toContain("FORENSIC_TEST");
+
+    await harness.cmd("remove", { name: s });
+  });
+
+  test("scrollback returns lines that left the screen", async () => {
+    const s = "scroll";
+    await harness.spawnShell(s, { rows: 5, cols: 40 });
+
+    // Type enough lines to push content off the small screen
+    for (let i = 0; i < 10; i++) {
+      await harness.cmd("type", { name: s, text: `echo LINE_${i}` });
+      await harness.cmd("key", { name: s, key: "enter" });
+    }
+
+    // Wait for the last line
+    await harness.cmd("wait-for", { name: s, pattern: "LINE_9", timeout: 3000 });
+
+    const scroll = await harness.cmd("scroll", { name: s });
+    expect(scroll.ok).toBe(true);
+    expect(Array.isArray(scroll.lines)).toBe(true);
+    const lines = scroll.lines as string[];
+    // Some lines should have scrolled off and be in scrollback
+    const hasOldLine = lines.some((l) => l.includes("LINE_0"));
+    expect(hasOldLine).toBe(true);
+    // Newest lines are still on the visible screen, not in scrollback
+    const hasNewLine = lines.some((l) => l.includes("LINE_9"));
+    expect(hasNewLine).toBe(false);
+
+    await harness.cmd("kill", { name: s });
+    await harness.cmd("remove", { name: s });
+  });
+
+  test("scrollback with lines limit", async () => {
+    const s = "scroll-limit";
+    await harness.spawnShell(s, { rows: 5, cols: 40 });
+
+    for (let i = 0; i < 10; i++) {
+      await harness.cmd("type", { name: s, text: `echo L_${i}` });
+      await harness.cmd("key", { name: s, key: "enter" });
+    }
+    await harness.cmd("wait-for", { name: s, pattern: "L_9", timeout: 3000 });
+
+    const scroll = await harness.cmd("scroll", { name: s, lines: 3 });
+    expect(scroll.ok).toBe(true);
+    expect((scroll.lines as string[]).length).toBeLessThanOrEqual(3);
+
+    await harness.cmd("kill", { name: s });
+    await harness.cmd("remove", { name: s });
+  });
+
+  test("scrollback on non-existent session", async () => {
+    const res = await harness.cmd("scroll", { name: "ghost" });
+    expect(res.ok).toBe(false);
   });
 
   test("snapshot on non-existent session", async () => {

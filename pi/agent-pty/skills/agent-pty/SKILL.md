@@ -20,6 +20,8 @@ Headless PTY orchestration for AI agents. Spawn interactive programs, type input
 
 All commands auto-start the Node.js daemon on first use unless `AGENT_PTY_DAEMON_CMD` overrides it.
 
+You can use the root-level `./agent-pty` wrapper instead of `bun packages/cli/src/index.ts`.
+
 **spawn** — create a named PTY session
 ```bash
 bun packages/cli/src/index.ts spawn --name <n> [--cwd <dir>] [--cols N] [--rows N] <command> [args...]
@@ -41,13 +43,21 @@ Keys: `enter`, `tab`, `escape`, `backspace`, `delete`, `up`, `down`, `left`, `ri
 ```bash
 bun packages/cli/src/index.ts snapshot -s <name> [-f full|text]
 ```
-Returns `{snapshotId, size, cursor, text, contentHash}`; `grid` included only with `-f full`.
+Returns `{snapshotId, at, size, cursor, text, contentHash}`; `grid` included only with `-f full`.
+
+**scroll** — retrieve scrollback history (lines that scrolled off the visible screen)
+```bash
+bun packages/cli/src/index.ts scroll -s <name> [--lines N]
+```
+Returns `{lines, text}`. `lines` is an array of scrollback strings; `text` is the joined output. Use `--lines` to limit the result (default: all scrollback).
 
 **wait-for** — block until screen text matches a pattern
 ```bash
-bun packages/cli/src/index.ts wait-for -s <name> <pattern> [-r] [-t <ms>]
+bun packages/cli/src/index.ts wait-for -s <name> <pattern> [-r] [-t <ms>] [--since <snapshotId>]
 ```
 Default: literal match (auto-escapes regex chars). Use `-r` for regex. Returns `{matched, elapsed}` or `{matched: false, timedOut: true}`. If the pattern is already visible, returns instantly with `elapsed: 0`.
+
+Use `--since <snapshotId>` to skip the immediate check and only match on data arriving after the given snapshot ID. This prevents the "temporal footgun" where the pattern was already on screen before you called `wait-for`.
 
 **await-change** — block until the screen changes from its current state
 ```bash
@@ -59,12 +69,19 @@ Captures baseline **at call time**. Start this *before* triggering the action. `
 ```bash
 bun packages/cli/src/index.ts kill -s <name> [--signal <sig>]
 ```
-Removes the session from the daemon.
+Marks the session as killed but keeps the record for forensic inspection (snapshot still works). Returns `{ok, killedAt}`.
 
-**list-sessions** — list active sessions
+**remove** — permanently delete a session record
+```bash
+bun packages/cli/src/index.ts remove -s <name>
+```
+Removes the session from the daemon. Use after `kill` when you no longer need the forensic state.
+
+**list-sessions** — list sessions (including killed ones)
 ```bash
 bun packages/cli/src/index.ts list-sessions
 ```
+Returns array of `{name, command, cwd, pid, createdAt, killedAt?}`. Killed sessions include `killedAt`.
 
 **stop** — shut down the daemon
 ```bash
@@ -81,7 +98,7 @@ bun packages/cli/src/index.ts stop
 
 ## Screen vs scrollback
 
-`snapshot` captures the **currently visible terminal grid** (rows x cols), not scrollback history. VT escape sequences are stripped by `@wterm/core`. The `text` field is the rendered screen content. To track historical output, collect multiple snapshots over time.
+`snapshot` captures the **currently visible terminal grid** (rows x cols). `scroll` retrieves lines that have scrolled off the visible screen. VT escape sequences are stripped by `@wterm/core` in both cases. The `text` field is the rendered content. To track historical output, use `scroll` for past lines or collect multiple snapshots over time.
 
 ## wait-for vs await-change
 
@@ -110,6 +127,7 @@ Named keys and control combos are resolved through `keys.ts`:
 - **Daemon auto-start.** `ensureDaemon()` spawns the compiled daemon if the socket is unreachable. Build the daemon first: `cd packages/core && bun run build`.
 - **await-change order sensitivity.** Start `await-change` *before* the action that changes the screen. If you start it after, the new state becomes the baseline and it may time out without detecting a change.
 - **Settle behavior.** The settle timer resets on every screen hash change. Rapid-fire output extends the wait. Use `--settle 0` for immediate resolution on first change.
+- **`wait-for` temporal footgun.** If the pattern is already on screen, `wait-for` returns instantly. Use `--since <snapshotId>` (from a prior `snapshot`) to skip the immediate check and only match on new data. This is essential when you snapshot, trigger an action, and then wait for a result that might have been present in the baseline snapshot.
 - **`wait-for` on short strings can match banner text.** Python version banners contain digits; shell prompts contain `$`. After typing input, prefer `await-change` to detect the screen updating, or use a specific multi-word pattern.
 - **Regex vs literal.** `wait-for` defaults to literal: special regex characters are auto-escaped. Use `-r` only when you need pattern matching.
 - **contentHash is djb2.** Adequate for change detection, but collision-prone. Do not use it for security, persistence, or content addressing.
@@ -119,26 +137,27 @@ Named keys and control combos are resolved through `keys.ts`:
 
 **Drive a Python REPL:**
 ```bash
-bun packages/cli/src/index.ts spawn --name py python3
-bun packages/cli/src/index.ts wait-for -s py ">>>"
-bun packages/cli/src/index.ts type -s py 'print("agent-pty ok")'
-bun packages/cli/src/index.ts key -s py enter
-bun packages/cli/src/index.ts wait-for -s py "agent-pty ok"
-bun packages/cli/src/index.ts snapshot -s py
-bun packages/cli/src/index.ts kill -s py
+./agent-pty spawn --name py python3
+./agent-pty wait-for -s py ">>>"
+./agent-pty type -s py 'print("agent-pty ok")'
+./agent-pty key -s py enter
+./agent-pty wait-for -s py "agent-pty ok"
+./agent-pty snapshot -s py
+./agent-pty kill -s py
+./agent-pty remove -s py
 ```
 
 **Wait for a prompt after a command:**
 ```bash
-bun packages/cli/src/index.ts type -s shell "git status"
-bun packages/cli/src/index.ts key -s shell enter
-bun packages/cli/src/index.ts wait-for -s shell "$" -r
+./agent-pty type -s shell "git status"
+./agent-pty key -s shell enter
+./agent-pty wait-for -s shell "$" -r
 ```
 
 **Navigate a TUI and detect change:**
 ```bash
 # Start await-change BEFORE sending the key
-bun packages/cli/src/index.ts await-change -s vim -t 5000 --settle 200 &
-bun packages/cli/src/index.ts key -s vim down
+./agent-pty await-change -s vim -t 5000 --settle 200 &
+./agent-pty key -s vim down
 # Wait for the backgrounded await-change to return
 ```
