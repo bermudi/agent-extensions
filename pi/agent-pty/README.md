@@ -23,6 +23,7 @@ packages/
   core/          # Shared daemon, session engine, Unix-socket client
   cli/           # CLI frontend (`agent-pty` bin)
   pi-extension/  # Pi extension frontend (tools + commands)
+  mcp-server/    # MCP server for Devin CLI, Claude Code, Windsurf, etc.
 ```
 
 Both frontends talk to the same daemon via `@agent-pty/core`.
@@ -75,6 +76,24 @@ Client (Bun)  --NDJSON/Unix sock-->  Daemon (Node.js + tsx)
                                            |
                                      PTY child (bash/vim/etc)
 ```
+
+## MCP server
+
+Use agent-pty from any MCP-compatible client (Devin CLI, Claude Code, Windsurf, etc.):
+
+```json
+// .devin/config.json
+{
+  "mcpServers": {
+    "agent-pty": {
+      "command": "bun",
+      "args": ["run", "packages/mcp-server/src/server.ts"]
+    }
+  }
+}
+```
+
+The MCP server exposes one tool per daemon command (`agent_pty_spawn`, `agent_pty_type`, `agent_pty_key`, `agent_pty_snapshot`, `agent_pty_scroll`, `agent_pty_wait_for`, `agent_pty_await_change`, `agent_pty_wait_for_exit`, `agent_pty_kill`, `agent_pty_remove`, `agent_pty_list_sessions`). It auto-starts the daemon on first use via `@agent-pty/core`.
 
 ## Building
 

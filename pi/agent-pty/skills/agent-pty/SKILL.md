@@ -22,6 +22,8 @@ All commands auto-start the Node.js daemon on first use unless `AGENT_PTY_DAEMON
 
 You can use the root-level `./agent-pty` wrapper instead of `bun packages/cli/src/index.ts`.
 
+For MCP clients (Devin CLI, Claude Code, Windsurf), add the MCP server from `packages/mcp-server/src/server.ts` — it exposes the same commands as named MCP tools (`agent_pty_spawn`, `agent_pty_snapshot`, etc.).
+
 **spawn** — create a named PTY session
 ```bash
 bun packages/cli/src/index.ts spawn --name <n> [--cwd <dir>] [--cols N] [--rows N] <command> [args...]
