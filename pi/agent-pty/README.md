@@ -38,6 +38,7 @@ bun packages/cli/src/index.ts snapshot -s <name> [-f full|text]
 bun packages/cli/src/index.ts scroll -s <name> [--lines N]
 bun packages/cli/src/index.ts wait-for -s <name> <pattern> [-r] [-t <ms>] [--since <snapshotId>]
 bun packages/cli/src/index.ts await-change -s <name> [-t <ms>] [--settle <ms>]
+bun packages/cli/src/index.ts wait-for-exit -s <name> [-t <ms>]
 bun packages/cli/src/index.ts kill -s <name> [--signal <sig>]
 bun packages/cli/src/index.ts remove -s <name>
 bun packages/cli/src/index.ts list-sessions

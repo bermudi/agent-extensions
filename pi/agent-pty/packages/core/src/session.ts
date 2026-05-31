@@ -26,6 +26,7 @@ export class Session {
   cwd: string;
   createdAt: Date;
   killedAt: Date | null;
+  exitInfo: { exitCode: number; signal?: number } | null;
   private snapshotCount = 0;
 
   private constructor(
@@ -42,10 +43,19 @@ export class Session {
     this.bridge = bridge;
     this.createdAt = new Date();
     this.killedAt = null;
+    this.exitInfo = null;
 
     pty.onData((data: string) => {
       bridge.writeString(data);
     });
+
+    pty.onExit((e) => {
+      this.exitInfo = e;
+    });
+  }
+
+  get lastSnapshotId(): number {
+    return this.snapshotCount;
   }
 
   static async create(
@@ -117,7 +127,8 @@ export class Session {
 
   scrollback(maxLines: number = 0): { lines: string[]; text: string } {
     const count = this.bridge.getScrollbackCount();
-    const take = maxLines > 0 ? Math.min(maxLines, count) : count;
+    // 0 means "all", negative means "none"
+    const take = maxLines <= 0 ? (maxLines === 0 ? count : 0) : Math.min(maxLines, count);
     const lines: string[] = [];
     // offset 0 is the oldest scrollback line; count-1 is the newest
     for (let i = count - take; i < count; i++) {

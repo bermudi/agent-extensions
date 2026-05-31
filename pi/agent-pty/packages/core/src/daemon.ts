@@ -313,6 +313,48 @@ class Daemon {
         return { ...base, ok: true, lines: scroll.lines, text: scroll.text };
       }
 
+      case "wait-for-exit": {
+        const name = String(req.name ?? "");
+        const timeout = Number(req.timeout ?? 30000);
+        const session = this.sessions.get(name);
+        if (!session) return { ...base, ok: false, error: `session not found: ${name}` };
+
+        // Already exited?
+        if (session.exitInfo) {
+          return { ...base, ok: true, exited: true, ...session.exitInfo };
+        }
+
+        const start = Date.now();
+        return new Promise((resolve) => {
+          let disposed = false;
+          let exitDisposable: { dispose(): void } | null = null;
+
+          const timer = setTimeout(() => {
+            if (disposed) return;
+            disposed = true;
+            if (exitDisposable) exitDisposable.dispose();
+            resolve({ ...base, ok: true, exited: false, timedOut: true, elapsed: Date.now() - start });
+          }, timeout);
+
+          exitDisposable = session.pty.onExit((e) => {
+            if (disposed) return;
+            disposed = true;
+            if (exitDisposable) exitDisposable.dispose();
+            clearTimeout(timer);
+            resolve({ ...base, ok: true, exited: true, exitCode: e.exitCode, signal: e.signal, elapsed: Date.now() - start });
+          });
+
+          socket.on("close", () => {
+            if (!disposed) {
+              disposed = true;
+              if (exitDisposable) exitDisposable.dispose();
+              clearTimeout(timer);
+              resolve({ ...base, ok: false, error: "client disconnected" });
+            }
+          });
+        });
+      }
+
       case "list-sessions": {
         const list = Array.from(this.sessions.values()).map((s) => ({
           name: s.name,

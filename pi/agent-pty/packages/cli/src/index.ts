@@ -46,7 +46,7 @@ async function main() {
 
   if (!command) {
     console.error("Usage: agent-pty <command> [options]");
-    console.error("Commands: daemon, spawn, type, key, snapshot, scroll, wait-for, await-change, kill, remove, list-sessions");
+    console.error("Commands: daemon, spawn, type, key, snapshot, scroll, wait-for, await-change, wait-for-exit, kill, remove, list-sessions");
     process.exit(1);
   }
 
@@ -173,6 +173,18 @@ async function main() {
         process.exit(1);
       }
       const res = await sendCommand({ id, cmd: "await-change", name, timeout, settle }, timeout + 5000);
+      printJson(res);
+      break;
+    }
+
+    case "wait-for-exit": {
+      const name = String(flags.s ?? flags.session ?? "");
+      const timeout = Number(flags.t ?? flags.timeout ?? 30000);
+      if (!name) {
+        console.error("Missing -s/--session");
+        process.exit(1);
+      }
+      const res = await sendCommand({ id, cmd: "wait-for-exit", name, timeout }, timeout + 5000);
       printJson(res);
       break;
     }

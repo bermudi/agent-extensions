@@ -230,6 +230,56 @@ describe("wait-for and await-change", () => {
     expect(res.settled).toBe(false);
   });
 
+  // --- wait-for-exit ---
+
+  test("wait-for-exit: returns immediately if process already exited", async () => {
+    await d.spawnShell("wfe-done");
+    await d.cmd("type", { name: "wfe-done", text: "exit 42" });
+    await d.cmd("key", { name: "wfe-done", key: "enter" });
+
+    // Wait a bit for the shell to exit
+    await new Promise((r) => setTimeout(r, 300));
+
+    const res = await d.cmd("wait-for-exit", { name: "wfe-done", timeout: 5000 });
+    expect(res.ok).toBe(true);
+    expect(res.exited).toBe(true);
+    expect(res.exitCode).toBe(42);
+  });
+
+  test("wait-for-exit: waits for natural exit", async () => {
+    await d.cmd("spawn", {
+      name: "wfe-wait",
+      command: "bash",
+      args: ["-c", "sleep 0.2; exit 7"],
+    });
+
+    const res = await d.cmd("wait-for-exit", { name: "wfe-wait", timeout: 5000 });
+    expect(res.ok).toBe(true);
+    expect(res.exited).toBe(true);
+    expect(res.exitCode).toBe(7);
+  });
+
+  test("wait-for-exit: timeout if process stays alive", async () => {
+    await d.cmd("spawn", {
+      name: "wfe-timeout",
+      command: "sleep",
+      args: ["1000"],
+    });
+
+    const res = await d.cmd("wait-for-exit", { name: "wfe-timeout", timeout: 300 });
+    expect(res.ok).toBe(true);
+    expect(res.exited).toBe(false);
+    expect(res.timedOut).toBe(true);
+
+    await d.cmd("kill", { name: "wfe-timeout" });
+    await d.cmd("remove", { name: "wfe-timeout" });
+  });
+
+  test("wait-for-exit: session not found", async () => {
+    const res = await d.cmd("wait-for-exit", { name: "ghost" });
+    expect(res.ok).toBe(false);
+  });
+
   test("await-change: session not found", async () => {
     const res = await d.cmd("await-change", { name: "ghost" });
     expect(res.ok).toBe(false);

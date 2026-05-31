@@ -16,7 +16,7 @@ export function setupPtyCommands(pi: ExtensionAPI): void {
       })) as {
         ok: boolean;
         error?: string;
-        sessions?: Array<{ name: string; command: string; cwd: string; pid: number; createdAt: string }>;
+        sessions?: Array<{ name: string; command: string; cwd: string; pid: number; createdAt: string; killedAt?: string }>;
       };
 
       if (!res.ok) {
@@ -26,15 +26,18 @@ export function setupPtyCommands(pi: ExtensionAPI): void {
 
       const sessions = res.sessions ?? [];
       if (sessions.length === 0) {
-        ctx.ui.notify("No active PTY sessions.", "info");
+        ctx.ui.notify("No PTY sessions.", "info");
         return;
       }
 
       const text = sessions
-        .map((s) => `- ${s.name}: ${s.command} in ${s.cwd} (PID ${s.pid})`)
+        .map((s) => {
+          const status = s.killedAt ? `killed ${s.killedAt}` : `PID ${s.pid}`;
+          return `- ${s.name}: ${s.command} in ${s.cwd} (${status})`;
+        })
         .join("\n");
 
-      ctx.ui.notify(`Active PTY sessions:\n${text}`, "info");
+      ctx.ui.notify(`PTY sessions:\n${text}`, "info");
     },
   });
 
@@ -58,6 +61,7 @@ export function setupPtyCommands(pi: ExtensionAPI): void {
         error?: string;
         text?: string;
         snapshotId?: number;
+        at?: string;
         size?: unknown;
         cursor?: unknown;
         contentHash?: string;
@@ -69,13 +73,79 @@ export function setupPtyCommands(pi: ExtensionAPI): void {
       }
 
       const lines = [
-        `Snapshot #${res.snapshotId} of "${name}"`,
+        `Snapshot #${res.snapshotId} of "${name}" at ${res.at ?? "?"}`,
         `Size: ${JSON.stringify(res.size)} | Cursor: ${JSON.stringify(res.cursor)} | Hash: ${res.contentHash}`,
         "---",
         res.text ?? "",
       ];
 
       ctx.ui.notify(lines.join("\n"), "info");
+    },
+  });
+
+  pi.registerCommand("pty:scroll", {
+    description: "Show scrollback of a PTY session: /pty:scroll <name> [--lines N]",
+    handler: async (args, ctx) => {
+      await ensureDaemon();
+      const parts = args.trim().split(/\s+/);
+      const name = parts[0];
+      const linesArg = parts.find((p) => p.startsWith("--lines="));
+      const lines = linesArg ? Number(linesArg.slice(8)) : 0;
+      if (!name) {
+        ctx.ui.notify("Usage: /pty:scroll <session-name> [--lines=N]", "warning");
+        return;
+      }
+
+      const res = (await sendCommand({
+        id: makeId(),
+        cmd: "scroll",
+        name,
+        lines,
+      })) as { ok: boolean; error?: string; text?: string };
+
+      if (!res.ok) {
+        ctx.ui.notify(`Scroll failed: ${res.error ?? "unknown error"}`, "error");
+        return;
+      }
+
+      ctx.ui.notify(`Scrollback of "${name}":\n${res.text ?? ""}`, "info");
+    },
+  });
+
+  pi.registerCommand("pty:wait-for-exit", {
+    description: "Wait for a PTY session to exit: /pty:wait-for-exit <name> [-t <ms>]",
+    handler: async (args, ctx) => {
+      await ensureDaemon();
+      const parts = args.trim().split(/\s+/);
+      const name = parts[0];
+      const timeoutArg = parts.find((p) => p.startsWith("-t="));
+      const timeout = timeoutArg ? Number(timeoutArg.slice(3)) : 30000;
+      if (!name) {
+        ctx.ui.notify("Usage: /pty:wait-for-exit <session-name> [-t=<ms>]", "warning");
+        return;
+      }
+
+      const res = (await sendCommand({
+        id: makeId(),
+        cmd: "wait-for-exit",
+        name,
+        timeout,
+      })) as { ok: boolean; error?: string; exited?: boolean; timedOut?: boolean; exitCode?: number; signal?: number };
+
+      if (!res.ok) {
+        ctx.ui.notify(`Wait-for-exit failed: ${res.error ?? "unknown error"}`, "error");
+        return;
+      }
+
+      if (res.timedOut) {
+        ctx.ui.notify(`Timed out waiting for "${name}" to exit`, "warning");
+        return;
+      }
+
+      const exitText = res.signal !== undefined
+        ? `exitCode=${res.exitCode} signal=${res.signal}`
+        : `exitCode=${res.exitCode}`;
+      ctx.ui.notify(`Session "${name}" exited (${exitText})`, "info");
     },
   });
 

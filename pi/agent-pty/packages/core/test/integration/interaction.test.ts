@@ -178,6 +178,23 @@ describe("PTY interaction", () => {
     expect(res.ok).toBe(false);
   });
 
+  test("scrollback clamps negative lines to 0", async () => {
+    const s = "scroll-neg";
+    await harness.spawnShell(s, { rows: 5, cols: 40 });
+    for (let i = 0; i < 3; i++) {
+      await harness.cmd("type", { name: s, text: `echo N_${i}` });
+      await harness.cmd("key", { name: s, key: "enter" });
+    }
+    await harness.cmd("wait-for", { name: s, pattern: "N_2", timeout: 3000 });
+
+    const scroll = await harness.cmd("scroll", { name: s, lines: -5 });
+    expect(scroll.ok).toBe(true);
+    expect((scroll.lines as string[]).length).toBe(0);
+
+    await harness.cmd("kill", { name: s });
+    await harness.cmd("remove", { name: s });
+  });
+
   test("snapshot on non-existent session", async () => {
     const res = await harness.cmd("snapshot", { name: "ghost" });
     expect(res.ok).toBe(false);

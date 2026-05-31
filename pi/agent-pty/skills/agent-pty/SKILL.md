@@ -65,6 +65,12 @@ bun packages/cli/src/index.ts await-change -s <name> [-t <ms>] [--settle <ms>]
 ```
 Captures baseline **at call time**. Start this *before* triggering the action. `settle` (default 200ms) resets on every hash change; use `--settle 0` to resolve immediately on first change. Returns `{changed, settled, contentHash, elapsed}`.
 
+**wait-for-exit** — block until the PTY process exits
+```bash
+bun packages/cli/src/index.ts wait-for-exit -s <name> [-t <ms>]
+```
+Returns `{exited, exitCode, signal?, elapsed}` or `{exited: false, timedOut: true}`. If the process has already exited, returns immediately with its exit info.
+
 **kill** — terminate a session
 ```bash
 bun packages/cli/src/index.ts kill -s <name> [--signal <sig>]
@@ -93,7 +99,7 @@ bun packages/cli/src/index.ts stop
 1. **Spawn** with a stable name.
 2. **Wait for a prompt** (or `await-change` after initial spawn settles).
 3. **Type** input and/or **key** sequences.
-4. **wait-for** expected output, **await-change** after triggering actions, or **snapshot** to inspect state.
+4. **wait-for** expected output, **await-change** after triggering actions, **snapshot** to inspect state, or **wait-for-exit** for short-lived commands.
 5. **kill** when done.
 
 ## Screen vs scrollback
