@@ -10,6 +10,7 @@ import {
   truncateHead,
   withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 // ── Per-server timeout defaults (ms) ────────────────────────────────────
 
@@ -301,16 +302,19 @@ export default function mcpExtension(pi: ExtensionAPI) {
 
     // ── TUI rendering ──────────────────────────────────────────────
 
-    renderCall(args, theme) {
+    renderCall(args, theme, ctx) {
+      const text = (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const selector = `${args.server}.${args.tool}`;
       const argKeys = args.args ? Object.keys(args.args).join(", ") : "";
-      let text = theme.bold(theme.fg("toolTitle", "mcp "));
-      text += theme.fg("accent", selector);
-      if (argKeys) text += theme.fg("muted", ` (${argKeys})`);
+      let label = theme.bold(theme.fg("toolTitle", "mcp "));
+      label += theme.fg("accent", selector);
+      if (argKeys) label += theme.fg("muted", ` (${argKeys})`);
+      text.setText(label);
       return text;
     },
 
-    renderResult(result, { expanded }, theme) {
+    renderResult(result, { expanded }, theme, ctx) {
+      const text = (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const details = result.details as {
         server?: string;
         tool?: string;
@@ -319,12 +323,13 @@ export default function mcpExtension(pi: ExtensionAPI) {
       } | void;
 
       if (result.isError) {
-        return theme.fg("error", "✗ error");
+        text.setText(theme.fg("error", "✗ error"));
+        return text;
       }
 
-      let text = theme.fg("success", "✓");
+      let label = theme.fg("success", "✓");
       if (details?.truncated) {
-        text += theme.fg("warning", " (truncated)");
+        label += theme.fg("warning", " (truncated)");
       }
 
       if (expanded) {
@@ -332,14 +337,15 @@ export default function mcpExtension(pi: ExtensionAPI) {
         if (content?.type === "text") {
           const lines = content.text.split("\n").slice(0, 12);
           for (const line of lines) {
-            text += `\n` + theme.fg("dim", line);
+            label += `\n` + theme.fg("dim", line);
           }
           if (content.text.split("\n").length > 12) {
-            text += `\n` + theme.fg("muted", "...");
+            label += `\n` + theme.fg("muted", "...");
           }
         }
       }
 
+      text.setText(label);
       return text;
     },
   });
@@ -386,14 +392,21 @@ export default function mcpExtension(pi: ExtensionAPI) {
       };
     },
 
-    renderCall(args, theme) {
+    renderCall(args, theme, ctx) {
+      const text = (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const target = args.server ?? "all";
-      return theme.bold(theme.fg("toolTitle", "mcp_list ")) + theme.fg("accent", target);
+      text.setText(theme.bold(theme.fg("toolTitle", "mcp_list ")) + theme.fg("accent", target));
+      return text;
     },
 
-    renderResult(result, _opts, theme) {
-      if (result.isError) return theme.fg("error", "✗ error");
-      return theme.fg("success", "✓ listed");
+    renderResult(result, _opts, theme, ctx) {
+      const text = (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      if (result.isError) {
+        text.setText(theme.fg("error", "✗ error"));
+      } else {
+        text.setText(theme.fg("success", "✓ listed"));
+      }
+      return text;
     },
   });
 }
