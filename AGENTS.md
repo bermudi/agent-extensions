@@ -20,4 +20,4 @@ Both locations are auto-discovered by pi at session start. Symlink source files 
 | Location | Scope | Install |
 |----------|-------|--------|
 | `.pi/extensions/*.ts` | Project-local (only this repo) | `ln -s pi/<ext>/<file>.ts .pi/extensions/<file>.ts` |
-| `~/.pi/agent/extensions/*.ts` | Global (all projects) | `ln -s pi/<ext>/<file>.ts ~/.pi/agent/extensions/<file>.ts` |
+| `~/.pi/agent/extensions/*.ts` | Global (all projects) | `ln -s pi/<ext>/<file>.ts ~/.pi/agent/extensions/<file>.ts` | if you install again here without me telling you to, I WILL FUCKING END YOU
