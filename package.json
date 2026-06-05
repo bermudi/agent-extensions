@@ -3,7 +3,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "bun test --path-ignore-patterns='pi/reference'",
+    "test": "bun run test:extensions && bun run test:agent-pty",
+    "test:extensions": "bun run test:arena && bun run test:pi-debate && bun run test:delegate && bun run test:supervise && bun run test:roundtable && bun run test:trim-context",
+    "test:arena": "bun test pi/arena",
+    "test:pi-debate": "bun test pi/pi-debate",
+    "test:delegate": "bun test pi/delegate",
+    "test:supervise": "bun test pi/supervise",
+    "test:roundtable": "bun test pi/roundtable",
+    "test:trim-context": "bun test pi/trim-context",
+    "test:agent-pty": "cd pi/agent-pty && bun test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
