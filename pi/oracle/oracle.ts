@@ -18,9 +18,49 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import * as crypto from "node:crypto";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+
+// ── Logger ────────────────────────────────────────────────────────────────
+
+const LOG_DIR = path.join(os.homedir(), ".pi", "logs", "oracle");
+const LOG_RETENTION_DAYS = 7;
+
+function ensureLogDir(): void {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    // Prune old log files on each run
+    const cutoff = Date.now() - LOG_RETENTION_DAYS * 86_400_000;
+    for (const f of fs.readdirSync(LOG_DIR)) {
+      if (!f.endsWith(".log")) continue;
+      const fullPath = path.join(LOG_DIR, f);
+      try {
+        if (fs.statSync(fullPath).mtimeMs < cutoff) fs.unlinkSync(fullPath);
+      } catch { /* best effort */ }
+    }
+  } catch { /* best effort */ }
+}
+
+function log(level: "info" | "warn" | "error", msg: string, data?: Record<string, unknown>): void {
+  try {
+    ensureLogDir();
+    const now = new Date();
+    const date = now.toISOString().slice(0, 10);
+    const entry = JSON.stringify({
+      ts: now.toISOString(),
+      level,
+      msg,
+      ...data,
+    });
+    fs.appendFileSync(path.join(LOG_DIR, `${date}.log`), entry + "\n");
+  } catch { /* never crash on logging */ }
+}
+
+function newRequestId(): string {
+  return crypto.randomUUID().slice(0, 8);
+}
 
 // ── Config ────────────────────────────────────────────────────────────────
 
@@ -28,12 +68,23 @@ const PUBLIC_FALLBACK = "https://qwen2api-n.smanx.xx.kg";
 const LOCAL_PROXY = "http://localhost:8765";
 
 async function probeBaseUrl(): Promise<string> {
-  if (process.env.ORACLE_URL) return process.env.ORACLE_URL.replace(/\/+$/, "");
+  if (process.env.ORACLE_URL) {
+    const url = process.env.ORACLE_URL.replace(/\/+$/, "");
+    log("info", "base_url", { source: "env", url });
+    return url;
+  }
   // Prefer local proxy if available; fall back to public serverless endpoint.
   try {
     const resp = await fetch(`${LOCAL_PROXY}/`, { method: "GET", signal: AbortSignal.timeout(1500) });
-    if (resp.ok) return LOCAL_PROXY;
-  } catch { /* not running */ }
+    if (resp.ok) {
+      log("info", "base_url", { source: "local_probe", url: LOCAL_PROXY });
+      return LOCAL_PROXY;
+    }
+    log("info", "local_probe_failed", { status: resp.status });
+  } catch (err) {
+    log("info", "local_probe_unreachable", { error: err instanceof Error ? err.message : String(err) });
+  }
+  log("info", "base_url", { source: "fallback", url: PUBLIC_FALLBACK });
   return PUBLIC_FALLBACK;
 }
 
@@ -41,6 +92,13 @@ const BASE_URL = await probeBaseUrl();
 const API_TOKEN = process.env.ORACLE_TOKEN ?? "";
 const DEFAULT_MODEL = process.env.ORACLE_MODEL ?? "qwen3.7-max";
 const REQUEST_TIMEOUT_MS = parseInt(process.env.ORACLE_TIMEOUT ?? "300000", 10);
+
+log("info", "oracle_loaded", {
+  baseUrl: BASE_URL,
+  defaultModel: DEFAULT_MODEL,
+  timeout: REQUEST_TIMEOUT_MS,
+  hasToken: !!API_TOKEN,
+});
 
 /** Max individual attachment size: 10 MB */
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
@@ -102,46 +160,70 @@ function buildContentParts(
   question: string,
   files: string[],
   cwd: string,
+  reqId: string,
 ): Array<Record<string, unknown>> {
   const parts: Array<Record<string, unknown>> = [{ type: "text", text: question }];
   let totalBytes = 0;
 
   for (const raw of files) {
     const resolved = path.isAbsolute(raw) ? raw : path.resolve(cwd, raw);
+    log("info", "attachment_start", { reqId, raw, resolved, exists: fs.existsSync(resolved) });
+
     if (!fs.existsSync(resolved)) {
+      log("warn", "attachment_not_found", { reqId, raw, resolved });
       parts.push({ type: "text", text: `[File not found: ${raw}]` });
       continue;
     }
-    const stat = fs.statSync(resolved);
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(resolved);
+    } catch (err) {
+      log("error", "attachment_stat_failed", { reqId, resolved, error: err instanceof Error ? err.message : String(err) });
+      parts.push({ type: "text", text: `[File stat failed: ${raw}]` });
+      continue;
+    }
+
     if (stat.size > MAX_ATTACHMENT_BYTES) {
+      log("warn", "attachment_too_large", { reqId, raw, sizeBytes: stat.size, maxSize: MAX_ATTACHMENT_BYTES });
       parts.push({ type: "text", text: `[File too large: ${raw} (${(stat.size / 1024 / 1024).toFixed(1)} MB)]` });
       continue;
     }
     totalBytes += stat.size;
     if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+      log("warn", "attachment_total_limit", { reqId, totalBytes, limit: MAX_TOTAL_ATTACHMENT_BYTES });
       parts.push({ type: "text", text: `[Remaining attachments skipped: total size limit exceeded]` });
       break;
     }
 
     const ext = path.extname(resolved).toLowerCase();
-    const b64 = fs.readFileSync(resolved).toString("base64");
 
-    // Text-ish files → inline as text. Binary → file attachment.
-    const textExts = new Set([".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".md", ".txt", ".py", ".rs", ".go", ".zig", ".toml", ".css", ".html", ".sh", ".bash", ".zsh", ".env", ".ini", ".cfg", ".conf", ".sql", ".graphql", ".proto", ".tf", ".dockerfile"]);
-    if (textExts.has(ext) || ext === "") {
-      const content = fs.readFileSync(resolved, "utf-8");
-      parts.push({ type: "text", text: `--- ${shortenPath(resolved)} ---\n${content}\n--- end ${shortenPath(resolved)} ---` });
-    } else {
-      const mime = ext === ".pdf" ? "application/pdf"
-        : ext === ".png" ? "image/png"
-        : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg"
-        : ext === ".gif" ? "image/gif"
-        : ext === ".webp" ? "image/webp"
-        : "application/octet-stream";
-      parts.push({ type: "file", file_data: `data:${mime};base64,${b64}`, filename: path.basename(resolved) });
+    let readStart = Date.now();
+    try {
+      // Text-ish files → inline as text. Binary → file attachment.
+      const textExts = new Set([".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".md", ".txt", ".py", ".rs", ".go", ".zig", ".toml", ".css", ".html", ".sh", ".bash", ".zsh", ".env", ".ini", ".cfg", ".conf", ".sql", ".graphql", ".proto", ".tf", ".dockerfile"]);
+      if (textExts.has(ext) || ext === "") {
+        const content = fs.readFileSync(resolved, "utf-8");
+        log("info", "attachment_read", { reqId, resolved, type: "text", bytes: Buffer.byteLength(content, "utf-8"), ms: Date.now() - readStart });
+        parts.push({ type: "text", text: `--- ${shortenPath(resolved)} ---\n${content}\n--- end ${shortenPath(resolved)} ---` });
+      } else {
+        const b64 = fs.readFileSync(resolved).toString("base64");
+        const mime = ext === ".pdf" ? "application/pdf"
+          : ext === ".png" ? "image/png"
+          : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg"
+          : ext === ".gif" ? "image/gif"
+          : ext === ".webp" ? "image/webp"
+          : "application/octet-stream";
+        log("info", "attachment_read", { reqId, resolved, type: "binary", mime, bytes: stat.size, ms: Date.now() - readStart });
+        parts.push({ type: "file", file_data: `data:${mime};base64,${b64}`, filename: path.basename(resolved) });
+      }
+    } catch (err) {
+      log("error", "attachment_read_failed", { reqId, resolved, ms: Date.now() - readStart, error: err instanceof Error ? err.message : String(err) });
+      parts.push({ type: "text", text: `[File read error: ${raw}]` });
     }
   }
 
+  log("info", "attachments_done", { reqId, fileCount: files.length, partCount: parts.length, totalBytes });
   return parts;
 }
 
@@ -160,49 +242,84 @@ async function streamOracle(
   model: string,
   signal: AbortSignal | undefined,
   onChunk: (reasoning: string, content: string) => void,
+  reqId: string,
 ): Promise<StreamResult> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (API_TOKEN) headers["Authorization"] = `Bearer ${API_TOKEN}`;
 
+  const url = `${BASE_URL}/v1/chat/completions`;
+  const bodyStr = JSON.stringify({ model, messages, stream: true });
+  log("info", "stream_request_start", {
+    reqId,
+    url,
+    model,
+    bodyBytes: Buffer.byteLength(bodyStr, "utf-8"),
+    messageCount: messages.length,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    signalAborted: signal?.aborted ?? false,
+  });
+
   // Create a per-request AbortController so we can set our own timeout
   // independent of the parent turn's signal.
   const timeoutCtrl = new AbortController();
-  const timeoutId = setTimeout(() => timeoutCtrl.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => {
+    log("warn", "stream_timeout", { reqId, timeoutMs: REQUEST_TIMEOUT_MS });
+    timeoutCtrl.abort();
+  }, REQUEST_TIMEOUT_MS);
 
   // Also abort if the parent signal fires.
-  const onParentAbort = () => timeoutCtrl.abort();
+  const onParentAbort = () => {
+    log("info", "stream_parent_abort", { reqId });
+    timeoutCtrl.abort();
+  };
   signal?.addEventListener("abort", onParentAbort, { once: true });
 
   let reasoning = "";
   let content = "";
   let usage: OracleDetails["usage"] | undefined;
   let truncated = false;
+  let chunkCount = 0;
+  const streamStart = Date.now();
 
   try {
-    const body = JSON.stringify({ model, messages, stream: true });
-
-    const response = await fetch(`${BASE_URL}/v1/chat/completions`, {
+    const response = await fetch(url, {
       method: "POST",
       headers,
-      body,
+      body: bodyStr,
       signal: timeoutCtrl.signal,
+    });
+
+    log("info", "stream_response_status", {
+      reqId,
+      status: response.status,
+      statusText: response.statusText,
+      contentType: response.headers.get("content-type"),
+      ms: Date.now() - streamStart,
     });
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
+      log("error", "stream_api_error", { reqId, status: response.status, body: text.slice(0, 500) });
       throw new Error(`Oracle API error ${response.status}: ${text.slice(0, 500)}`);
     }
 
     const reader = response.body?.getReader();
-    if (!reader) throw new Error("No response body");
+    if (!reader) {
+      log("error", "stream_no_body", { reqId });
+      throw new Error("No response body");
+    }
 
     const decoder = new TextDecoder();
     let buffer = "";
+    let lastChunkLog = Date.now();
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          log("info", "stream_done", { reqId, chunkCount, totalMs: Date.now() - streamStart });
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
@@ -215,8 +332,12 @@ async function streamOracle(
           if (payload === "[DONE]") continue;
 
           let chunk: StreamChunk;
-          try { chunk = JSON.parse(payload); } catch { continue; }
+          try { chunk = JSON.parse(payload); } catch (parseErr) {
+            log("warn", "stream_parse_error", { reqId, payload: payload.slice(0, 200), error: String(parseErr) });
+            continue;
+          }
 
+          chunkCount++;
           if (chunk.usage) {
             usage = {
               prompt_tokens: chunk.usage.prompt_tokens ?? 0,
@@ -232,9 +353,31 @@ async function streamOracle(
           if (delta.content) content += delta.content;
 
           if (delta.reasoning_content || delta.content) onChunk(reasoning, content);
+
+          // Log progress every 5s
+          if (Date.now() - lastChunkLog > 5000) {
+            log("info", "stream_progress", {
+              reqId,
+              chunkCount,
+              reasoningLen: reasoning.length,
+              contentLen: content.length,
+              elapsedMs: Date.now() - streamStart,
+            });
+            lastChunkLog = Date.now();
+          }
         }
       }
     } catch (readErr) {
+      const errMsg = readErr instanceof Error ? readErr.message : String(readErr);
+      log("error", "stream_read_error", {
+        reqId,
+        chunkCount,
+        reasoningLen: reasoning.length,
+        contentLen: content.length,
+        elapsedMs: Date.now() - streamStart,
+        error: errMsg,
+        isAbort: errMsg.includes("aborted"),
+      });
       // Stream cut short — return whatever we collected.
       truncated = true;
       // If we got nothing at all, this is a real failure — rethrow.
@@ -244,6 +387,16 @@ async function streamOracle(
     clearTimeout(timeoutId);
     signal?.removeEventListener("abort", onParentAbort);
   }
+
+  log("info", "stream_complete", {
+    reqId,
+    reasoningLen: reasoning.length,
+    contentLen: content.length,
+    chunkCount,
+    truncated,
+    usage,
+    totalMs: Date.now() - streamStart,
+  });
 
   return { reasoning, content, usage, truncated };
 }
@@ -285,12 +438,30 @@ export default function oracleExtension(pi: ExtensionAPI): void {
     }),
 
     async execute(_id, params, signal, onUpdate, ctx) {
+      const reqId = newRequestId();
       const model = params.model || DEFAULT_MODEL;
       const files = params.files ?? [];
       const start = Date.now();
 
+      log("info", "execute_start", {
+        reqId,
+        model,
+        questionLen: params.question?.length ?? 0,
+        fileCount: files.length,
+        files: files.map(f => shortenPath(path.isAbsolute(f) ? f : path.resolve(ctx.cwd, f))),
+        cwd: ctx.cwd,
+        signalAborted: signal?.aborted ?? false,
+      });
+
       // Build messages with file attachments
-      const contentParts = buildContentParts(params.question, files, ctx.cwd);
+      let contentParts: Array<Record<string, unknown>>;
+      try {
+        contentParts = buildContentParts(params.question, files, ctx.cwd, reqId);
+      } catch (err) {
+        log("error", "execute_build_parts_failed", { reqId, error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
+        throw err;
+      }
+
       const messages = [
         {
           role: "system",
@@ -329,7 +500,7 @@ export default function oracleExtension(pi: ExtensionAPI): void {
               } satisfies OracleDetails,
             });
           }
-        });
+        }, reqId);
 
         const wallMs = Date.now() - start;
         const details: OracleDetails = {
@@ -361,12 +532,30 @@ export default function oracleExtension(pi: ExtensionAPI): void {
           parts.push(`[Note: Oracle response was cut short after ${fmtMs(wallMs)} due to endpoint timeout. The reasoning above is partial.]`);
         }
 
+        log("info", "execute_success", {
+          reqId,
+          model,
+          wallMs,
+          reasoningChars: result.reasoning.length,
+          contentChars: result.content.length,
+          truncated: result.truncated,
+          usage: result.usage,
+        });
+
         return {
           content: [{ type: "text" as const, text: parts.join("\n\n") }],
           details,
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        log("error", "execute_failed", {
+          reqId,
+          model,
+          wallMs: Date.now() - start,
+          error: msg,
+          stack: err instanceof Error ? err.stack : undefined,
+          isAbort: msg.includes("aborted") || signal?.aborted,
+        });
         if (msg.includes("aborted") || signal?.aborted) {
           return {
             content: [{ type: "text" as const, text: "Oracle query aborted." }],
