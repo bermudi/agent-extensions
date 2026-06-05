@@ -164,16 +164,30 @@ export default function mcpExtension(pi: ExtensionAPI) {
 
   // ── Lifecycle ──────────────────────────────────────────────────────
 
-  pi.on("session_start", async () => {
+  let discoveryDone = false;
+
+  pi.on("session_start", () => {
+    // Kick off discovery in background — doesn't block startup
+    discoverServers().then((discovered) => {
+      servers = discovered;
+      serverNames = new Set(servers.map((s) => s.name));
+      directoryCache = buildDirectory(servers);
+      discoveryDone = true;
+    });
+  });
+
+  async function ensureDiscovered(): Promise<void> {
+    if (discoveryDone) return;
     servers = await discoverServers();
     serverNames = new Set(servers.map((s) => s.name));
     directoryCache = buildDirectory(servers);
-  });
+    discoveryDone = true;
+  }
 
   // ── System prompt injection ────────────────────────────────────────
 
   pi.on("before_agent_start", async (event) => {
-    if (!directoryCache) return;
+    if (!discoveryDone || !directoryCache) return;
     return { systemPrompt: event.systemPrompt + "\n\n" + directoryCache };
   });
 
@@ -215,6 +229,9 @@ export default function mcpExtension(pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal) {
+      // Ensure discovery completed before validating server names
+      await ensureDiscovered();
+
       // Validate server name
       if (!serverNames.has(params.server)) {
         const available = [...serverNames].join(", ") || "(none discovered)";
@@ -368,6 +385,8 @@ export default function mcpExtension(pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal) {
+      await ensureDiscovered();
+
       const args = params.server
         ? ["list", params.server, "--schema", "--json"]
         : ["list", "--json"];
