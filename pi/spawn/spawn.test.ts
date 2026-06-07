@@ -56,14 +56,14 @@ import {
 	handleCancel,
 	deliverTicketResults,
 	resolveCwd,
-} from "./delegate.ts";
+} from "./spawn.ts";
 
 // ── Integration test imports ──────────────────────────────────────────────
 
 import { createTestSession, when, calls, says } from "@marcfargas/pi-test-harness";
 import { resolve } from "node:path";
 
-const EXTENSION = resolve(import.meta.dirname, "./delegate.ts");
+const EXTENSION = resolve(import.meta.dirname, "./spawn.ts");
 
 type TestSession = Awaited<ReturnType<typeof createTestSession>>;
 
@@ -1579,16 +1579,16 @@ describe("delegate extension integration", () => {
 
 	test("registers the delegate tool", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		expect(toolDef).toBeDefined();
-		expect(toolDef!.name).toBe("delegate");
-		expect(toolDef!.label).toBe("Delegate");
+		expect(toolDef!.name).toBe("spawn");
+		expect(toolDef!.label).toBe("Spawn");
 		expect(toolDef!.description).toContain("subagent");
 	});
 
 	test("has tasks array parameter with minItems 0 (allows help mode)", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const schema = toolDef!.parameters as any;
 		expect(schema.type).toBe("object");
 		expect(schema.properties.tasks.type).toBe("array");
@@ -1597,7 +1597,7 @@ describe("delegate extension integration", () => {
 
 	test("promptSnippet and promptGuidelines are set", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		expect(toolDef!.promptSnippet).toBeDefined();
 		expect(toolDef!.promptSnippet).toContain("subagent");
 		expect(toolDef!.promptGuidelines).toBeDefined();
@@ -1606,7 +1606,7 @@ describe("delegate extension integration", () => {
 
 	test("execute returns help when tasks is empty", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 
 		const result = await toolDef!.execute(
 			"tc-help",
@@ -1625,7 +1625,7 @@ describe("delegate extension integration", () => {
 
 	test("task schema has prompt as required string", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
 		expect(taskSchema.type).toBe("object");
 		expect(taskSchema.properties.prompt.type).toBe("string");
@@ -1635,7 +1635,7 @@ describe("delegate extension integration", () => {
 
 	test("task schema has optional fields", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
 		const optionalFields = ["agent", "model", "skills", "tools", "thinking", "systemPrompt", "cwd", "context", "sessionId", "action"];
 		for (const field of optionalFields) {
@@ -1647,7 +1647,7 @@ describe("delegate extension integration", () => {
 
 	test("execute rejects unknown agents and suggests help", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 
 		const result = await toolDef!.execute(
 			"tc-1",
@@ -1660,12 +1660,12 @@ describe("delegate extension integration", () => {
 		const text = result.content[0].text;
 		expect(text).toContain("Unknown agent");
 		expect(text).toContain("nonexistent-agent-xyz");
-		expect(text).toContain("Call delegate with an empty tasks array for help");
+		expect(text).toContain("Call spawn with an empty tasks array for help");
 	});
 
 	test("execute falls back to hardcoded prompt when no systemPrompt, no agent, no getSystemPrompt", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 
 		// Test harness has no getSystemPrompt and no model — so we get past
 		// system prompt resolution (hardcoded fallback) and fail at model resolution.
@@ -1726,29 +1726,29 @@ describe("delegate renderers", () => {
 
 	test("renderCall shows task count", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
 		const text = toolDef!.renderCall({ tasks: [{ prompt: "task 1" }, { prompt: "task 2" }] }, theme, ctx);
-		expect((text as any).getText()).toContain("delegate 2 tasks");
+		expect((text as any).getText()).toContain("spawn 2 tasks");
 	});
 
 	test("renderCall shows task count for single task", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
 		const text = toolDef!.renderCall({ tasks: [{ prompt: "do work", agent: "worker" }] }, theme, ctx);
 		const rendered = (text as any).getText();
 		// renderCall shows task count; agent name appears in renderResult.
-		expect(rendered).toContain("delegate 1 task");
+		expect(rendered).toContain("spawn 1 task");
 	});
 
 	test("renderCall does not bloat with long prompts", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -1756,13 +1756,13 @@ describe("delegate renderers", () => {
 		const text = toolDef!.renderCall({ tasks: [{ prompt: longPrompt }] }, theme, ctx);
 		const rendered = (text as any).getText();
 		// renderCall is minimal — just the task count. No prompt preview.
-		expect(rendered).toContain("delegate 1 task");
+		expect(rendered).toContain("spawn 1 task");
 		expect(rendered.length).toBeLessThan(longPrompt.length);
 	});
 
 	test("renderResult shows progress when partial", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -1783,7 +1783,7 @@ describe("delegate renderers", () => {
 
 	test("renderResult shows done status when complete", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -1804,7 +1804,7 @@ describe("delegate renderers", () => {
 
 	test("renderResult hides output and tool summary in collapsed final mode", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -1829,7 +1829,7 @@ describe("delegate renderers", () => {
 
 	test("renderResult shows all lines when expanded", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -1850,7 +1850,7 @@ describe("delegate renderers", () => {
 
 	test("renderResult shows running tool activities in partial mode", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -1887,7 +1887,7 @@ describe("delegate renderers", () => {
 
 	test("renderResult hides tool summary and output in collapsed final mode", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -1926,7 +1926,7 @@ describe("delegate renderers", () => {
 
 	test("renderResult expands tool results when expanded is true", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -1959,7 +1959,7 @@ describe("delegate renderers", () => {
 
 	test("renderResult shows error and hides tool summary in collapsed final mode", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -1998,7 +1998,7 @@ describe("delegate renderers", () => {
 
 	test("renderResult shows activities for completed subagent in partial mode", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -2042,7 +2042,7 @@ describe("delegate renderers", () => {
 
 	test("partial render shows only current in-flight tool when activities > 3", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -2086,7 +2086,7 @@ describe("delegate renderers", () => {
 
 	test("formatToolCallShort: various tool types render correctly", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -2139,7 +2139,7 @@ describe("delegate renderers", () => {
 
 	test("renderResult shows activity age for running tasks", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -2167,7 +2167,7 @@ describe("delegate renderers", () => {
 
 	test("collapsed running shows ⎿ with current tool and Ctrl+O hint", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -2199,7 +2199,7 @@ describe("delegate renderers", () => {
 
 	test("collapsed running shows thinking… when no current tool", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -2224,7 +2224,7 @@ describe("delegate renderers", () => {
 
 	test("expanded running shows current tool with elapsed duration", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -2257,7 +2257,7 @@ describe("delegate renderers", () => {
 
 	test("collapsed done hides activities, expanded shows them", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
 		const ctx = mockRenderCtx();
 
@@ -2299,7 +2299,7 @@ describe("delegate pool", () => {
 
 	test("prompt is optional for close and list actions", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 
 		// list without prompt should work
 		const listResult = await toolDef!.execute(
@@ -2324,7 +2324,7 @@ describe("delegate pool", () => {
 
 	test("missing prompt throws for non-close/list actions", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 
 		await expect(
 			toolDef!.execute(
@@ -2339,7 +2339,7 @@ describe("delegate pool", () => {
 
 	test("close action requires sessionId", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 
 		const result = await toolDef!.execute(
 			"tc-pool-4",
@@ -2610,7 +2610,7 @@ describe("async delegate integration", () => {
 
 	test("poll with no tickets returns empty message", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const result = await toolDef!.execute(
 			"tc-poll-1",
 			{ action: "poll", async: undefined, ticket: undefined },
@@ -2797,7 +2797,7 @@ describe("async delegate integration", () => {
 
 	test("execute routes top-level cancel without tasks", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 
 		const result = await toolDef!.execute(
 			"tc-cancel-frontdoor",
@@ -2839,7 +2839,7 @@ describe("async delegate integration", () => {
 
 	test("help text includes async mode section", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const result = await toolDef!.execute(
 			"tc-help-async",
 			{ tasks: [], async: undefined, ticket: undefined },
@@ -2855,13 +2855,13 @@ describe("async delegate integration", () => {
 
 	test("promptGuidelines includes async mode guideline", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		expect(toolDef!.promptGuidelines.some(g => g.includes("async"))).toBe(true);
 	});
 
 	test("action enum includes poll and cancel", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const taskSchema = (toolDef!.parameters as any).properties.tasks.items;
 		const actionEnum = taskSchema.properties.action.enum;
 		expect(actionEnum).toContain("poll");
@@ -2870,7 +2870,7 @@ describe("async delegate integration", () => {
 
 	test("parameter schema includes top-level async ticket controls", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "delegate");
+		const toolDef = getToolDef(ts, "spawn");
 		const schema = toolDef!.parameters as any;
 		expect(schema.properties.action.enum).toEqual(["poll", "cancel"]);
 		expect(schema.properties.async).toBeDefined();

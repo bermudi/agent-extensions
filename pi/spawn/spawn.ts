@@ -1,5 +1,5 @@
 /**
- * delegate — In-process subagent delegation for pi.
+ * spawn — In-process subagent delegation for pi.
  *
  * Borrows apple-pi's architecture (pi-agent-core Agent class, Promise.all
  * parallelism) with per-task overrides for model, skills, tools, thinking
@@ -348,7 +348,7 @@ function formatCompletedTicket(
       if (r.sessionFile && fs.existsSync(r.sessionFile)) {
         const safePath = JSON.stringify(r.sessionFile);
         parts.push(
-          `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
+          `→ To retry: spawn({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
         );
       }
     } else {
@@ -794,10 +794,10 @@ interface SessionManagerLike {
  * The header may be in memory only (deferred flush) or already on disk.
  */
 function setParentSession(sm: SessionManager, parentPath: string): void {
-  const header = (
+  const header =
     // @ts-expect-error — accessing private fileEntries to mutate header's parentSession
-    sm as { fileEntries: Array<{ type: string; parentSession?: string }> }
-  ).fileEntries[0];
+    (sm as { fileEntries: Array<{ type: string; parentSession?: string }> })
+      .fileEntries[0];
   if (header && header.type === "session") {
     header.parentSession = parentPath;
   }
@@ -1909,12 +1909,12 @@ export function handleCancel(params: {
 
 export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
-    name: "delegate",
-    label: "Delegate",
+    name: "spawn",
+    label: "Spawn",
     promptSnippet: "Spawn subagents in parallel.",
     promptGuidelines: [
-      "Call delegate with an empty tasks array to see available agents and full usage docs.",
-      'For async: set async:true to fire in background. Poll with delegate({action:"poll"}). Avoid polling in a tight loop.',
+      "Call spawn with an empty tasks array to see available agents and full usage docs.",
+      'For async: set async:true to fire in background. Poll with spawn({action:"poll"}). Avoid polling in a tight loop.',
     ],
     description:
       "Spawn subagents in parallel. Call with an empty tasks array for full help.",
@@ -1927,7 +1927,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       ),
       async: Type.Optional(
         Type.Boolean({
-          description: "Return immediately with a ticket ID. Poll with action='poll'.",
+          description:
+            "Return immediately with a ticket ID. Poll with action='poll'.",
         }),
       ),
       ticket: Type.Optional(
@@ -1970,7 +1971,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             ),
             sessionId: Type.Optional(Type.String()),
             action: Type.Optional(
-              Type.String({ enum: ["prompt", "close", "list", "poll", "cancel"] }),
+              Type.String({
+                enum: ["prompt", "close", "list", "poll", "cancel"],
+              }),
             ),
             resumeFrom: Type.Optional(Type.String()),
           }),
@@ -2088,7 +2091,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 "## Resuming Previous Sessions",
                 "",
                 "Use `resumeFrom` to continue a failed or interrupted subagent from where it left off.",
-                "Pass the absolute path to the session `.jsonl` file (shown in delegate output).",
+                "Pass the absolute path to the session `.jsonl` file (shown in spawn output).",
                 "The agent gets the full conversation history and the new `prompt` continues naturally.",
                 "",
                 "```json",
@@ -2110,13 +2113,13 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 "Set `async: true` on the top-level call to fire tasks in the background:",
                 "",
                 "```json",
-                'delegate({ async: true, tasks: [{ agent: "scout", prompt: "Investigate auth" }] })',
+                'spawn({ async: true, tasks: [{ agent: "scout", prompt: "Investigate auth" }] })',
                 "```",
                 "→ Returns ticket ID immediately. Parent keeps working.",
                 "",
-                '- `delegate({ action: "poll" })` — list all tickets',
-                '- `delegate({ action: "poll", ticket: "abc123" })` — check one ticket',
-                '- `delegate({ action: "cancel", ticket: "abc123" })` — abort a running ticket',
+                '- `spawn({ action: "poll" })` — list all tickets',
+                '- `spawn({ action: "poll", ticket: "abc123" })` — check one ticket',
+                '- `spawn({ action: "cancel", ticket: "abc123" })` — abort a running ticket',
                 "",
                 "Max 5 concurrent async tickets. Results are delivered automatically when all tasks finish. Poll for progress while running, but avoid polling in a tight loop — do other work while waiting.",
               ].join("\n"),
@@ -2164,7 +2167,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           content: [
             {
               type: "text",
-              text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with an empty tasks array for help.`,
+              text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call spawn with an empty tasks array for help.`,
             },
           ],
           details: {
@@ -2234,7 +2237,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         }
 
         // Inject skills
-        const skillNames = t.skills ?? agentOverride?.skills ?? agent?.skills ?? [];
+        const skillNames =
+          t.skills ?? agentOverride?.skills ?? agent?.skills ?? [];
         const skillBodies: string[] = [];
         for (const name of skillNames) {
           const content = loadSkill(name, cwd);
@@ -2315,7 +2319,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           }
 
           // Resolve tools — warn about unknown tool names
-          tools = t.tools ?? agentOverride?.tools ?? agent?.tools ?? DEFAULT_TOOLS;
+          tools =
+            t.tools ?? agentOverride?.tools ?? agent?.tools ?? DEFAULT_TOOLS;
           const unknownTools = tools.filter(
             (name) => !(name in TOOL_FACTORIES),
           );
@@ -2326,7 +2331,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           }
 
           // Resolve thinking — agentOverride, agent file, then 'off'
-          const thinkingRaw = t.thinking ?? agentOverride?.thinking ?? agent?.thinking ?? "off";
+          const thinkingRaw =
+            t.thinking ?? agentOverride?.thinking ?? agent?.thinking ?? "off";
           thinking = VALID_THINKING.has(thinkingRaw)
             ? (thinkingRaw as ThinkingLevel)
             : "off";
@@ -2725,7 +2731,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                   : createSubagentSessionManager(ctx.sessionManager, t.cwd);
 
               if (session?.manager && !isPoolHit && !resumedSessionManager) {
-                const label = `⎇ delegate · ${t.agentName}`;
+                const label = `⎇ spawn · ${t.agentName}`;
                 session.manager.appendSessionInfo(label);
               }
 
@@ -2862,8 +2868,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 `${resolved.length} task(s) dispatched · ${runningCount + 1}/${MAX_ASYNC_TICKETS} async slots in use`,
                 "",
                 "Completed task results are available via poll. Final results delivered automatically when all tasks complete.",
-                `Check progress: delegate({ action: "poll", ticket: "${ticketId}" }) — avoid polling in a tight loop`,
-                `Cancel if needed: delegate({ action: "cancel", ticket: "${ticketId}" })`,
+                `Check progress: spawn({ action: "poll", ticket: "${ticketId}" }) — avoid polling in a tight loop`,
+                `Cancel if needed: spawn({ action: "cancel", ticket: "${ticketId}" })`,
               ].join("\n"),
             },
           ],
@@ -3177,7 +3183,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           // Label subagent sessions so they're identifiable in /resume.
           // Skip pool hits (already labeled) and resumed sessions (keep original label).
           if (session?.manager && !isPoolHit && !resumedSessionManager) {
-            const label = `⎇ delegate · ${t.agentName}`;
+            const label = `⎇ spawn · ${t.agentName}`;
             session.manager.appendSessionInfo(label);
           }
 
@@ -3332,7 +3338,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           if (r.sessionFile && fs.existsSync(r.sessionFile)) {
             const safePath = JSON.stringify(r.sessionFile);
             parts.push(
-              `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
+              `→ To retry: spawn({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
             );
           }
         } else {
@@ -3370,7 +3376,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       const text =
         (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       if (!tasks.length) {
-        text.setText(theme.fg("toolTitle", theme.bold("delegate")));
+        text.setText(theme.fg("toolTitle", theme.bold("spawn")));
         return text;
       }
       // Minimal call rendering — renderResult handles all detail.
@@ -3384,7 +3390,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           theme.fg(
             "toolTitle",
             theme.bold(
-              `${spinnerFrame()} delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""} · ${elapsed}`,
+              `${spinnerFrame()} spawn ${tasks.length} task${tasks.length > 1 ? "s" : ""} · ${elapsed}`,
             ),
           ),
         );
@@ -3394,7 +3400,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         theme.fg(
           "toolTitle",
           theme.bold(
-            `delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""}`,
+            `spawn ${tasks.length} task${tasks.length > 1 ? "s" : ""}`,
           ),
         ),
       );
