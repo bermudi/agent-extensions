@@ -159,6 +159,13 @@ export interface TaskResult {
 
 export const DEFAULT_TOOLS = ["read", "write", "edit", "bash"];
 
+/** Expand `"*"` in a tools list to all registered tool names. */
+export function expandToolsStar(tools: string[]): string[] {
+  if (!tools.includes("*")) return tools;
+  const allNames = Object.keys(TOOL_FACTORIES);
+  return [...new Set([...allNames, ...tools.filter((t) => t !== "*")])];
+}
+
 /** Maximum concurrent subagent tasks. Prevents rate-limit thundering herds. */
 export const MAX_CONCURRENCY = 3;
 
@@ -654,12 +661,14 @@ export function loadAgentFile(filePath: string): AgentConfig | null {
     thinking: VALID_THINKING.has(data.thinking ?? "")
       ? (data.thinking as ThinkingLevel)
       : "off",
-    tools: data.tools
-      ? data.tools
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : DEFAULT_TOOLS,
+    tools: expandToolsStar(
+      data.tools
+        ? data.tools
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : DEFAULT_TOOLS,
+    ),
     skills: data.skills
       ? data.skills
           .split(",")
@@ -2049,7 +2058,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 "description: What it does",
                 "model: anthropic/claude-haiku-4-5  # optional",
                 "thinking: low                     # off/minimal/low/medium/high/xhigh",
-                "tools: read, bash                 # default: all 4 core tools",
+                "tools: read, bash                 # default: all 4 core tools. Use * for all.",
                 "skills: web-content               # comma-separated skill names",
                 "---",
                 "You are a helpful agent...",
@@ -2319,8 +2328,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           }
 
           // Resolve tools — warn about unknown tool names
-          tools =
-            t.tools ?? agentOverride?.tools ?? agent?.tools ?? DEFAULT_TOOLS;
+          tools = expandToolsStar(
+            t.tools ?? agentOverride?.tools ?? agent?.tools ?? DEFAULT_TOOLS,
+          );
           const unknownTools = tools.filter(
             (name) => !(name in TOOL_FACTORIES),
           );

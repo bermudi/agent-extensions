@@ -28,6 +28,7 @@ import {
 	DEFAULT_TOOLS,
 	VALID_THINKING,
 	TOOL_FACTORIES,
+	expandToolsStar,
 	extractTouchedFromActivities,
 	agentPool,
 	closePooledAgent,
@@ -281,6 +282,42 @@ Prompt.
 `);
 		const cfg = loadAgentFile(filePath)!;
 		expect(cfg.tools).toEqual(["read", "write", "grep"]);
+	});
+
+	test("expands * to all registered tools", () => {
+		const filePath = path.join(tmpDir, "star-tools.md");
+		writeFileSync(filePath, `---
+name: star-agent
+description: All tools agent
+tools: *
+---
+Prompt.
+`);
+		const cfg = loadAgentFile(filePath)!;
+		expect(cfg.tools).toEqual(Object.keys(TOOL_FACTORIES));
+	});
+});
+
+// ── expandToolsStar ──────────────────────────────────────────────────────
+
+describe("expandToolsStar", () => {
+	test("passes through arrays without *", () => {
+		expect(expandToolsStar(["read", "bash"])).toEqual(["read", "bash"]);
+	});
+
+	test("expands * to all TOOL_FACTORIES keys", () => {
+		const result = expandToolsStar(["*"]);
+		expect(result).toEqual(Object.keys(TOOL_FACTORIES));
+	});
+
+	test("expands * and keeps additional tools (deduped)", () => {
+		const result = expandToolsStar(["*", "read"]);
+		const allKeys = Object.keys(TOOL_FACTORIES);
+		expect(result.sort()).toEqual([...new Set([...allKeys, "read"])].sort());
+	});
+
+	test("returns empty array as-is", () => {
+		expect(expandToolsStar([])).toEqual([]);
 	});
 });
 
