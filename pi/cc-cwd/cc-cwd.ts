@@ -13,6 +13,7 @@
 import type { ExtensionAPI, ExecResult } from "@earendil-works/pi-coding-agent";
 import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 // Matches the real command-code binary's blocklist (getRootDirectoryStructure).
 const DIR_BLOCKLIST = new Set([
@@ -193,6 +194,13 @@ function escapeXml(s: string): string {
 		.replace(/'/g, "&apos;");
 }
 
+// Generate a session ID in the same format as the real command-code binary's
+// generateSessionId(): "sess_" + UUID-without-dashes truncated to 16 hex chars.
+// Generated once per extension load (= per pi process) and reused across all
+// requests in that session, matching the real binary's "one session per invocation"
+// behavior.
+const sessionId = "sess_" + randomUUID().replace(/-/g, "").substring(0, 16);
+
 export default function (pi: ExtensionAPI) {
 	pi.on("before_provider_request", async (event, ctx) => {
 		if (ctx.model?.provider !== "commandcode") return;
@@ -211,6 +219,7 @@ export default function (pi: ExtensionAPI) {
 			// otherwise hardcode "true". Forward the actual preference
 			// so x-taste-learning matches what command-code sends.
 			x_command_code_taste_learning: false,
+			x_command_code_session_id: sessionId,
 		};
 		if (memory) {
 			payload.x_command_code_memory = memory;
