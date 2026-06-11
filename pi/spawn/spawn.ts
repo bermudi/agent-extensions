@@ -1920,13 +1920,15 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "spawn",
     label: "Spawn",
-    promptSnippet: "Spawn subagents in parallel.",
+    promptSnippet: "Spawn subagents.",
     promptGuidelines: [
-      "Call spawn with an empty tasks array to see available agents and full usage docs.",
-      'For async: set async:true to fire in background. Poll with spawn({action:"poll"}). Avoid polling in a tight loop.',
+      'spawn({ tasks: [{ prompt: "Fix auth bug" }, { prompt: "Add tests" }] })',
+      'Named agent: spawn({ tasks: [{ prompt: "Investigate DB", agent: "scout" }] })',
+      'Multi-turn: set sessionId to reuse a subagent across calls. action:"close" to tear down.',
+      'Async: spawn({ async: true, tasks: [...] }) returns a ticket. Poll with spawn({ action: "poll" }).',
     ],
     description:
-      "Spawn subagents in parallel. Call with an empty tasks array for full help.",
+      "Spawn subagents concurrently. Call with an empty tasks array for full help.",
     parameters: Type.Object({
       action: Type.Optional(
         Type.String({
@@ -2050,7 +2052,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 "",
                 agentList,
                 "",
-                "Agents live in `.pi/agents/*.md` (project-local). Each agent file is Markdown with YAML-ish frontmatter:",
+                "Agents live in `.pi/agents/*.md` (project-local) and `~/.pi/agent/agents/` (global). Each agent file is Markdown with YAML-ish frontmatter:",
                 "",
                 "```markdown",
                 "---",
@@ -2066,7 +2068,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 "",
                 "## Task Fields",
                 "",
-                "- `prompt` — The task for this subagent. Optional when `resumeFrom` is set (defaults to 'continue').",
+                "- `prompt` — The task for this subagent. Optional when `resumeFrom` is set (defaults to a continuation prompt).",
                 "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
                 "- `systemPrompt` — System prompt. Falls back to agent definition, then parent session system prompt.",
                 "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
