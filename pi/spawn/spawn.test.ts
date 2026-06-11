@@ -364,6 +364,7 @@ Prompt.
 `);
 		const agents = discoverAgents(projectDir);
 		expect(agents.has("global-agent")).toBe(true);
+		expect(agents.get("global-agent")!.scope).toBe("global");
 	});
 
 	test("discovers agents from legacy ~/.agents/", () => {
@@ -377,6 +378,7 @@ Prompt.
 `);
 		const agents = discoverAgents(projectDir);
 		expect(agents.has("legacy-agent")).toBe(true);
+		expect(agents.get("legacy-agent")!.scope).toBe("global");
 	});
 
 	test("project agents override global on name collision", () => {
@@ -396,6 +398,7 @@ Global prompt.
 		const agents = discoverAgents(projectDir);
 		expect(agents.has("shared-agent")).toBe(true);
 		expect(agents.get("shared-agent")!.systemPrompt).toBe("Project prompt.");
+		expect(agents.get("shared-agent")!.scope).toBe("project");
 	});
 
 	test("returns empty map when no .pi/agents directory exists", () => {
@@ -1619,7 +1622,7 @@ describe("delegate extension integration", () => {
 		const toolDef = getToolDef(ts, "spawn");
 		expect(toolDef).toBeDefined();
 		expect(toolDef!.name).toBe("spawn");
-		expect(toolDef!.label).toBe("Spawn");
+		expect(toolDef!.label).toBe("Spawn Subagents");
 		expect(toolDef!.description).toContain("subagent");
 	});
 
@@ -1654,7 +1657,7 @@ describe("delegate extension integration", () => {
 		);
 
 		const text = result.content[0].text;
-		expect(text).toContain("Delegate Help");
+		expect(text).toContain("Spawn Tool Manual");
 		expect(text).toContain("Available Agents");
 		expect(text).toContain("Task Fields");
 		expect(text).toContain("```markdown");
