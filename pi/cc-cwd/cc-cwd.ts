@@ -13,6 +13,7 @@
 import type { ExtensionAPI, ExecResult } from "@earendil-works/pi-coding-agent";
 import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 
 // Matches the real command-code binary's blocklist (getRootDirectoryStructure).
@@ -120,30 +121,21 @@ function readAgentsMd(cwd: string): string {
 	}
 }
 
-// Read skills from the project's skill directories. Tries `.agents/skills/`,
-// `.pi/skills/`, then `.commandcode/skills/` (matching the real binary's lookup).
+// Read skills from project-local and global skill directories.
+// Project-local: `.agents/skills/`, `.pi/skills/`, `.commandcode/skills/` (matching
+// the real binary's lookup). Global: `~/.agents/skills/`.
 // Each skill is a directory containing a `SKILL.md` with YAML frontmatter.
 // Returns XML in the real binary's format: `<available_skills><skill>...</skill></available_skills>`.
-function readSkills(cwd: string): string {
-	const skillDirs = [
-		join(cwd, ".agents", "skills"),
-		join(cwd, ".pi", "skills"),
-		join(cwd, ".commandcode", "skills"),
-	];
-	let dir: string | undefined;
-	for (const d of skillDirs) {
-		if (existsSync(d)) {
-			dir = d;
-			break;
-		}
-	}
-	if (!dir) return "";
-
-	let skills: string[] = [];
+// Project-local skills take priority — deduplication by directory name.
+function readSkillsFromDir(dir: string, seen: Set<string>, skills: string[]): void {
+	if (!existsSync(dir)) return;
 	try {
 		const entries = readdirSync(dir, { withFileTypes: true });
 		for (const entry of entries) {
 			if (!entry.isDirectory()) continue;
+			if (seen.has(entry.name)) continue;
+			seen.add(entry.name);
+
 			const skillPath = join(dir, entry.name, "SKILL.md");
 			if (!existsSync(skillPath)) continue;
 
@@ -154,6 +146,22 @@ function readSkills(cwd: string): string {
 		}
 	} catch {
 		// ignore
+	}
+}
+
+function readSkills(cwd: string): string {
+	const skillDirs = [
+		join(cwd, ".agents", "skills"),
+		join(cwd, ".pi", "skills"),
+		join(cwd, ".commandcode", "skills"),
+		join(homedir(), ".agents", "skills"),
+	];
+
+	const seen = new Set<string>();
+	const skills: string[] = [];
+
+	for (const dir of skillDirs) {
+		readSkillsFromDir(dir, seen, skills);
 	}
 
 	if (skills.length === 0) return "";
