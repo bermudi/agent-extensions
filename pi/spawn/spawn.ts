@@ -48,6 +48,7 @@ export interface AgentConfig {
   tools: string[];
   skills: string[];
   systemPrompt: string;
+  scope?: "project" | "global";
 }
 
 export type SessionAction = "prompt" | "close" | "list" | "poll" | "cancel";
@@ -680,15 +681,22 @@ export function loadAgentFile(filePath: string): AgentConfig | null {
 }
 
 export function discoverAgents(cwd: string): Map<string, AgentConfig> {
-  const dirs: string[] = [];
+  const dirs: { dir: string; scope: "project" | "global" }[] = [];
   const projectRoot = findProjectRoot(cwd);
-  if (projectRoot) dirs.push(path.join(projectRoot, ".pi", "agents"));
+  if (projectRoot)
+    dirs.push({
+      dir: path.join(projectRoot, ".pi", "agents"),
+      scope: "project",
+    });
   // Global user agents — same convention as skills, AGENTS.md, and pi-subagents
-  dirs.push(path.join(os.homedir(), ".pi", "agent", "agents"));
-  dirs.push(path.join(os.homedir(), ".agents")); // legacy
+  dirs.push({
+    dir: path.join(os.homedir(), ".pi", "agent", "agents"),
+    scope: "global",
+  });
+  dirs.push({ dir: path.join(os.homedir(), ".agents"), scope: "global" }); // legacy
 
   const agents = new Map<string, AgentConfig>();
-  for (const dir of dirs) {
+  for (const { dir, scope } of dirs) {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -698,7 +706,10 @@ export function discoverAgents(cwd: string): Map<string, AgentConfig> {
     for (const e of entries) {
       if (!e.name.endsWith(".md") || e.name.endsWith(".chain.md")) continue;
       const cfg = loadAgentFile(path.join(dir, e.name));
-      if (cfg && !agents.has(cfg.name)) agents.set(cfg.name, cfg);
+      if (cfg && !agents.has(cfg.name)) {
+        cfg.scope = scope;
+        agents.set(cfg.name, cfg);
+      }
     }
   }
   return agents;
@@ -1916,86 +1927,207 @@ export function handleCancel(params: {
   };
 }
 
+// ── Extracted schema constant ───────────────────────────────────────────
+// Avoids inline `this` context issues and lets TypeScript infer params safely.
+const spawnParameters = Type.Object({
+  action: Type.Optional(
+    Type.String({
+      enum: ["poll", "cancel"],
+      description: "Poll for async results or cancel a ticket.",
+    }),
+  ),
+  async: Type.Optional(
+    Type.Boolean({
+      description:
+        "Return immediately with a ticket ID. Poll with action='poll'.",
+    }),
+  ),
+  ticket: Type.Optional(
+    Type.String({
+      description: "Ticket ID for poll/cancel.",
+    }),
+  ),
+  tasks: Type.Optional(
+    Type.Array(
+      Type.Object({
+        prompt: Type.Optional(
+          Type.String({
+            description: "The task for this subagent to perform.",
+          }),
+        ),
+        agent: Type.Optional(
+          Type.String({
+            description:
+              "Named agent (project-local or global). Omit to inherit from parent session.",
+          }),
+        ),
+        cwd: Type.Optional(
+          Type.String({
+            description: "Working directory. Defaults to parent cwd.",
+          }),
+        ),
+        // ── Undocumented overrides — accepted but not advertised in schema.
+        // Discovered via empty-tasks help text.
+        systemPrompt: Type.Optional(Type.String()),
+        context: Type.Optional(
+          Type.String({ enum: ["fresh", "with-parent-transcript"] }),
+        ),
+        model: Type.Optional(Type.String()),
+        skills: Type.Optional(Type.Array(Type.String())),
+        tools: Type.Optional(Type.Array(Type.String())),
+        thinking: Type.Optional(
+          Type.String({
+            enum: [...VALID_THINKING],
+          }),
+        ),
+        sessionId: Type.Optional(Type.String()),
+        action: Type.Optional(
+          Type.String({
+            enum: ["prompt", "close", "list", "poll", "cancel"],
+          }),
+        ),
+        resumeFrom: Type.Optional(Type.String()),
+      }),
+      {
+        minItems: 0,
+        description: "Tasks to run in parallel. Pass an empty array for help.",
+      },
+    ),
+  ),
+});
+
+function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
+  const entries = [...agents];
+  const agentList = entries.length
+    ? entries
+        .map(([n, a]) => {
+          const model = a.model ? ` (model: ${a.model})` : "";
+          const thinking =
+            a.thinking !== "off" ? ` [thinking: ${a.thinking}]` : "";
+          const tools =
+            a.tools.length !== DEFAULT_TOOLS.length ||
+            a.tools.some((t, i) => t !== DEFAULT_TOOLS[i])
+              ? ` tools: ${a.tools.join(", ")}`
+              : "";
+          const scope =
+            a.scope === "project"
+              ? " [project]"
+              : a.scope === "global"
+                ? " [global]"
+                : "";
+          return `- **${n}**${model}${thinking}${tools}${scope}: ${a.description}`;
+        })
+        .join("\n")
+    : "_(none defined)_";
+
+  return [
+    "# Spawn Tool Manual",
+    "",
+    "Spawn subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, skills, and thinking level.",
+    "",
+    "## Available Agents",
+    "",
+    agentList,
+    "",
+    "Agents live in `.pi/agents/*.md` (project-local) and `~/.pi/agent/agents/` (global). Each agent file is Markdown with YAML-ish frontmatter:",
+    "",
+    "```markdown",
+    "---",
+    "name: my-agent",
+    "description: What it does",
+    "model: anthropic/claude-haiku-4-5  # optional",
+    "thinking: low                     # off/minimal/low/medium/high/xhigh",
+    "tools: read, bash                 # default: all 4 core tools. Use * for all.",
+    "skills: web-content               # comma-separated skill names",
+    "---",
+    "You are a helpful agent...",
+    "```",
+    "",
+    "## Task Fields",
+    "",
+    "- `prompt` — The task for this subagent. Optional when `resumeFrom` is set (defaults to a continuation prompt).",
+    "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
+    "- `systemPrompt` — System prompt. Falls back to agent definition, then parent session system prompt.",
+    "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
+    "- `tools` — Array of tool names. Default: read, write, edit, bash.",
+    "- `skills` — Skill names injected into the system prompt.",
+    "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
+    "- `cwd` — Working directory. Default: parent session cwd.",
+    "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
+    "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
+    "- `action` — Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
+    "- top-level `action` — Async ticket action: 'poll' or 'cancel'. Does not require `tasks`.",
+    "",
+    "## Session Reuse",
+    "",
+    "When `sessionId` is set, the subagent is kept alive in a pool for the duration of the pi session.",
+    "Subsequent calls with the same `sessionId` continue the conversation — the agent remembers prior context.",
+    "",
+    "```json",
+    "// First call — creates and runs",
+    '{ "prompt": "Investigate the auth module", "agent": "scout", "sessionId": "auth-research" }',
+    "",
+    "// Second call — continues the same agent",
+    '{ "prompt": "Now check the tests for that module", "sessionId": "auth-research" }',
+    "",
+    "// Clean up when done",
+    '{ "prompt": "", "sessionId": "auth-research", "action": "close" }',
+    "```",
+    "",
+    "Pooled agents are automatically closed after 10 minutes of inactivity.",
+    "",
+    "## Resuming Previous Sessions",
+    "",
+    "Use `resumeFrom` to continue a failed or interrupted subagent from where it left off.",
+    "Pass the absolute path to the session `.jsonl` file (shown in spawn output).",
+    "The agent gets the full conversation history and the new `prompt` continues naturally.",
+    "",
+    "```json",
+    "// Resume a failed browser test — agent remembers everything it already did",
+    '{ "prompt": "Continue testing — the server is already running on :3000",',
+    '  "resumeFrom": "/home/user/.pi/agent/sessions/project/2026-01-01T12-00-00Z_abc123.jsonl" }',
+    "```",
+    "",
+    "Combine with `sessionId` to resume AND pool the agent for further multi-turn use:",
+    "",
+    "```json",
+    '{ "prompt": "Continue the investigation",',
+    '  "resumeFrom": "/path/to/session.jsonl",',
+    '  "sessionId": "my-resumed-agent" }',
+    "```",
+    "",
+    "## Async Mode",
+    "",
+    "Set `async: true` on the top-level call to fire tasks in the background:",
+    "",
+    "```json",
+    'spawn({ async: true, tasks: [{ agent: "scout", prompt: "Investigate auth" }] })',
+    "```",
+    "\u2192 Returns ticket ID immediately. Parent keeps working.",
+    "",
+    '- `spawn({ action: "poll" })` \u2014 list all tickets',
+    '- `spawn({ action: "poll", ticket: "abc123" })` \u2014 check one ticket',
+    '- `spawn({ action: "cancel", ticket: "abc123" })` \u2014 abort a running ticket',
+    "",
+    "Max 5 concurrent async tickets. Results are delivered automatically when all tasks finish. Poll for progress while running, but avoid polling in a tight loop \u2014 do other work while waiting.",
+  ].join("\n");
+}
+
 export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "spawn",
-    label: "Spawn",
-    promptSnippet: "Spawn subagents.",
+    label: "Spawn Subagents",
+    promptSnippet:
+      "Delegate parallel tasks to independent background subagents.",
     promptGuidelines: [
-      'spawn({ tasks: [{ prompt: "Fix auth bug" }, { prompt: "Add tests" }] })',
-      'Named agent: spawn({ tasks: [{ prompt: "Investigate DB", agent: "scout" }] })',
-      'Multi-turn: set sessionId to reuse a subagent across calls. action:"close" to tear down.',
-      'Async: spawn({ async: true, tasks: [...] }) returns a ticket. Poll with spawn({ action: "poll" }).',
+      "Use spawn to delegate isolated, time-consuming, or parallelizable tasks to background subagents.",
+      "If you are unsure which named 'agent' to use, call spawn with an empty tasks array [] to read the full manual.",
+      "When using spawn for long-running tasks, set { async: true } to avoid blocking, then use spawn with { action: 'poll' } to check progress.",
+      "Assign a 'sessionId' in spawn to maintain subagent state across multiple sequential turns.",
     ],
     description:
-      "Spawn subagents concurrently. Call with an empty tasks array for full help.",
-    parameters: Type.Object({
-      action: Type.Optional(
-        Type.String({
-          enum: ["poll", "cancel"],
-          description: "Poll for async results or cancel a ticket.",
-        }),
-      ),
-      async: Type.Optional(
-        Type.Boolean({
-          description:
-            "Return immediately with a ticket ID. Poll with action='poll'.",
-        }),
-      ),
-      ticket: Type.Optional(
-        Type.String({
-          description: "Ticket ID for poll/cancel.",
-        }),
-      ),
-      tasks: Type.Optional(
-        Type.Array(
-          Type.Object({
-            prompt: Type.Optional(
-              Type.String({
-                description: "The task for this subagent to perform.",
-              }),
-            ),
-            agent: Type.Optional(
-              Type.String({
-                description:
-                  "Named agent (project-local or global). Omit to inherit from parent session.",
-              }),
-            ),
-            cwd: Type.Optional(
-              Type.String({
-                description: "Working directory. Defaults to parent cwd.",
-              }),
-            ),
-            // ── Undocumented overrides — accepted but not advertised in schema.
-            // Discovered via empty-tasks help text.
-            systemPrompt: Type.Optional(Type.String()),
-            context: Type.Optional(
-              Type.String({ enum: ["fresh", "with-parent-transcript"] }),
-            ),
-            model: Type.Optional(Type.String()),
-            skills: Type.Optional(Type.Array(Type.String())),
-            tools: Type.Optional(Type.Array(Type.String())),
-            thinking: Type.Optional(
-              Type.String({
-                enum: [...VALID_THINKING],
-              }),
-            ),
-            sessionId: Type.Optional(Type.String()),
-            action: Type.Optional(
-              Type.String({
-                enum: ["prompt", "close", "list", "poll", "cancel"],
-              }),
-            ),
-            resumeFrom: Type.Optional(Type.String()),
-          }),
-          {
-            minItems: 0,
-            description:
-              "Tasks to run in parallel. Pass an empty array for help.",
-          },
-        ),
-      ),
-    }),
+      "Delegates tasks to independent subagents that run concurrently. Each subagent operates with its own isolated context, model, and working directory. Supports asynchronous ticketing, persistent session IDs, and state resumption.",
+    parameters: spawnParameters,
 
     async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
@@ -2022,120 +2154,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       // ── Help mode ─────────────────────────────────────────────────
       if (!tasks.length) {
-        const names = [...agents.keys()];
-        const agentList = names.length
-          ? names
-              .map((n) => {
-                const a = agents.get(n)!;
-                const model = a.model ? ` (model: ${a.model})` : "";
-                const thinking =
-                  a.thinking !== "off" ? ` [thinking: ${a.thinking}]` : "";
-                const tools =
-                  a.tools.length !== DEFAULT_TOOLS.length ||
-                  a.tools.some((t, i) => t !== DEFAULT_TOOLS[i])
-                    ? ` tools: ${a.tools.join(", ")}`
-                    : "";
-                return `- **${n}**${model}${thinking}${tools}: ${a.description}`;
-              })
-              .join("\n")
-          : "_(none defined)_";
         return {
-          content: [
-            {
-              type: "text",
-              text: [
-                "# Delegate Help",
-                "",
-                "Spawn subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, skills, and thinking level.",
-                "",
-                "## Available Agents",
-                "",
-                agentList,
-                "",
-                "Agents live in `.pi/agents/*.md` (project-local) and `~/.pi/agent/agents/` (global). Each agent file is Markdown with YAML-ish frontmatter:",
-                "",
-                "```markdown",
-                "---",
-                "name: my-agent",
-                "description: What it does",
-                "model: anthropic/claude-haiku-4-5  # optional",
-                "thinking: low                     # off/minimal/low/medium/high/xhigh",
-                "tools: read, bash                 # default: all 4 core tools. Use * for all.",
-                "skills: web-content               # comma-separated skill names",
-                "---",
-                "You are a helpful agent...",
-                "```",
-                "",
-                "## Task Fields",
-                "",
-                "- `prompt` — The task for this subagent. Optional when `resumeFrom` is set (defaults to a continuation prompt).",
-                "- `agent` — Named agent from the list above. Inline fields override agent defaults.",
-                "- `systemPrompt` — System prompt. Falls back to agent definition, then parent session system prompt.",
-                "- `model` — e.g. `anthropic/claude-sonnet-4`. Falls back to agent default, then parent model.",
-                "- `tools` — Array of tool names. Default: read, write, edit, bash.",
-                "- `skills` — Skill names injected into the system prompt.",
-                "- `thinking` — off, minimal, low, medium, high, xhigh. Default: agent setting or 'off'.",
-                "- `cwd` — Working directory. Default: parent session cwd.",
-                "- `context` — 'fresh' (default) or 'with-parent-transcript' to inject the full parent conversation into the subagent's prompt (token-expensive — use deliberately).",
-                "- `sessionId` — Name for a persistent subagent. First use creates it, subsequent calls reuse the same agent (multi-turn).",
-                "- `action` — Per-task action: 'prompt' (default), 'close' to tear down a pooled session, 'list' to show active sessions.",
-                "- top-level `action` — Async ticket action: 'poll' or 'cancel'. Does not require `tasks`.",
-                "",
-                "## Session Reuse",
-                "",
-                "When `sessionId` is set, the subagent is kept alive in a pool for the duration of the pi session.",
-                "Subsequent calls with the same `sessionId` continue the conversation — the agent remembers prior context.",
-                "",
-                "```json",
-                "// First call — creates and runs",
-                '{ "prompt": "Investigate the auth module", "agent": "scout", "sessionId": "auth-research" }',
-                "",
-                "// Second call — continues the same agent",
-                '{ "prompt": "Now check the tests for that module", "sessionId": "auth-research" }',
-                "",
-                "// Clean up when done",
-                '{ "prompt": "", "sessionId": "auth-research", "action": "close" }',
-                "```",
-                "",
-                "Pooled agents are automatically closed after 10 minutes of inactivity.",
-                "",
-                "## Resuming Previous Sessions",
-                "",
-                "Use `resumeFrom` to continue a failed or interrupted subagent from where it left off.",
-                "Pass the absolute path to the session `.jsonl` file (shown in spawn output).",
-                "The agent gets the full conversation history and the new `prompt` continues naturally.",
-                "",
-                "```json",
-                "// Resume a failed browser test — agent remembers everything it already did",
-                '{ "prompt": "Continue testing — the server is already running on :3000",',
-                '  "resumeFrom": "/home/user/.pi/agent/sessions/project/2026-01-01T12-00-00Z_abc123.jsonl" }',
-                "```",
-                "",
-                "Combine with `sessionId` to resume AND pool the agent for further multi-turn use:",
-                "",
-                "```json",
-                '{ "prompt": "Continue the investigation",',
-                '  "resumeFrom": "/path/to/session.jsonl",',
-                '  "sessionId": "my-resumed-agent" }',
-                "```",
-                "",
-                "## Async Mode",
-                "",
-                "Set `async: true` on the top-level call to fire tasks in the background:",
-                "",
-                "```json",
-                'spawn({ async: true, tasks: [{ agent: "scout", prompt: "Investigate auth" }] })',
-                "```",
-                "→ Returns ticket ID immediately. Parent keeps working.",
-                "",
-                '- `spawn({ action: "poll" })` — list all tickets',
-                '- `spawn({ action: "poll", ticket: "abc123" })` — check one ticket',
-                '- `spawn({ action: "cancel", ticket: "abc123" })` — abort a running ticket',
-                "",
-                "Max 5 concurrent async tickets. Results are delivered automatically when all tasks finish. Poll for progress while running, but avoid polling in a tight loop — do other work while waiting.",
-              ].join("\n"),
-            },
-          ],
+          content: [{ type: "text", text: getSubagentManualMarkdown(agents) }],
           details: {
             tasks: [],
             results: [],
