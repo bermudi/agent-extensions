@@ -1549,12 +1549,17 @@ function failTask(
   };
 }
 
-/** Build a successful TaskResult for session-management actions (close/list). */
-function completeSessionAction(task: ResolvedTask, output: string): TaskResult {
+/** Build a successful TaskResult for session-management actions (close/list).
+ *  Pass elapsedMs to record wall time since spawn started (matches the live progress UI). */
+function completeSessionAction(
+  task: ResolvedTask,
+  output: string,
+  elapsedMs?: number,
+): TaskResult {
   return {
     agent: task.agentName,
     output,
-    durationMs: 0,
+    durationMs: elapsedMs ?? 0,
     tokens: 0,
     sessionFile: undefined,
     touchedFiles: [],
@@ -1603,6 +1608,8 @@ interface TaskRunEnv {
   parentSessionManager: { getSessionFile?(): string | undefined } | undefined;
   /** Ticket id for busy-guard self-checks. undefined for sync. */
   ticketId?: string;
+  /** When the spawn started. Used for close/list progress (elapsed time). */
+  spawnStartedAt: number;
   /** Called for every progress update from runAgent. */
   onProgress: (p: TaskProgress, u: AgentProgressUpdate) => void;
   /** Called after every TaskProgress mutation (early-returns, completion). Sync uses this to fire onUpdate. */
@@ -1617,6 +1624,9 @@ interface AcquiredSession {
   isPoolHit: boolean;
   /** True if this is a fresh agent that should be inserted into the pool after a successful run. */
   shouldPoolAfter: boolean;
+  /** True if we synchronously inserted the agent into the pool (race protection).
+   *  If the run fails, we may need to remove the empty entry to let a retry try fresh. */
+  syncInserted: boolean;
 }
 
 /** Resolve the agent + session for a task. Single source of truth for pool, resume, and miss logic. */
@@ -1630,6 +1640,7 @@ async function acquireAgentSession(
   let sessionFile: string | undefined;
   let isPoolHit = false;
   let shouldPoolAfter = false;
+  let syncInserted = false;
 
   if (task.sessionId) {
     const pooled = agentPool.get(task.sessionId);
@@ -1701,7 +1712,35 @@ async function acquireAgentSession(
             env.modelRegistry,
           );
         }
-        shouldPoolAfter = true;
+
+        // Synchronous pool insertion — close the race window where a concurrent
+        // task with the same sessionId (across tickets) could also pass the busy
+        // guard and create a second agent. By claiming the sessionId now, a
+        // second task's isSessionBusy() will see this one and fail.
+        // The drift fix is preserved: isPoolHit stays false, so the run still
+        // retries on transient errors. If the run fails, commitPoolCleanup
+        // removes the empty entry so a retry starts fresh.
+        if (task.sessionId && sessionManager && sessionFile) {
+          agentPool.set(task.sessionId, {
+            agent: agent!,
+            sessionManager,
+            sessionFile,
+            config: {
+              systemPrompt: task.systemPrompt,
+              model: task.model,
+              thinking: task.thinking,
+              tools: task.tools,
+              cwd: task.cwd,
+            },
+            lastUsed: Date.now(),
+            createdAt: Date.now(),
+            totalTokens: 0,
+            promptCount: 0,
+          });
+          syncInserted = true;
+        } else {
+          shouldPoolAfter = true;
+        }
       }
     }
   }
@@ -1788,6 +1827,7 @@ async function acquireAgentSession(
     sessionFile: session?.file,
     isPoolHit,
     shouldPoolAfter,
+    syncInserted,
   };
 }
 
@@ -1827,6 +1867,18 @@ function commitPoolStats(
   pooled.lastUsed = Date.now();
   pooled.totalTokens += result.tokens;
   pooled.promptCount++;
+}
+
+/** Remove a synchronously-inserted empty agent from the pool if it's still ours.
+ *  Called after a failed run for a fresh pooled session — we claimed the sessionId
+ *  to close the race window, but the run failed, so the empty entry is dead weight.
+ *  If another task already claimed the slot (pool entry is now a different agent),
+ *  leave it alone. */
+export function commitPoolCleanup(sessionId: string, acquiredAgent: Agent): void {
+  const pooled = agentPool.get(sessionId);
+  if (!pooled) return;
+  if (pooled.agent !== acquiredAgent) return; // Another task already claimed/replaced it.
+  agentPool.delete(sessionId);
 }
 
 /** Run a single resolved task. Single source of truth for the per-task lifecycle.
@@ -1871,6 +1923,7 @@ async function runResolvedTask(
           closed
             ? `Session '${task.sessionId}' closed.`
             : `Session '${task.sessionId}' not found.`,
+          Date.now() - env.spawnStartedAt,
         ),
       );
     }
@@ -1879,7 +1932,11 @@ async function runResolvedTask(
       return finishTask(
         env,
         p,
-        completeSessionAction(task, `Active sessions:\n${listPooledAgents().join("\n")}`),
+        completeSessionAction(
+          task,
+          `Active sessions:\n${listPooledAgents().join("\n")}`,
+          Date.now() - env.spawnStartedAt,
+        ),
       );
     }
 
@@ -1898,40 +1955,57 @@ async function runResolvedTask(
         tools: task.tools,
         cwd: task.cwd,
       };
-      const r = await runAgent(
-        config,
-        task.prompt,
-        env.modelRegistry,
-        env.signal,
-        (u) => env.onProgress(p, u),
-        acquired.sessionManager,
-        undefined, // maxRetries
-        2000, // retryBaseMs
-        acquired.agent,
-        // allowRetry: pooled agents carry accumulated state — retrying is unsafe.
-        // Fresh agents and resumed sessions are safe to retry.
-        !acquired.isPoolHit,
-        taskIndex,
-      );
+      try {
+        const r = await runAgent(
+          config,
+          task.prompt,
+          env.modelRegistry,
+          env.signal,
+          (u) => env.onProgress(p, u),
+          acquired.sessionManager,
+          undefined, // maxRetries
+          2000, // retryBaseMs
+          acquired.agent,
+          // allowRetry: pooled agents carry accumulated state — retrying is unsafe.
+          // Fresh agents and resumed sessions are safe to retry.
+          !acquired.isPoolHit,
+          taskIndex,
+        );
 
-      // Pool bookkeeping: insert on first successful run, update stats on subsequent.
-      if (task.sessionId && !r.error) {
-        if (acquired.shouldPoolAfter) {
-          commitPoolInsert(task.sessionId, task, acquired, r);
-        } else {
-          commitPoolStats(task.sessionId, r);
+        // Pool bookkeeping.
+        if (task.sessionId) {
+          if (r.error && acquired.syncInserted) {
+            // Failed first run with a synchronously-claimed sessionId: clean up
+            // the empty entry so a retry can try fresh.
+            commitPoolCleanup(task.sessionId, acquired.agent);
+          } else if (!r.error) {
+            if (acquired.shouldPoolAfter) {
+              commitPoolInsert(task.sessionId, task, acquired, r);
+            } else {
+              // Pool hit OR sync-inserted: agent is already in pool, just bump stats.
+              commitPoolStats(task.sessionId, r);
+            }
+          }
         }
-      }
 
-      return {
-        agent: task.agentName,
-        output: r.output,
-        error: r.error,
-        durationMs: r.durationMs,
-        tokens: r.tokens,
-        sessionFile: acquired.sessionFile,
-        touchedFiles: r.touchedFiles,
-      };
+        return {
+          agent: task.agentName,
+          output: r.output,
+          error: r.error,
+          durationMs: r.durationMs,
+          tokens: r.tokens,
+          sessionFile: acquired.sessionFile,
+          touchedFiles: r.touchedFiles,
+        };
+      } catch (err) {
+        // Abnormal error (e.g., runAgent threw rather than returning r.error).
+        // Clean up the sync-inserted entry if it's still ours, then re-throw
+        // for the outer catch to convert to a TaskResult.
+        if (acquired.syncInserted && task.sessionId) {
+          commitPoolCleanup(task.sessionId, acquired.agent);
+        }
+        throw err;
+      }
     };
 
     const result = acquired.isPoolHit && task.sessionId
@@ -1939,6 +2013,7 @@ async function runResolvedTask(
       : await doRun();
     return finishTask(env, p, result);
   } catch (err) {
+    // If we synchronously claimed a sessionId before the error, clean it up.
     return finishTask(
       env,
       p,
@@ -2907,6 +2982,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           modelRegistry,
           parentSessionManager: ctx.sessionManager,
           ticketId,
+          spawnStartedAt: ticket.created,
           onProgress: (p, u) => {
             updateProgressFromRun(p, u);
           },
@@ -2979,6 +3055,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         modelRegistry: ctx.modelRegistry,
         parentSessionManager: ctx.sessionManager,
         ticketId: undefined,
+        spawnStartedAt: startedAt,
         onProgress: (p, u) => {
           updateProgressFromRun(p, u);
           fire();

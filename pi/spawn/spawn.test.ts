@@ -32,6 +32,7 @@ import {
 	extractTouchedFromActivities,
 	agentPool,
 	closePooledAgent,
+	commitPoolCleanup,
 	sweepPool,
 	listPooledAgents,
 	withSessionLock,
@@ -2441,6 +2442,46 @@ describe("delegate pool", () => {
 		expect(closePooledAgent("test-session")).toBe(true);
 		expect(agentPool.has("test-session")).toBe(false);
 		expect(closePooledAgent("test-session")).toBe(false);
+	});
+
+	test("commitPoolCleanup removes the entry only if it's still ours", () => {
+		const ourAgent = { marker: "ours" } as any;
+		const otherAgent = { marker: "theirs" } as any;
+
+		// Case 1: entry is ours → remove it.
+		agentPool.set("cleanup-ours", {
+			agent: ourAgent,
+			sessionManager: {} as any,
+			sessionFile: "/tmp/cleanup-ours.jsonl",
+			config: { systemPrompt: "test", model: {} as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
+			lastUsed: Date.now(),
+			createdAt: Date.now(),
+			totalTokens: 0,
+			promptCount: 0,
+		});
+		commitPoolCleanup("cleanup-ours", ourAgent);
+		expect(agentPool.has("cleanup-ours")).toBe(false);
+
+		// Case 2: entry was replaced by another task → leave it alone.
+		agentPool.set("cleanup-theirs", {
+			agent: otherAgent,
+			sessionManager: {} as any,
+			sessionFile: "/tmp/cleanup-theirs.jsonl",
+			config: { systemPrompt: "test", model: {} as any, thinking: "off" as any, tools: [], cwd: "/tmp" },
+			lastUsed: Date.now(),
+			createdAt: Date.now(),
+			totalTokens: 0,
+			promptCount: 0,
+		});
+		commitPoolCleanup("cleanup-theirs", ourAgent);
+		expect(agentPool.has("cleanup-theirs")).toBe(true);
+		expect(agentPool.get("cleanup-theirs")?.agent).toBe(otherAgent);
+		agentPool.delete("cleanup-theirs");
+
+		// Case 3: no entry at all → no-op.
+		expect(agentPool.has("cleanup-missing")).toBe(false);
+		commitPoolCleanup("cleanup-missing", ourAgent);
+		expect(agentPool.has("cleanup-missing")).toBe(false);
 	});
 
 	test("sweepPool evicts idle agents", () => {
