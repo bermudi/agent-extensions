@@ -1581,6 +1581,19 @@ function updateProgressFromResult(p: TaskProgress, r: TaskResult): void {
   p.error = r.error;
 }
 
+/** Apply a TaskResult to progress and notify the env (sync fires onUpdate).
+ *  Used at every return point in runResolvedTask — mirrors the old fire() pattern
+ *  that the duplicated sync/async bodies used after every early-return. */
+function finishTask(
+  env: TaskRunEnv,
+  p: TaskProgress,
+  r: TaskResult,
+): TaskResult {
+  updateProgressFromResult(p, r);
+  env.onStatusChange?.();
+  return r;
+}
+
 /** Environment passed to runResolvedTask. Encapsulates the sync/async split. */
 interface TaskRunEnv {
   /** Abort signal — parent's for sync, ticket's for async. May be undefined when no parent signal is available. */
@@ -1592,6 +1605,8 @@ interface TaskRunEnv {
   ticketId?: string;
   /** Called for every progress update from runAgent. */
   onProgress: (p: TaskProgress, u: AgentProgressUpdate) => void;
+  /** Called after every TaskProgress mutation (early-returns, completion). Sync uses this to fire onUpdate. */
+  onStatusChange?: () => void;
 }
 
 interface AcquiredSession {
@@ -1825,9 +1840,7 @@ async function runResolvedTask(
   try {
     // ── Aborted before we started? ───────────────────────────────────
     if (env.signal?.aborted) {
-      const r = failTask(task, "Aborted");
-      updateProgressFromResult(p, r);
-      return r;
+      return finishTask(env, p, failTask(task, "Aborted"));
     }
 
     // ── Session busy guard ────────────────────────────────────────────
@@ -1837,9 +1850,7 @@ async function runResolvedTask(
       const busyTicketId = isSessionBusy(task.sessionId);
       if (busyTicketId && busyTicketId !== env.ticketId) {
         const msg = `Session '${task.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`;
-        const r = failTask(task, msg);
-        updateProgressFromResult(p, r);
-        return r;
+        return finishTask(env, p, failTask(task, msg));
       }
     }
 
@@ -1849,36 +1860,33 @@ async function runResolvedTask(
     // ── Session action handling ───────────────────────────────────────
     if (task.action === "close") {
       if (!task.sessionId) {
-        const r = failTask(task, "action='close' requires sessionId.");
-        updateProgressFromResult(p, r);
-        return r;
+        return finishTask(env, p, failTask(task, "action='close' requires sessionId."));
       }
       const closed = closePooledAgent(task.sessionId);
-      const r = completeSessionAction(
-        task,
-        closed
-          ? `Session '${task.sessionId}' closed.`
-          : `Session '${task.sessionId}' not found.`,
+      return finishTask(
+        env,
+        p,
+        completeSessionAction(
+          task,
+          closed
+            ? `Session '${task.sessionId}' closed.`
+            : `Session '${task.sessionId}' not found.`,
+        ),
       );
-      updateProgressFromResult(p, r);
-      return r;
     }
 
     if (task.action === "list") {
-      const listing = listPooledAgents();
-      const r = completeSessionAction(
-        task,
-        `Active sessions:\n${listing.join("\n")}`,
+      return finishTask(
+        env,
+        p,
+        completeSessionAction(task, `Active sessions:\n${listPooledAgents().join("\n")}`),
       );
-      updateProgressFromResult(p, r);
-      return r;
     }
 
     // ── Pool / resume / fresh-agent resolution ────────────────────────
     const acquired = await acquireAgentSession(env, task, p);
     if ("error" in acquired) {
-      updateProgressFromResult(p, acquired.error);
-      return acquired.error;
+      return finishTask(env, p, acquired.error);
     }
 
     // ── Run the agent ─────────────────────────────────────────────────
@@ -1915,7 +1923,7 @@ async function runResolvedTask(
         }
       }
 
-      const result: TaskResult = {
+      return {
         agent: task.agentName,
         output: r.output,
         error: r.error,
@@ -1924,19 +1932,18 @@ async function runResolvedTask(
         sessionFile: acquired.sessionFile,
         touchedFiles: r.touchedFiles,
       };
-      updateProgressFromResult(p, result);
-      return result;
     };
 
-    if (acquired.isPoolHit && task.sessionId) {
-      return withSessionLock(task.sessionId, doRun);
-    }
-    return doRun();
+    const result = acquired.isPoolHit && task.sessionId
+      ? await withSessionLock(task.sessionId, doRun)
+      : await doRun();
+    return finishTask(env, p, result);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const r = failTask(task, msg);
-    updateProgressFromResult(p, r);
-    return r;
+    return finishTask(
+      env,
+      p,
+      failTask(task, err instanceof Error ? err.message : String(err)),
+    );
   }
 }
 
@@ -2976,6 +2983,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           updateProgressFromRun(p, u);
           fire();
         },
+        onStatusChange: () => fire(),
       };
 
       const results = await mapConcurrent(
