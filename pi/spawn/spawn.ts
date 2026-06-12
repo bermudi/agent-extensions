@@ -122,6 +122,8 @@ export interface ToolActivity {
   };
   startTime: number;
   endTime?: number;
+  /** Live stdout/stderr preview from tool_execution_update events. */
+  liveOutput?: string;
 }
 
 export interface TaskProgress {
@@ -1219,6 +1221,14 @@ export async function runAgentOnce(
       pendingById.set(event.toolCallId, activity);
       activities.push(activity);
       fireProgress();
+    } else if (event.type === "tool_execution_update") {
+      lastActivityAt = Date.now();
+      const activity = pendingById.get(event.toolCallId);
+      if (activity) {
+        const text = extractTextFromPartialResult(event.partialResult);
+        if (text !== undefined) activity.liveOutput = text;
+        fireProgress();
+      }
     } else if (event.type === "tool_execution_end") {
       lastActivityAt = Date.now();
       const activity = pendingById.get(event.toolCallId);
@@ -1590,6 +1600,46 @@ export function resolveCwd(cwd: string): string {
     ? path.join(os.homedir(), cwd.slice(1))
     : cwd;
   return path.resolve(expanded);
+}
+
+/** Extract text content from a partial tool result (tool_execution_update). */
+function extractTextFromPartialResult(
+  partialResult: unknown,
+): string | undefined {
+  if (
+    !partialResult ||
+    typeof partialResult !== "object" ||
+    !("content" in partialResult)
+  )
+    return undefined;
+  const content = (partialResult as { content?: unknown }).content;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .filter(
+      (c): c is { type: string; text?: string } =>
+        c && typeof c === "object" && "type" in c && c.type === "text",
+    )
+    .map((c) => c.text)
+    .filter((t): t is string => typeof t === "string")
+    .join("\n");
+  return text || undefined;
+}
+
+/** Strip ANSI escape sequences from text. */
+function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+}
+
+/** Resolve carriage-return progress bars to their final line state. */
+function resolveCarriageReturn(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const parts = line.split("\r");
+      return parts[parts.length - 1] ?? "";
+    })
+    .join("\n");
 }
 
 export function extractOutput(messages: AgentMessage[]): string {
@@ -3582,24 +3632,61 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                   ),
                 );
 
-                // Current in-flight tool
-                const current = p.activities.findLast((a) => !a.result);
-
                 if (options.expanded) {
-                  // ── Expanded: current activity (or last completed if none in-flight) ──
-                  const call = current
-                    ? formatToolCallShort(current.name, current.args)
-                    : compactActivity(p);
-                  const elapsedTool = current
-                    ? ` | ${fmtDuration(Date.now() - current.startTime)}`
-                    : "";
-                  const prefix = current ? "> " : "  ";
-                  lines.push(
-                    truncLine(
-                      `${ind}${theme.fg("warning", `${prefix}${call}${elapsedTool}`)}`,
-                      w,
-                    ),
-                  );
+                  // ── Expanded: recent activity history (like done/failed) ──
+                  if (p.activities.length > 0) {
+                    for (const activity of p.activities.slice(-5)) {
+                      const call = formatToolCallShort(
+                        activity.name,
+                        activity.args,
+                      );
+                      if (!activity.result) {
+                        // In-flight
+                        const elapsed = ` | ${fmtDuration(Date.now() - activity.startTime)}`;
+                        lines.push(
+                          truncLine(
+                            `${ind}${theme.fg("warning", `> ${call}${elapsed}`)}`,
+                            w,
+                          ),
+                        );
+                        // Show live stdout/stderr preview for streaming tools
+                        if (activity.liveOutput) {
+                          const clean = stripAnsi(
+                            resolveCarriageReturn(activity.liveOutput),
+                          );
+                          const preview = clean
+                            .split("\n")
+                            .filter((l) => l.trim())
+                            .slice(-3);
+                          for (const outLine of preview) {
+                            lines.push(
+                              truncLine(
+                                `${ind}  ${theme.fg("toolOutput", outLine)}`,
+                                w,
+                              ),
+                            );
+                          }
+                        }
+                      } else {
+                        const icon = activity.result.isError
+                          ? theme.fg("error", "✗")
+                          : theme.fg("success", "✓");
+                        lines.push(
+                          truncLine(
+                            `${ind}${theme.fg("muted", `→ ${call}`)} ${icon}`,
+                            w,
+                          ),
+                        );
+                      }
+                    }
+                  } else {
+                    lines.push(
+                      truncLine(
+                        `${ind}${theme.fg("muted", "  thinking…")}`,
+                        w,
+                      ),
+                    );
+                  }
                 } else {
                   // ── Collapsed: compact tool line with duration ─────
                   lines.push(

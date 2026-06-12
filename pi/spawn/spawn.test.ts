@@ -1918,11 +1918,11 @@ describe("delegate renderers", () => {
 		expect(compactText).toContain("$ git status");
 		expect(compactText).not.toContain("→ read src/config.ts");
 
-		// Expanded: current activity only (no completed tool history)
+		// Expanded: recent activities including completed ones
 		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
 		const expandedText = (expanded as any).getText();
 		expect(expandedText).toContain("> $ git status |");
-		expect(expandedText).not.toContain("read src/config.ts");
+		expect(expandedText).toContain("→ read src/config.ts");
 	});
 
 	test("renderResult hides tool summary and output in collapsed final mode", async () => {
@@ -2080,7 +2080,7 @@ describe("delegate renderers", () => {
 		expect(expandedText).toContain("$ ls");
 	});
 
-	test("partial render shows only current in-flight tool when activities > 3", async () => {
+	test("partial render shows last 5 activities in expanded mode", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "spawn");
 		const theme = mockTheme();
@@ -2114,14 +2114,14 @@ describe("delegate renderers", () => {
 		expect(compactText).toContain("read 4.ts");
 		expect(compactText).not.toContain("1.ts");
 
-		// Expanded: current tool only (no completed tool history)
+		// Expanded: last 5 activities shown (all 5 in this case)
 		const expanded = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
 		const expandedText = (expanded as any).getText();
 		expect(expandedText).toContain("4.ts");
-		expect(expandedText).not.toContain("0.ts");
-		expect(expandedText).not.toContain("1.ts");
-		expect(expandedText).not.toContain("2.ts");
-		expect(expandedText).not.toContain("3.ts");
+		expect(expandedText).toContain("0.ts");
+		expect(expandedText).toContain("1.ts");
+		expect(expandedText).toContain("2.ts");
+		expect(expandedText).toContain("3.ts");
 	});
 
 	test("formatToolCallShort: various tool types render correctly", async () => {
@@ -2286,12 +2286,45 @@ describe("delegate renderers", () => {
 
 		const text = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
 		const rendered = (text as any).getText();
-		// Current tool with elapsed indicator
+		// Current in-flight tool with elapsed indicator
 		expect(rendered).toContain("> $ npm test |");
-		// Completed tools no longer shown in expanded running
-		expect(rendered).not.toContain("read a.ts");
-		expect(rendered).not.toContain("file contents");
+		// Completed tools also shown in expanded running
+		expect(rendered).toContain("→ read a.ts");
+		expect(rendered).toContain("✓");
 		// Ctrl+O hint only in collapsed running
+		expect(rendered).not.toContain("Press Ctrl+O for live detail");
+	});
+
+	test("expanded running shows live output from tool_execution_update", async () => {
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		const toolDef = getToolDef(ts, "spawn");
+		const theme = mockTheme();
+		const ctx = mockRenderCtx();
+
+		const result = {
+			content: [{ type: "text", text: "Running..." }],
+			details: {
+				tasks: [{ prompt: "task" }],
+				results: [],
+				progress: [{
+					index: 0, agent: "inline", task: "task", status: "running",
+					durationMs: 5000, tokens: 200, toolUses: 2,
+					activities: [
+						{ id: "tc1", name: "read", args: { path: "a.ts" }, startTime: Date.now() - 5000, endTime: Date.now() - 4500, result: { content: [{ type: "text", text: "file contents" }], isError: false } },
+						{ id: "tc2", name: "bash", args: { command: "npm test" }, startTime: Date.now() - 1000, liveOutput: "Test suite running...\nPASS src/utils.test.ts\nFAIL src/broken.test.ts" },
+					],
+				}],
+			},
+		};
+
+		const text = toolDef!.renderResult(result, { isPartial: true, expanded: true }, theme, ctx);
+		const rendered = (text as any).getText();
+		// Live output lines shown indented under the in-flight bash tool
+		expect(rendered).toContain("PASS src/utils.test.ts");
+		expect(rendered).toContain("FAIL src/broken.test.ts");
+		// Carriage returns resolved (progress bars show final state)
+		expect(rendered).not.toContain("\r");
+		// Ctrl+O hint not shown in expanded
 		expect(rendered).not.toContain("Press Ctrl+O for live detail");
 	});
 
