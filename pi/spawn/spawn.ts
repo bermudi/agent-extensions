@@ -71,7 +71,7 @@ export interface TaskDef {
   systemPrompt?: string;
   cwd?: string;
   context?: "fresh" | "with-parent-transcript";
-  /** Name for a persistent subagent session. First use creates it, subsequent uses reuse it. */
+  /** Name for a persistent subagent session. First use creates it, subsequent calls reuse it. Each session handles one task at a time — duplicate sessionIds in the same call are rejected. */
   sessionId?: string;
   /** Action for session management. Default: "prompt". "close" tears down a pooled agent. "list" shows active sessions. "poll" checks async tickets. "cancel" aborts async ticket. */
   action?: SessionAction;
@@ -1895,13 +1895,13 @@ async function runResolvedTask(
       return finishTask(env, p, failTask(task, "Aborted"));
     }
 
-    // ── Session busy guard ────────────────────────────────────────────
-    // Sync (no ticketId): fail on any busy session.
-    // Async (has ticketId): fail only if busy with a *different* ticket.
+    // ── Session busy guard (defense-in-depth) ────────────────────────
+    // Primary validation is in execute() before ticket creation.
+    // This catches edge cases where validation missed a conflict.
     if (task.sessionId) {
       const busyTicketId = isSessionBusy(task.sessionId);
       if (busyTicketId && busyTicketId !== env.ticketId) {
-        const msg = `Session '${task.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`;
+        const msg = `Session '${task.sessionId}' is already in use by ticket ${busyTicketId}. Each session can only handle one task at a time.`;
         return finishTask(env, p, failTask(task, msg));
       }
     }
@@ -2689,7 +2689,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
       // ── Validate ──────────────────────────────────────────────────
       // Disallow same sessionId across multiple parallel tasks (one agent can't serve two prompts concurrently).
-      const sessionIds = tasks.map((t) => t.sessionId).filter(Boolean);
+      const sessionIds = tasks.map((t) => t.sessionId).filter(Boolean) as string[];
       const duplicateSessions = sessionIds.filter(
         (id, i) => sessionIds.indexOf(id) !== i,
       );
@@ -2698,7 +2698,30 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           content: [
             {
               type: "text",
-              text: `Duplicate sessionId(s) across tasks: ${[...new Set(duplicateSessions)].join(", ")}. A pooled agent can only handle one prompt at a time.`,
+              text: `Duplicate sessionId(s) across tasks: ${[...new Set(duplicateSessions)].join(", ")}. Each session can only handle one task at a time.`,
+            },
+          ],
+          details: {
+            tasks,
+            results: [],
+            progress: [],
+            parentModel: parentModelId,
+          },
+        };
+      }
+
+      // Disallow sessionIds already claimed by a running async ticket.
+      const busyConflicts: string[] = [];
+      for (const sid of sessionIds) {
+        const owner = isSessionBusy(sid);
+        if (owner) busyConflicts.push(`${sid} (ticket ${owner})`);
+      }
+      if (busyConflicts.length) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Session(s) already in use: ${busyConflicts.join(", ")}. Each session can only handle one task at a time.`,
             },
           ],
           details: {
