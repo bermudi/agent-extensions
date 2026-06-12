@@ -158,6 +158,16 @@ export interface TaskResult {
   touchedFiles: string[];
 }
 
+/** Single source of truth for an Agent's runtime configuration.
+ *  Used by createAgent, rehydrateAgent, runAgent, and the pool. */
+export interface AgentRunConfig {
+  systemPrompt: string;
+  model: Model<Api>;
+  thinking: ThinkingLevel;
+  tools: string[];
+  cwd: string;
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────
 
 export const DEFAULT_TOOLS = ["read", "write", "edit", "bash"];
@@ -446,29 +456,7 @@ export function rehydrateAgent(
     const ctx = sm.buildSessionContext();
     if (!ctx.messages.length) return null;
 
-    const tools = config.tools
-      .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
-      .filter(Boolean) as AgentTool[];
-
-    const agent = new Agent({
-      initialState: {
-        systemPrompt: config.systemPrompt,
-        model: config.model,
-        thinkingLevel: config.thinking,
-        tools,
-        messages: ctx.messages,
-      },
-      convertToLlm,
-      streamFn: async (m, context, options) => {
-        const auth = await modelRegistry.getApiKeyAndHeaders(m);
-        if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-        return streamSimple(m, context, {
-          ...options,
-          apiKey: auth.apiKey,
-          headers: auth.headers ?? undefined,
-        });
-      },
-    });
+    const agent = createAgent(config, modelRegistry, ctx.messages);
 
     return { agent, sessionManager: sm as unknown as SessionManagerLike };
   } catch {
@@ -1393,26 +1381,7 @@ export async function runAgent(
   if (existingAgent) {
     agent = existingAgent;
   } else {
-    agent = new Agent({
-      initialState: {
-        systemPrompt: config.systemPrompt,
-        model: config.model,
-        thinkingLevel: config.thinking,
-        tools: config.tools
-          .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
-          .filter(Boolean) as AgentTool[],
-      },
-      convertToLlm,
-      streamFn: async (m, context, options) => {
-        const auth = await modelRegistry.getApiKeyAndHeaders(m);
-        if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-        return streamSimple(m, context, {
-          ...options,
-          apiKey: auth.apiKey,
-          headers: auth.headers ?? undefined,
-        });
-      },
-    });
+    agent = createAgent(config, modelRegistry);
   }
 
   // Track sessionManager — may be replaced on rehydration.
@@ -1453,26 +1422,7 @@ export async function runAgent(
             currentSessionManager = rehydrated.sessionManager;
           } else {
             // Fallback: fresh agent.
-            agent = new Agent({
-              initialState: {
-                systemPrompt: config.systemPrompt,
-                model: config.model,
-                thinkingLevel: config.thinking,
-                tools: config.tools
-                  .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
-                  .filter(Boolean) as AgentTool[],
-              },
-              convertToLlm,
-              streamFn: async (m, context, options) => {
-                const auth = await modelRegistry.getApiKeyAndHeaders(m);
-                if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-                return streamSimple(m, context, {
-                  ...options,
-                  apiKey: auth.apiKey,
-                  headers: auth.headers ?? undefined,
-                });
-              },
-            });
+            agent = createAgent(config, modelRegistry);
             currentSessionManager = sessionManager;
           }
         }
@@ -1548,6 +1498,446 @@ export async function runAgent(
     tokens: 0,
     touchedFiles: [],
   };
+}
+
+// ── Task Lifecycle (unified sync/async) ────────────────────────────────
+
+/** Construct a fresh Agent with the standard streamFn. */
+function createAgent(
+  config: AgentRunConfig,
+  modelRegistry: ModelRegistry,
+  messages?: AgentMessage[],
+): Agent {
+  const tools = config.tools
+    .map((name) => TOOL_FACTORIES[name]?.(config.cwd))
+    .filter(Boolean) as AgentTool[];
+  return new Agent({
+    initialState: {
+      systemPrompt: config.systemPrompt,
+      model: config.model,
+      thinkingLevel: config.thinking,
+      tools,
+      ...(messages ? { messages } : {}),
+    },
+    convertToLlm,
+    streamFn: async (m, context, options) => {
+      const auth = await modelRegistry.getApiKeyAndHeaders(m);
+      if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
+      return streamSimple(m, context, {
+        ...options,
+        apiKey: auth.apiKey,
+        headers: auth.headers ?? undefined,
+      });
+    },
+  });
+}
+
+/** Build a failed TaskResult. Used for early-failure paths (abort, busy, validation). */
+function failTask(
+  task: ResolvedTask,
+  error: string,
+  sessionFile?: string,
+): TaskResult {
+  return {
+    agent: task.agentName,
+    output: "",
+    error,
+    durationMs: 0,
+    tokens: 0,
+    sessionFile,
+    touchedFiles: [],
+  };
+}
+
+/** Build a successful TaskResult for session-management actions (close/list). */
+function completeSessionAction(task: ResolvedTask, output: string): TaskResult {
+  return {
+    agent: task.agentName,
+    output,
+    durationMs: 0,
+    tokens: 0,
+    sessionFile: undefined,
+    touchedFiles: [],
+  };
+}
+
+/** Mirror a progress update from runAgent into a TaskProgress row. */
+function updateProgressFromRun(
+  p: TaskProgress,
+  u: AgentProgressUpdate,
+): void {
+  p.tokens = u.tokens;
+  p.toolUses = u.toolUses;
+  p.durationMs = u.durationMs;
+  p.lastActivityAt = u.lastActivityAt;
+  p.activities = u.activities;
+}
+
+/** Mirror a completed TaskResult into a TaskProgress row (status/duration/error). */
+function updateProgressFromResult(p: TaskProgress, r: TaskResult): void {
+  p.status = r.error ? "failed" : "done";
+  p.durationMs = r.durationMs;
+  p.tokens = r.tokens;
+  p.error = r.error;
+}
+
+/** Environment passed to runResolvedTask. Encapsulates the sync/async split. */
+interface TaskRunEnv {
+  /** Abort signal — parent's for sync, ticket's for async. May be undefined when no parent signal is available. */
+  signal: AbortSignal | undefined;
+  modelRegistry: ModelRegistry;
+  /** Parent session manager — used to link subagent sessions for /resume. */
+  parentSessionManager: { getSessionFile?(): string | undefined } | undefined;
+  /** Ticket id for busy-guard self-checks. undefined for sync. */
+  ticketId?: string;
+  /** Called for every progress update from runAgent. */
+  onProgress: (p: TaskProgress, u: AgentProgressUpdate) => void;
+}
+
+interface AcquiredSession {
+  agent: Agent;
+  sessionManager: SessionManagerLike | undefined;
+  sessionFile: string | undefined;
+  /** True if agent came from the pool (stateful multi-turn — skip retry). */
+  isPoolHit: boolean;
+  /** True if this is a fresh agent that should be inserted into the pool after a successful run. */
+  shouldPoolAfter: boolean;
+}
+
+/** Resolve the agent + session for a task. Single source of truth for pool, resume, and miss logic. */
+async function acquireAgentSession(
+  env: TaskRunEnv,
+  task: ResolvedTask,
+  p: TaskProgress,
+): Promise<AcquiredSession | { error: TaskResult }> {
+  let agent: Agent | undefined;
+  let sessionManager: SessionManagerLike | undefined;
+  let sessionFile: string | undefined;
+  let isPoolHit = false;
+  let shouldPoolAfter = false;
+
+  if (task.sessionId) {
+    const pooled = agentPool.get(task.sessionId);
+    if (pooled) {
+      // Pool hit — validate frozen config matches the new task's request.
+      const frozen = pooled.config;
+      const mismatches: string[] = [];
+      if (frozen.cwd !== task.cwd)
+        mismatches.push(`cwd: '${frozen.cwd}' vs '${task.cwd}'`);
+      if (frozen.thinking !== task.thinking)
+        mismatches.push(`thinking: '${frozen.thinking}' vs '${task.thinking}'`);
+      const frozenToolSet = [...frozen.tools].sort().join(",");
+      const newToolSet = [...task.tools].sort().join(",");
+      if (frozenToolSet !== newToolSet)
+        mismatches.push(`tools: [${frozenToolSet}] vs [${newToolSet}]`);
+      if (mismatches.length) {
+        return {
+          error: failTask(
+            task,
+            `Session '${task.sessionId}' config mismatch. Close and recreate: ${mismatches.join("; ")}`,
+          ),
+        };
+      }
+      agent = pooled.agent;
+      sessionManager = pooled.sessionManager;
+      sessionFile = pooled.sessionFile;
+      pooled.lastUsed = Date.now();
+      p.model = frozen.model.id;
+      isPoolHit = true;
+    } else {
+      // Pool miss.
+      if (task.resumeFrom) {
+        // Defer to the resume block below — creating a session here would orphan an empty .jsonl.
+        shouldPoolAfter = true;
+      } else {
+        const session = createSubagentSessionManager(
+          env.parentSessionManager,
+          task.cwd,
+        );
+        sessionManager = session?.manager;
+        sessionFile = session?.file;
+
+        if (sessionFile) {
+          const rehydrated = rehydrateAgent(
+            sessionFile,
+            {
+              systemPrompt: task.systemPrompt,
+              model: task.model,
+              thinking: task.thinking,
+              tools: task.tools,
+              cwd: task.cwd,
+            },
+            env.modelRegistry,
+          );
+          if (rehydrated) {
+            agent = rehydrated.agent;
+            sessionManager = rehydrated.sessionManager;
+          }
+        }
+        if (!agent) {
+          agent = createAgent(
+            {
+              systemPrompt: task.systemPrompt,
+              model: task.model,
+              thinking: task.thinking,
+              tools: task.tools,
+              cwd: task.cwd,
+            },
+            env.modelRegistry,
+          );
+        }
+        shouldPoolAfter = true;
+      }
+    }
+  }
+
+  // Resume from a previous session file.
+  if (task.resumeFrom) {
+    if (isPoolHit) {
+      return {
+        error: failTask(
+          task,
+          `resumeFrom conflicts with active sessionId '${task.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`,
+          sessionFile,
+        ),
+      };
+    }
+    const resolvedPath = resolveCwd(task.resumeFrom);
+    if (!fs.existsSync(resolvedPath)) {
+      return {
+        error: failTask(
+          task,
+          `resumeFrom: file not found: ${resolvedPath}`,
+          resolvedPath,
+        ),
+      };
+    }
+    const rehydrated = rehydrateAgent(
+      resolvedPath,
+      {
+        systemPrompt: task.systemPrompt,
+        model: task.model,
+        thinking: task.thinking,
+        tools: task.tools,
+        cwd: task.cwd,
+      },
+      env.modelRegistry,
+    );
+    if (!rehydrated) {
+      return {
+        error: failTask(
+          task,
+          `resumeFrom: empty or corrupt session: ${resolvedPath}`,
+          resolvedPath,
+        ),
+      };
+    }
+    agent = rehydrated.agent;
+    sessionManager = rehydrated.sessionManager;
+    sessionFile = resolvedPath;
+
+    // Link resumed session to parent for /resume discoverability.
+    const parentFile = (
+      env.parentSessionManager as
+        | { getSessionFile?(): string | undefined }
+        | undefined
+    )?.getSessionFile?.();
+    if (parentFile) {
+      setParentSession(
+        rehydrated.sessionManager as unknown as SessionManager,
+        parentFile,
+      );
+    }
+  }
+
+  // Pick the session — prefer resumed, then pool, then fresh.
+  const session = sessionManager
+    ? { manager: sessionManager, file: sessionFile }
+    : task.sessionId
+      ? { manager: undefined, file: undefined }
+      : createSubagentSessionManager(env.parentSessionManager, task.cwd);
+
+  if (session?.manager && !isPoolHit && !task.resumeFrom) {
+    const label = `⎇ spawn · ${task.agentName}`;
+    session.manager.appendSessionInfo(label);
+  }
+
+  if (!agent) {
+    // Defensive: acquireAgentSession should always produce an agent for run tasks.
+    return { error: failTask(task, "Internal: no agent acquired") };
+  }
+
+  return {
+    agent,
+    sessionManager: session?.manager,
+    sessionFile: session?.file,
+    isPoolHit,
+    shouldPoolAfter,
+  };
+}
+
+/** Insert a freshly-run agent into the pool. Called after a successful run for a new pooled session. */
+function commitPoolInsert(
+  sessionId: string,
+  task: ResolvedTask,
+  acquired: AcquiredSession,
+  result: { tokens: number },
+): void {
+  if (!acquired.sessionManager || !acquired.sessionFile) return;
+  agentPool.set(sessionId, {
+    agent: acquired.agent,
+    sessionManager: acquired.sessionManager,
+    sessionFile: acquired.sessionFile,
+    config: {
+      systemPrompt: task.systemPrompt,
+      model: task.model,
+      thinking: task.thinking,
+      tools: task.tools,
+      cwd: task.cwd,
+    },
+    lastUsed: Date.now(),
+    createdAt: Date.now(),
+    totalTokens: result.tokens,
+    promptCount: 1,
+  });
+}
+
+/** Update pool stats for a subsequent prompt on an existing pooled session. */
+function commitPoolStats(
+  sessionId: string,
+  result: { tokens: number },
+): void {
+  const pooled = agentPool.get(sessionId);
+  if (!pooled) return;
+  pooled.lastUsed = Date.now();
+  pooled.totalTokens += result.tokens;
+  pooled.promptCount++;
+}
+
+/** Run a single resolved task. Single source of truth for the per-task lifecycle.
+ *  Used by both sync (params.async === false) and async (params.async === true) paths. */
+async function runResolvedTask(
+  env: TaskRunEnv,
+  task: ResolvedTask,
+  p: TaskProgress,
+  taskIndex: number,
+): Promise<TaskResult> {
+  try {
+    // ── Aborted before we started? ───────────────────────────────────
+    if (env.signal?.aborted) {
+      const r = failTask(task, "Aborted");
+      updateProgressFromResult(p, r);
+      return r;
+    }
+
+    // ── Session busy guard ────────────────────────────────────────────
+    // Sync (no ticketId): fail on any busy session.
+    // Async (has ticketId): fail only if busy with a *different* ticket.
+    if (task.sessionId) {
+      const busyTicketId = isSessionBusy(task.sessionId);
+      if (busyTicketId && busyTicketId !== env.ticketId) {
+        const msg = `Session '${task.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`;
+        const r = failTask(task, msg);
+        updateProgressFromResult(p, r);
+        return r;
+      }
+    }
+
+    p.status = "running";
+    p.model = task.model?.id;
+
+    // ── Session action handling ───────────────────────────────────────
+    if (task.action === "close") {
+      if (!task.sessionId) {
+        const r = failTask(task, "action='close' requires sessionId.");
+        updateProgressFromResult(p, r);
+        return r;
+      }
+      const closed = closePooledAgent(task.sessionId);
+      const r = completeSessionAction(
+        task,
+        closed
+          ? `Session '${task.sessionId}' closed.`
+          : `Session '${task.sessionId}' not found.`,
+      );
+      updateProgressFromResult(p, r);
+      return r;
+    }
+
+    if (task.action === "list") {
+      const listing = listPooledAgents();
+      const r = completeSessionAction(
+        task,
+        `Active sessions:\n${listing.join("\n")}`,
+      );
+      updateProgressFromResult(p, r);
+      return r;
+    }
+
+    // ── Pool / resume / fresh-agent resolution ────────────────────────
+    const acquired = await acquireAgentSession(env, task, p);
+    if ("error" in acquired) {
+      updateProgressFromResult(p, acquired.error);
+      return acquired.error;
+    }
+
+    // ── Run the agent ─────────────────────────────────────────────────
+    const doRun = async (): Promise<TaskResult> => {
+      const config: AgentRunConfig = {
+        systemPrompt: task.systemPrompt,
+        model: task.model,
+        thinking: task.thinking,
+        tools: task.tools,
+        cwd: task.cwd,
+      };
+      const r = await runAgent(
+        config,
+        task.prompt,
+        env.modelRegistry,
+        env.signal,
+        (u) => env.onProgress(p, u),
+        acquired.sessionManager,
+        undefined, // maxRetries
+        2000, // retryBaseMs
+        acquired.agent,
+        // allowRetry: pooled agents carry accumulated state — retrying is unsafe.
+        // Fresh agents and resumed sessions are safe to retry.
+        !acquired.isPoolHit,
+        taskIndex,
+      );
+
+      // Pool bookkeeping: insert on first successful run, update stats on subsequent.
+      if (task.sessionId && !r.error) {
+        if (acquired.shouldPoolAfter) {
+          commitPoolInsert(task.sessionId, task, acquired, r);
+        } else {
+          commitPoolStats(task.sessionId, r);
+        }
+      }
+
+      const result: TaskResult = {
+        agent: task.agentName,
+        output: r.output,
+        error: r.error,
+        durationMs: r.durationMs,
+        tokens: r.tokens,
+        sessionFile: acquired.sessionFile,
+        touchedFiles: r.touchedFiles,
+      };
+      updateProgressFromResult(p, result);
+      return result;
+    };
+
+    if (acquired.isPoolHit && task.sessionId) {
+      return withSessionLock(task.sessionId, doRun);
+    }
+    return doRun();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const r = failTask(task, msg);
+    updateProgressFromResult(p, r);
+    return r;
+  }
 }
 
 // ── Output Extraction ────────────────────────────────────────────────────
@@ -2505,413 +2895,21 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const ticketSignal = controller.signal;
         const modelRegistry = ctx.modelRegistry;
 
+        const asyncEnv: TaskRunEnv = {
+          signal: ticketSignal,
+          modelRegistry,
+          parentSessionManager: ctx.sessionManager,
+          ticketId,
+          onProgress: (p, u) => {
+            updateProgressFromRun(p, u);
+          },
+        };
+
         // Fire and forget — runs on the event loop
         mapConcurrent(
           resolved,
           MAX_CONCURRENCY,
-          async (t, i) => {
-            // IMPORTANT: wrap each task in try/catch so one failure
-            // doesn't reject the entire mapConcurrent promise.
-            const p = ticket.progress[i]!;
-            try {
-              // Check if parent signal already aborted
-              if (signal?.aborted) {
-                p.status = "failed";
-                p.error = "Aborted";
-                ticket.results[i] = {
-                  agent: t.agentName,
-                  output: "",
-                  error: "Aborted",
-                  durationMs: 0,
-                  tokens: 0,
-                  sessionFile: undefined,
-                  touchedFiles: [],
-                };
-                return ticket.results[i]!;
-              }
-
-              // ── Session busy guard (async) ───────────────────────────
-              if (t.sessionId) {
-                const busyTicketId = isSessionBusy(t.sessionId);
-                if (busyTicketId && busyTicketId !== ticketId) {
-                  p.status = "failed";
-                  p.error = `Session '${t.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`;
-                  ticket.results[i] = {
-                    agent: t.agentName,
-                    output: "",
-                    error: p.error,
-                    durationMs: 0,
-                    tokens: 0,
-                    sessionFile: undefined,
-                    touchedFiles: [],
-                  };
-                  return ticket.results[i]!;
-                }
-              }
-
-              p.status = "running";
-              p.model = t.model?.id;
-
-              // ── Session action handling (async) ─────────────────────
-              if (t.action === "close") {
-                if (!t.sessionId) {
-                  p.status = "failed";
-                  p.error = "action='close' requires sessionId.";
-                  ticket.results[i] = {
-                    agent: t.agentName,
-                    output: "",
-                    error: p.error,
-                    durationMs: 0,
-                    tokens: 0,
-                    sessionFile: undefined,
-                    touchedFiles: [],
-                  };
-                  return ticket.results[i]!;
-                }
-                const closed = closePooledAgent(t.sessionId);
-                p.status = "done";
-                p.durationMs = Date.now() - ticket.created;
-                ticket.results[i] = {
-                  agent: t.agentName,
-                  output: closed
-                    ? `Session '${t.sessionId}' closed.`
-                    : `Session '${t.sessionId}' not found.`,
-                  durationMs: 0,
-                  tokens: 0,
-                  sessionFile: undefined,
-                  touchedFiles: [],
-                };
-                return ticket.results[i]!;
-              }
-
-              if (t.action === "list") {
-                const listing = listPooledAgents();
-                p.status = "done";
-                p.durationMs = Date.now() - ticket.created;
-                ticket.results[i] = {
-                  agent: t.agentName,
-                  output: `Active sessions:\n${listing.join("\n")}`,
-                  durationMs: 0,
-                  tokens: 0,
-                  sessionFile: undefined,
-                  touchedFiles: [],
-                };
-                return ticket.results[i]!;
-              }
-
-              // ── Pooled agent resolution (async) ───────────────────
-              let existingAgent: Agent | undefined;
-              let poolSessionManager: SessionManagerLike | undefined;
-              let poolSessionFile: string | undefined;
-              let pendingPoolInsert = false;
-
-              if (t.sessionId) {
-                const pooled = agentPool.get(t.sessionId);
-                if (pooled) {
-                  // Pool hit — validate config compatibility
-                  const frozen = pooled.config;
-                  const mismatches: string[] = [];
-                  if (frozen.cwd !== t.cwd)
-                    mismatches.push(`cwd: '${frozen.cwd}' vs '${t.cwd}'`);
-                  if (frozen.thinking !== t.thinking)
-                    mismatches.push(
-                      `thinking: '${frozen.thinking}' vs '${t.thinking}'`,
-                    );
-                  const frozenToolSet = [...frozen.tools].sort().join(",");
-                  const newToolSet = [...t.tools].sort().join(",");
-                  if (frozenToolSet !== newToolSet)
-                    mismatches.push(
-                      `tools: [${frozenToolSet}] vs [${newToolSet}]`,
-                    );
-                  if (mismatches.length) {
-                    p.status = "failed";
-                    p.error = `Session '${t.sessionId}' config mismatch. Close and recreate: ${mismatches.join("; ")}`;
-                    ticket.results[i] = {
-                      agent: t.agentName,
-                      output: "",
-                      error: p.error,
-                      durationMs: 0,
-                      tokens: 0,
-                      sessionFile: undefined,
-                      touchedFiles: [],
-                    };
-                    return ticket.results[i]!;
-                  }
-                  existingAgent = pooled.agent;
-                  poolSessionManager = pooled.sessionManager;
-                  poolSessionFile = pooled.sessionFile;
-                  pooled.lastUsed = Date.now();
-                  p.model = frozen.model.id;
-                } else {
-                  // Pool miss
-                  if (t.resumeFrom) {
-                    pendingPoolInsert = true;
-                  } else {
-                    const session = createSubagentSessionManager(
-                      ctx.sessionManager,
-                      t.cwd,
-                    );
-                    poolSessionManager = session?.manager;
-                    poolSessionFile = session?.file;
-
-                    const tools = t.tools
-                      .map((name) => TOOL_FACTORIES[name]?.(t.cwd))
-                      .filter(Boolean) as AgentTool[];
-                    const agentConfig = {
-                      systemPrompt: t.systemPrompt,
-                      model: t.model,
-                      thinkingLevel: t.thinking,
-                      tools,
-                    };
-
-                    let agent: Agent | undefined;
-                    if (poolSessionFile) {
-                      const rehydrated = rehydrateAgent(
-                        poolSessionFile,
-                        {
-                          systemPrompt: t.systemPrompt,
-                          model: t.model,
-                          thinking: t.thinking,
-                          tools: t.tools,
-                          cwd: t.cwd,
-                        },
-                        modelRegistry,
-                      );
-                      if (rehydrated) {
-                        agent = rehydrated.agent;
-                        poolSessionManager = rehydrated.sessionManager;
-                      }
-                    }
-                    if (!agent) {
-                      const streamFn = async (
-                        m: any,
-                        context: any,
-                        options: any,
-                      ) => {
-                        const auth = await modelRegistry.getApiKeyAndHeaders(m);
-                        if (!auth.ok)
-                          throw new Error(`Auth failed: ${auth.error}`);
-                        return streamSimple(m, context, {
-                          ...options,
-                          apiKey: auth.apiKey,
-                          headers: auth.headers ?? undefined,
-                        });
-                      };
-                      agent = new Agent({
-                        initialState: agentConfig,
-                        convertToLlm,
-                        streamFn,
-                      });
-                    }
-                    existingAgent = agent;
-                    pendingPoolInsert = true;
-
-                    // Synchronous pool insertion — prevent race conditions
-                    if (
-                      t.sessionId &&
-                      existingAgent &&
-                      poolSessionManager &&
-                      poolSessionFile
-                    ) {
-                      agentPool.set(t.sessionId, {
-                        agent: existingAgent,
-                        sessionManager: poolSessionManager,
-                        sessionFile: poolSessionFile,
-                        config: {
-                          systemPrompt: t.systemPrompt,
-                          model: t.model,
-                          thinking: t.thinking,
-                          tools: t.tools,
-                          cwd: t.cwd,
-                        },
-                        lastUsed: Date.now(),
-                        createdAt: Date.now(),
-                        totalTokens: 0,
-                        promptCount: 0,
-                      });
-                      pendingPoolInsert = false;
-                    }
-                  }
-                }
-              }
-
-              // ── Resume from previous session (async) ────────────────
-              let resumedSessionManager: SessionManagerLike | undefined;
-              let resumedSessionFile: string | undefined;
-              const isPoolHit =
-                t.sessionId &&
-                !pendingPoolInsert &&
-                agentPool.has(t.sessionId!);
-
-              if (t.resumeFrom) {
-                if (isPoolHit) {
-                  const msg = `resumeFrom conflicts with active sessionId '${t.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`;
-                  p.status = "failed";
-                  p.error = msg;
-                  ticket.results[i] = {
-                    agent: t.agentName,
-                    output: "",
-                    error: msg,
-                    durationMs: 0,
-                    tokens: 0,
-                    sessionFile: poolSessionFile,
-                    touchedFiles: [],
-                  };
-                  return ticket.results[i]!;
-                } else {
-                  const resolvedPath = resolveCwd(t.resumeFrom);
-                  if (!fs.existsSync(resolvedPath)) {
-                    p.status = "failed";
-                    p.error = `resumeFrom: file not found: ${resolvedPath}`;
-                    ticket.results[i] = {
-                      agent: t.agentName,
-                      output: "",
-                      error: p.error,
-                      durationMs: 0,
-                      tokens: 0,
-                      sessionFile: resolvedPath,
-                      touchedFiles: [],
-                    };
-                    return ticket.results[i]!;
-                  }
-                  const resumeConfig = {
-                    systemPrompt: t.systemPrompt,
-                    model: t.model,
-                    thinking: t.thinking,
-                    tools: t.tools,
-                    cwd: t.cwd,
-                  };
-                  const rehydrated = rehydrateAgent(
-                    resolvedPath,
-                    resumeConfig,
-                    modelRegistry,
-                  );
-                  if (!rehydrated) {
-                    p.status = "failed";
-                    p.error = `resumeFrom: empty or corrupt session: ${resolvedPath}`;
-                    ticket.results[i] = {
-                      agent: t.agentName,
-                      output: "",
-                      error: p.error,
-                      durationMs: 0,
-                      tokens: 0,
-                      sessionFile: resolvedPath,
-                      touchedFiles: [],
-                    };
-                    return ticket.results[i]!;
-                  }
-                  existingAgent = rehydrated.agent;
-                  resumedSessionManager = rehydrated.sessionManager;
-                  resumedSessionFile = resolvedPath;
-                }
-              }
-
-              const session = resumedSessionManager
-                ? { manager: resumedSessionManager, file: resumedSessionFile }
-                : t.sessionId
-                  ? { manager: poolSessionManager, file: poolSessionFile }
-                  : createSubagentSessionManager(ctx.sessionManager, t.cwd);
-
-              if (session?.manager && !isPoolHit && !resumedSessionManager) {
-                const label = `⎇ spawn · ${t.agentName}`;
-                session.manager.appendSessionInfo(label);
-              }
-
-              // ── Run agent (async) ──────────────────────────────────
-              const config = {
-                systemPrompt: t.systemPrompt,
-                model: t.model,
-                thinking: t.thinking,
-                tools: t.tools,
-                cwd: t.cwd,
-              };
-              const r = await runAgent(
-                config,
-                t.prompt,
-                modelRegistry,
-                ticketSignal, // Fresh controller, NOT parent signal
-                (u) => {
-                  // Update ticket progress directly — NO fire()/onUpdate
-                  p.tokens = u.tokens;
-                  p.toolUses = u.toolUses;
-                  p.durationMs = u.durationMs;
-                  p.lastActivityAt = u.lastActivityAt;
-                  p.activities = u.activities;
-                },
-                session?.manager,
-                undefined, // maxRetries
-                2000, // retryBaseMs
-                existingAgent,
-                !isPoolHit, // allowRetry
-                i,
-              );
-
-              // Pool insertion on success (only if not already inserted synchronously)
-              if (
-                t.sessionId &&
-                pendingPoolInsert &&
-                !r.error &&
-                session?.manager &&
-                session?.file
-              ) {
-                agentPool.set(t.sessionId, {
-                  agent: existingAgent!,
-                  sessionManager: session.manager,
-                  sessionFile: session.file,
-                  config: {
-                    systemPrompt: t.systemPrompt,
-                    model: t.model,
-                    thinking: t.thinking,
-                    tools: t.tools,
-                    cwd: t.cwd,
-                  },
-                  lastUsed: Date.now(),
-                  createdAt: Date.now(),
-                  totalTokens: r.tokens,
-                  promptCount: 1,
-                });
-              }
-
-              // Update pool stats on subsequent successful runs
-              if (t.sessionId && !pendingPoolInsert) {
-                const pooled = agentPool.get(t.sessionId);
-                if (pooled) {
-                  pooled.lastUsed = Date.now();
-                  pooled.totalTokens += r.tokens;
-                  pooled.promptCount++;
-                }
-              }
-
-              p.status = r.error ? "failed" : "done";
-              p.durationMs = r.durationMs;
-              p.tokens = r.tokens;
-              p.error = r.error;
-              ticket.results[i] = {
-                agent: t.agentName,
-                output: r.output,
-                error: r.error,
-                durationMs: r.durationMs,
-                tokens: r.tokens,
-                sessionFile: session?.file ?? poolSessionFile,
-                touchedFiles: r.touchedFiles,
-              };
-              return ticket.results[i]!;
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              p.status = "failed";
-              p.error = msg;
-              ticket.results[i] = {
-                agent: t.agentName,
-                output: "",
-                error: msg,
-                durationMs: 0,
-                tokens: 0,
-                sessionFile: undefined,
-                touchedFiles: [],
-              };
-              return ticket.results[i]!;
-            }
-          },
+          async (t, i) => runResolvedTask(asyncEnv, t, ticket.progress[i]!, i),
           ticketSignal,
         )
           .then(() => {
@@ -2965,413 +2963,25 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         };
       }
 
-      // ── Sync mode (existing path) ──────────────────────────────────
+      // ── Sync mode ─────────────────────────────────────────────────
       // Sweep stale pooled agents before dispatching.
       sweepPool();
+
+      const syncEnv: TaskRunEnv = {
+        signal,
+        modelRegistry: ctx.modelRegistry,
+        parentSessionManager: ctx.sessionManager,
+        ticketId: undefined,
+        onProgress: (p, u) => {
+          updateProgressFromRun(p, u);
+          fire();
+        },
+      };
 
       const results = await mapConcurrent(
         resolved,
         MAX_CONCURRENCY,
-        async (t, i) => {
-          const p = progress[i]!;
-          // Skip the "running" flash if we're already aborted.
-          if (signal?.aborted) {
-            p.status = "failed";
-            p.error = "Aborted";
-            fire();
-            return {
-              agent: t.agentName,
-              output: "",
-              error: "Aborted",
-              durationMs: 0,
-              tokens: 0,
-              sessionFile: undefined,
-              touchedFiles: [],
-            };
-          }
-          p.status = "running";
-          p.model = t.model?.id;
-          fire();
-
-          // ── Session busy guard (sync) ───────────────────────────
-          if (t.sessionId) {
-            const busyTicketId = isSessionBusy(t.sessionId);
-            if (busyTicketId) {
-              p.status = "failed";
-              p.error = `Session '${t.sessionId}' is busy with async ticket ${busyTicketId}. Poll or cancel that ticket first.`;
-              fire();
-              return {
-                agent: t.agentName,
-                output: "",
-                error: p.error,
-                durationMs: 0,
-                tokens: 0,
-                sessionFile: undefined,
-                touchedFiles: [],
-              };
-            }
-          }
-
-          // ── Session action handling ────────────────────────────────
-          if (t.action === "close") {
-            if (!t.sessionId) {
-              p.status = "failed";
-              p.error = "action='close' requires sessionId.";
-              fire();
-              return {
-                agent: t.agentName,
-                output: "",
-                error: "action='close' requires sessionId.",
-                durationMs: 0,
-                tokens: 0,
-                sessionFile: undefined,
-                touchedFiles: [],
-              };
-            }
-            const closed = closePooledAgent(t.sessionId);
-            p.status = "done";
-            p.durationMs = Date.now() - startedAt;
-            fire();
-            return {
-              agent: t.agentName,
-              output: closed
-                ? `Session '${t.sessionId}' closed.`
-                : `Session '${t.sessionId}' not found.`,
-              durationMs: 0,
-              tokens: 0,
-              sessionFile: undefined,
-              touchedFiles: [],
-            };
-          }
-
-          if (t.action === "list") {
-            const listing = listPooledAgents();
-            p.status = "done";
-            p.durationMs = Date.now() - startedAt;
-            fire();
-            return {
-              agent: t.agentName,
-              output: `Active sessions:\n${listing.join("\n")}`,
-              durationMs: 0,
-              tokens: 0,
-              sessionFile: undefined,
-              touchedFiles: [],
-            };
-          }
-
-          // ── Pooled agent resolution ────────────────────────────────
-          let existingAgent: Agent | undefined;
-          let poolSessionManager: SessionManagerLike | undefined;
-          let poolSessionFile: string | undefined;
-          let pendingPoolInsert = false; // Set true when we create a new agent that should be pooled on success.
-
-          if (t.sessionId) {
-            const pooled = agentPool.get(t.sessionId);
-            if (pooled) {
-              // Pool hit — validate config compatibility.
-              const frozen = pooled.config;
-              const mismatches: string[] = [];
-              if (frozen.cwd !== t.cwd)
-                mismatches.push(`cwd: '${frozen.cwd}' vs '${t.cwd}'`);
-              if (frozen.thinking !== t.thinking)
-                mismatches.push(
-                  `thinking: '${frozen.thinking}' vs '${t.thinking}'`,
-                );
-              const frozenToolSet = [...frozen.tools].sort().join(",");
-              const newToolSet = [...t.tools].sort().join(",");
-              if (frozenToolSet !== newToolSet)
-                mismatches.push(`tools: [${frozenToolSet}] vs [${newToolSet}]`);
-              if (mismatches.length) {
-                p.status = "failed";
-                p.error = `Session '${t.sessionId}' config mismatch. Close and recreate: ${mismatches.join("; ")}`;
-                fire();
-                return {
-                  agent: t.agentName,
-                  output: "",
-                  error: p.error,
-                  durationMs: 0,
-                  tokens: 0,
-                  sessionFile: undefined,
-                  touchedFiles: [],
-                };
-              }
-              existingAgent = pooled.agent;
-              poolSessionManager = pooled.sessionManager;
-              poolSessionFile = pooled.sessionFile;
-              pooled.lastUsed = Date.now();
-              // Model was already resolved from frozen config at task resolution time.
-              // Sync progress display to match.
-              p.model = frozen.model.id;
-            } else {
-              // Pool miss — when resumeFrom is specified, defer to the resume block
-              // which will rehydrate from the target session file. Creating a session
-              // here would orphan an empty .jsonl on disk.
-              if (t.resumeFrom) {
-                pendingPoolInsert = true;
-              } else {
-                // Try to rehydrate from disk, or create fresh.
-                const session = createSubagentSessionManager(
-                  ctx.sessionManager,
-                  t.cwd,
-                );
-                poolSessionManager = session?.manager;
-                poolSessionFile = session?.file;
-
-                const tools = t.tools
-                  .map((name) => TOOL_FACTORIES[name]?.(t.cwd))
-                  .filter(Boolean) as AgentTool[];
-                const agentConfig = {
-                  systemPrompt: t.systemPrompt,
-                  model: t.model,
-                  thinkingLevel: t.thinking,
-                  tools,
-                };
-
-                let agent: Agent | undefined;
-                if (poolSessionFile) {
-                  const rehydrated = rehydrateAgent(
-                    poolSessionFile,
-                    {
-                      systemPrompt: t.systemPrompt,
-                      model: t.model,
-                      thinking: t.thinking,
-                      tools: t.tools,
-                      cwd: t.cwd,
-                    },
-                    ctx.modelRegistry,
-                  );
-                  if (rehydrated) {
-                    agent = rehydrated.agent;
-                    poolSessionManager = rehydrated.sessionManager;
-                  }
-                }
-                if (!agent) {
-                  const streamFn = async (
-                    m: any,
-                    context: any,
-                    options: any,
-                  ) => {
-                    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
-                    if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-                    return streamSimple(m, context, {
-                      ...options,
-                      apiKey: auth.apiKey,
-                      headers: auth.headers ?? undefined,
-                    });
-                  };
-                  agent = new Agent({
-                    initialState: agentConfig,
-                    convertToLlm,
-                    streamFn,
-                  });
-                }
-                pendingPoolInsert = true;
-                existingAgent = agent;
-              }
-            }
-          }
-
-          // ── Resume from previous session ────────────────────────────
-          let resumedSessionManager: SessionManagerLike | undefined;
-          let resumedSessionFile: string | undefined;
-          // isPoolHit: sessionId exists AND agent was found in pool (not a fresh pool miss).
-          const isPoolHit = t.sessionId && !pendingPoolInsert;
-
-          if (t.resumeFrom) {
-            if (isPoolHit) {
-              // Pool has accumulated state — resumeFrom can't override it. Hard error.
-              const msg = `resumeFrom conflicts with active sessionId '${t.sessionId}'. The pooled agent has its own accumulated context. Close the session first if you want to resume from a different point.`;
-              p.status = "failed";
-              p.error = msg;
-              fire();
-              return {
-                agent: t.agentName,
-                output: "",
-                error: msg,
-                durationMs: 0,
-                tokens: 0,
-                sessionFile: poolSessionFile,
-                touchedFiles: [],
-              };
-            } else {
-              const resolvedPath = resolveCwd(t.resumeFrom);
-              if (!fs.existsSync(resolvedPath)) {
-                p.status = "failed";
-                p.error = `resumeFrom: file not found: ${resolvedPath}`;
-                fire();
-                return {
-                  agent: t.agentName,
-                  output: "",
-                  error: p.error,
-                  durationMs: 0,
-                  tokens: 0,
-                  sessionFile: resolvedPath,
-                  touchedFiles: [],
-                };
-              }
-              const resumeConfig = {
-                systemPrompt: t.systemPrompt,
-                model: t.model,
-                thinking: t.thinking,
-                tools: t.tools,
-                cwd: t.cwd,
-              };
-              const rehydrated = rehydrateAgent(
-                resolvedPath,
-                resumeConfig,
-                ctx.modelRegistry,
-              );
-              if (!rehydrated) {
-                p.status = "failed";
-                p.error = `resumeFrom: empty or corrupt session: ${resolvedPath}`;
-                fire();
-                return {
-                  agent: t.agentName,
-                  output: "",
-                  error: p.error,
-                  durationMs: 0,
-                  tokens: 0,
-                  sessionFile: resolvedPath,
-                  touchedFiles: [],
-                };
-              }
-              existingAgent = rehydrated.agent;
-              resumedSessionManager = rehydrated.sessionManager;
-              resumedSessionFile = resolvedPath;
-
-              // Link resumed session to parent for /resume discoverability.
-              const parentFile = (
-                ctx.sessionManager as
-                  | { getSessionFile?(): string | undefined }
-                  | undefined
-              )?.getSessionFile?.();
-              if (parentFile) {
-                setParentSession(
-                  rehydrated.sessionManager as unknown as SessionManager,
-                  parentFile,
-                );
-              }
-            }
-          }
-
-          // Create a session manager — prefer resumed, then pool, then fresh.
-          // When resumeFrom is active, skip pool-miss session creation to avoid orphaned empty files.
-          const session = resumedSessionManager
-            ? { manager: resumedSessionManager, file: resumedSessionFile }
-            : t.sessionId
-              ? { manager: poolSessionManager, file: poolSessionFile }
-              : createSubagentSessionManager(ctx.sessionManager, t.cwd);
-
-          // Label subagent sessions so they're identifiable in /resume.
-          // Skip pool hits (already labeled) and resumed sessions (keep original label).
-          if (session?.manager && !isPoolHit && !resumedSessionManager) {
-            const label = `⎇ spawn · ${t.agentName}`;
-            session.manager.appendSessionInfo(label);
-          }
-
-          const doRun = async (): Promise<TaskResult> => {
-            try {
-              const config = {
-                systemPrompt: t.systemPrompt,
-                model: t.model,
-                thinking: t.thinking,
-                tools: t.tools,
-                cwd: t.cwd,
-              };
-              const r = await runAgent(
-                config,
-                t.prompt,
-                ctx.modelRegistry,
-                signal,
-                (u) => {
-                  p.tokens = u.tokens;
-                  p.toolUses = u.toolUses;
-                  p.durationMs = u.durationMs;
-                  p.lastActivityAt = u.lastActivityAt;
-                  p.activities = u.activities;
-                  fire();
-                },
-                session?.manager,
-                undefined, // maxRetries (default)
-                2000, // retryBaseMs
-                existingAgent, // pre-existing agent for pooled, resumed, or pool-miss sessions
-                !isPoolHit, // allowRetry: safe unless pool hit (accumulated multi-turn state)
-                i,
-              );
-
-              // Insert into pool only after successful first run.
-              if (
-                t.sessionId &&
-                pendingPoolInsert &&
-                !r.error &&
-                session?.manager &&
-                session?.file
-              ) {
-                agentPool.set(t.sessionId, {
-                  agent: existingAgent!,
-                  sessionManager: session.manager,
-                  sessionFile: session.file,
-                  config: {
-                    systemPrompt: t.systemPrompt,
-                    model: t.model,
-                    thinking: t.thinking,
-                    tools: t.tools,
-                    cwd: t.cwd,
-                  },
-                  lastUsed: Date.now(),
-                  createdAt: Date.now(),
-                  totalTokens: r.tokens,
-                  promptCount: 1,
-                });
-              }
-
-              // Update pool stats on subsequent successful runs.
-              if (t.sessionId && !pendingPoolInsert) {
-                const pooled = agentPool.get(t.sessionId);
-                if (pooled) {
-                  pooled.lastUsed = Date.now();
-                  pooled.totalTokens += r.tokens;
-                  pooled.promptCount++;
-                }
-              }
-
-              p.status = r.error ? "failed" : "done";
-              p.durationMs = r.durationMs;
-              p.tokens = r.tokens;
-              p.error = r.error;
-              fire();
-              return {
-                agent: t.agentName,
-                output: r.output,
-                error: r.error,
-                durationMs: r.durationMs,
-                tokens: r.tokens,
-                sessionFile: session?.file ?? poolSessionFile,
-                touchedFiles: r.touchedFiles,
-              };
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              p.status = "failed";
-              p.error = msg;
-              fire();
-              return {
-                agent: t.agentName,
-                output: "",
-                error: msg,
-                durationMs: 0,
-                tokens: 0,
-                sessionFile:
-                  session?.file ?? poolSessionFile ?? resumedSessionFile,
-                touchedFiles: [],
-              };
-            }
-          };
-
-          if (isPoolHit && t.sessionId) {
-            return withSessionLock(t.sessionId, doRun);
-          }
-          return doRun();
-        },
+        async (t, i) => runResolvedTask(syncEnv, t, progress[i]!, i),
         signal,
       );
 
