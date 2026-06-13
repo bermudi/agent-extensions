@@ -15,6 +15,8 @@ import {
 	loadSkill,
 	loadAgentsMdFiles,
 	resolveModel,
+	findAvailableAlternative,
+	resolveModelSpec,
 	extractOutput,
 	extractUsage,
 	fmtDuration,
@@ -49,7 +51,22 @@ import {
 	hasMutationActivity,
 	readDelegateSettingsFile,
 	loadDelegateSettings,
+	setModelOverride,
+	setDefaultModel,
+	clearModelOverride,
+	clearAllModelOverrides,
+	setConcurrencyDefault,
+	setConcurrencyProvider,
+	setConcurrencyModel,
+	removeConcurrencyProvider,
+	removeConcurrencyModel,
+	resetConcurrency,
+	getConcurrencyLimit,
+	getMaxAsyncTickets,
+	resetSessionOverrides,
 	type AgentConfig,
+	type SpawnConfig,
+	type SessionModelOverrides,
 	ticketRegistry,
 	type AsyncTicket,
 	sweepTickets,
@@ -736,6 +753,211 @@ describe("resolveModel", () => {
 		const registry = makeRegistry([{ provider: "openrouter", id: "qwen/qwen3-coder" }]);
 		const result = resolveModel("openrouter/qwen/qwen3-coder", registry, parentModel);
 		expect(result).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder" });
+	});
+});
+
+describe("findAvailableAlternative", () => {
+	const brokenModel = { provider: "deepseek", id: "deepseek-v4-pro" } as any;
+	const workingAlt = { provider: "opencode-go", id: "deepseek-v4-pro" } as any;
+
+	function makeRegistry(available: any[], authMap: Map<string, boolean>) {
+		return {
+			hasConfiguredAuth: (m: any) => authMap.get(`${m.provider}/${m.id}`) ?? false,
+			getAvailable: () => available,
+		} as any;
+	}
+
+	test("returns undefined when model is undefined", () => {
+		const registry = makeRegistry([], new Map());
+		expect(findAvailableAlternative(undefined, registry)).toBeUndefined();
+	});
+
+	test("returns model as-is when it has configured auth", () => {
+		const authMap = new Map([["deepseek/deepseek-v4-pro", true]]);
+		const registry = makeRegistry([brokenModel], authMap);
+		expect(findAvailableAlternative(brokenModel, registry)).toBe(brokenModel);
+	});
+
+	test("returns alternative with same id but different provider when original has no auth", () => {
+		const authMap = new Map([
+			["deepseek/deepseek-v4-pro", false],
+			["opencode-go/deepseek-v4-pro", true],
+		]);
+		const registry = makeRegistry([brokenModel, workingAlt], authMap);
+		expect(findAvailableAlternative(brokenModel, registry)).toBe(workingAlt);
+	});
+
+	test("returns undefined when no alternative is available", () => {
+		const authMap = new Map([["deepseek/deepseek-v4-pro", false]]);
+		const registry = makeRegistry([brokenModel], authMap);
+		expect(findAvailableAlternative(brokenModel, registry)).toBeUndefined();
+	});
+});
+
+// ── resolveModelSpec (precedence chain) ───────────────────────────────────
+
+describe("resolveModelSpec", () => {
+	const baseConfig: SpawnConfig = {
+		agent: { default: "config-default", coder: "config-coder" },
+		concurrency: { default: 3 },
+	};
+	const baseOverrides: SessionModelOverrides = {
+		default: "session-default",
+		coder: "session-coder",
+	};
+
+	test("task model takes highest precedence", () => {
+		const result = resolveModelSpec({
+			taskModel: "task-model",
+			agentType: "coder",
+			frontmatterModel: "frontmatter",
+			parentModelId: "parent",
+			config: baseConfig,
+			overrides: baseOverrides,
+		});
+		expect(result).toBe("task-model");
+	});
+
+	test("session per-type override is second precedence", () => {
+		const result = resolveModelSpec({
+			agentType: "coder",
+			frontmatterModel: "frontmatter",
+			parentModelId: "parent",
+			config: baseConfig,
+			overrides: baseOverrides,
+		});
+		expect(result).toBe("session-coder");
+	});
+
+	test("session default is third precedence", () => {
+		const result = resolveModelSpec({
+			agentType: "unknown-type",
+			frontmatterModel: "frontmatter",
+			parentModelId: "parent",
+			config: baseConfig,
+			overrides: baseOverrides,
+		});
+		expect(result).toBe("session-default");
+	});
+
+	test("config per-type is fourth precedence", () => {
+		const result = resolveModelSpec({
+			agentType: "coder",
+			frontmatterModel: "frontmatter",
+			parentModelId: "parent",
+			config: baseConfig,
+			overrides: { default: null },
+		});
+		expect(result).toBe("config-coder");
+	});
+
+	test("config default is fifth precedence", () => {
+		const result = resolveModelSpec({
+			agentType: "unknown-type",
+			frontmatterModel: "frontmatter",
+			parentModelId: "parent",
+			config: baseConfig,
+			overrides: { default: null },
+		});
+		expect(result).toBe("config-default");
+	});
+
+	test("frontmatter model is sixth precedence", () => {
+		const result = resolveModelSpec({
+			agentType: "unknown-type",
+			frontmatterModel: "frontmatter",
+			parentModelId: "parent",
+			config: { agent: { default: null }, concurrency: { default: 3 } },
+			overrides: { default: null },
+		});
+		expect(result).toBe("frontmatter");
+	});
+
+	test("parent model is final fallback", () => {
+		const result = resolveModelSpec({
+			agentType: "unknown-type",
+			parentModelId: "parent",
+			config: { agent: { default: null }, concurrency: { default: 3 } },
+			overrides: { default: null },
+		});
+		expect(result).toBe("parent");
+	});
+
+	test("returns undefined when all sources empty", () => {
+		const result = resolveModelSpec({
+			agentType: "unknown-type",
+			config: { agent: { default: null }, concurrency: { default: 3 } },
+			overrides: { default: null },
+		});
+		expect(result).toBeUndefined();
+	});
+
+	test("skips empty string overrides", () => {
+		const result = resolveModelSpec({
+			agentType: "coder",
+			parentModelId: "parent",
+			config: { agent: { default: "", coder: "" }, concurrency: { default: 3 } },
+			overrides: { default: "" },
+		});
+		expect(result).toBe("parent");
+	});
+});
+
+// ── Spawn Config I/O ─────────────────────────────────────────────────────
+
+// ── getConcurrencyLimit ──────────────────────────────────────────────────
+
+describe("getConcurrencyLimit", () => {
+	beforeEach(() => {
+		resetConcurrency();
+	});
+
+	test("returns default when no per-model or per-provider config", () => {
+		expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
+	});
+
+	test("per-model limit takes precedence", () => {
+		setConcurrencyModel("llamacpp/4b", 1);
+		expect(getConcurrencyLimit("llamacpp/4b")).toBe(1);
+		// Other models still get default
+		expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
+	});
+
+	test("per-provider limit is second precedence", () => {
+		setConcurrencyProvider("llamacpp", 2);
+		expect(getConcurrencyLimit("llamacpp/4b")).toBe(2);
+		expect(getConcurrencyLimit("llamacpp/7b")).toBe(2);
+		// Other providers still get default
+		expect(getConcurrencyLimit("anthropic/claude-sonnet-4")).toBe(3);
+	});
+
+	test("per-model overrides per-provider", () => {
+		setConcurrencyProvider("llamacpp", 2);
+		setConcurrencyModel("llamacpp/4b", 4);
+		expect(getConcurrencyLimit("llamacpp/4b")).toBe(4);
+		expect(getConcurrencyLimit("llamacpp/7b")).toBe(2);
+	});
+
+	test("removeConcurrencyModel restores provider/default", () => {
+		setConcurrencyProvider("llamacpp", 2);
+		setConcurrencyModel("llamacpp/4b", 4);
+		removeConcurrencyModel("llamacpp/4b");
+		expect(getConcurrencyLimit("llamacpp/4b")).toBe(2);
+	});
+
+	test("removeConcurrencyProvider restores default", () => {
+		setConcurrencyProvider("llamacpp", 2);
+		removeConcurrencyProvider("llamacpp");
+		expect(getConcurrencyLimit("llamacpp/4b")).toBe(3);
+	});
+
+	test("resetConcurrency restores all defaults", () => {
+		setConcurrencyModel("llamacpp/4b", 1);
+		setConcurrencyProvider("openai", 10);
+		setConcurrencyDefault(1);
+		resetConcurrency();
+		expect(getConcurrencyLimit("llamacpp/4b")).toBe(3);
+		expect(getConcurrencyLimit("openai/gpt-5")).toBe(3);
 	});
 });
 

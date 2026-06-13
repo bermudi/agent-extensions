@@ -194,6 +194,196 @@ const ASYNC_TICKET_TTL_MS = 30 * 60 * 1000;
 /** Hard timeout per async ticket. 30 minutes. */
 const ASYNC_MAX_RUNTIME_MS = 30 * 60 * 1000;
 
+// ── Spawn Config ─────────────────────────────────────────────────────────
+
+/** Shape of ~/.pi/agent/spawn.json — persisted config for spawn extension. */
+export interface SpawnConfig {
+  agent: {
+    /** Global default model for all agent types. */
+    default: string | null;
+    /** Per-agent-type model overrides. Keys are agent names or "default". */
+    [agentType: string]: string | null | undefined;
+  };
+  /** Per-model and per-provider concurrency limits. */
+  concurrency: {
+    /** Default concurrency limit for unspecified models. */
+    default: number;
+    /** Per-provider limits (e.g. "llamacpp": 2). */
+    providers?: Record<string, number>;
+    /** Per-model limits keyed by "provider/modelId". */
+    models?: Record<string, number>;
+  };
+  /** Hard ceiling on total concurrent agents across all models. */
+  maxConcurrent?: number;
+  /** Max concurrent async tickets. */
+  maxAsyncTickets?: number;
+}
+
+/** Session-only model overrides. Not persisted — cleared on session_start. */
+export interface SessionModelOverrides {
+  default: string | null;
+  [agentType: string]: string | null | undefined;
+}
+
+const SPAWN_CONFIG_DIR = path.join(os.homedir(), ".pi", "agent");
+const SPAWN_CONFIG_PATH = path.join(SPAWN_CONFIG_DIR, "spawn.json");
+
+const DEFAULT_SPAWN_CONFIG: SpawnConfig = {
+  agent: { default: null },
+  concurrency: { default: MAX_CONCURRENCY },
+  maxConcurrent: MAX_CONCURRENCY,
+};
+
+/** Module-level config singleton. Loaded lazily, mutated by setters. */
+let __spawnConfig: SpawnConfig = {
+  ...DEFAULT_SPAWN_CONFIG,
+  agent: { ...DEFAULT_SPAWN_CONFIG.agent },
+  concurrency: { ...DEFAULT_SPAWN_CONFIG.concurrency },
+};
+
+/** Session-only overrides. Cleared on session_start. */
+let sessionOverrides: SessionModelOverrides = { default: null };
+
+export function resetSessionOverrides(): void {
+  sessionOverrides = { default: null };
+}
+
+/** Read spawn config from disk. Returns defaults if file missing or corrupt. */
+export function loadSpawnConfig(): SpawnConfig {
+  try {
+    const raw = fs.readFileSync(SPAWN_CONFIG_PATH, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return structuredClone(DEFAULT_SPAWN_CONFIG);
+    // Merge with defaults so new fields are always present
+    return {
+      ...DEFAULT_SPAWN_CONFIG,
+      ...parsed,
+      agent: { ...DEFAULT_SPAWN_CONFIG.agent, ...(parsed.agent ?? {}) },
+      concurrency: { ...DEFAULT_SPAWN_CONFIG.concurrency, ...(parsed.concurrency ?? {}) },
+    } as SpawnConfig;
+  } catch {
+    return structuredClone(DEFAULT_SPAWN_CONFIG);
+  }
+}
+
+/** Write spawn config to disk with atomic rename. */
+export function saveSpawnConfigAtomic(config: SpawnConfig): void {
+  const tmpPath = SPAWN_CONFIG_PATH + ".tmp";
+  try {
+    fs.mkdirSync(SPAWN_CONFIG_DIR, { recursive: true });
+    fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), "utf-8");
+    fs.renameSync(tmpPath, SPAWN_CONFIG_PATH);
+  } catch (err) {
+    console.error(`[spawn] Failed to save config: ${err}`);
+  }
+}
+
+/** Initialize module config from disk. Called once at extension load. */
+function initSpawnConfig(): void {
+  __spawnConfig = loadSpawnConfig();
+}
+
+// Auto-init on module load
+initSpawnConfig();
+
+// ── Config Mutators ──────────────────────────────────────────────────────
+
+/** Set or update a model override for an agent type (or "default" for global). */
+export function setModelOverride(type: string, value: string | null): void {
+  __spawnConfig.agent[type] = value;
+  saveSpawnConfigAtomic(__spawnConfig);
+}
+
+/** Set the global default model. */
+export function setDefaultModel(value: string | null): void {
+  __spawnConfig.agent.default = value;
+  saveSpawnConfigAtomic(__spawnConfig);
+}
+
+/** Clear a single per-type model override. */
+export function clearModelOverride(type: string): void {
+  delete __spawnConfig.agent[type];
+  saveSpawnConfigAtomic(__spawnConfig);
+}
+
+/** Clear all model overrides, preserving non-model config. */
+export function clearAllModelOverrides(): void {
+  __spawnConfig.agent = { default: null };
+  saveSpawnConfigAtomic(__spawnConfig);
+}
+
+/** Set the global concurrency default. */
+export function setConcurrencyDefault(n: number): void {
+  __spawnConfig.concurrency.default = Math.max(1, n);
+  saveSpawnConfigAtomic(__spawnConfig);
+}
+
+/** Set or update a per-provider concurrency limit. */
+export function setConcurrencyProvider(key: string, n: number): void {
+  const current = __spawnConfig.concurrency.providers ?? {};
+  __spawnConfig.concurrency.providers = { ...current, [key]: Math.max(1, n) };
+  saveSpawnConfigAtomic(__spawnConfig);
+}
+
+/** Set or update a per-model concurrency limit. */
+export function setConcurrencyModel(key: string, n: number): void {
+  const current = __spawnConfig.concurrency.models ?? {};
+  __spawnConfig.concurrency.models = { ...current, [key]: Math.max(1, n) };
+  saveSpawnConfigAtomic(__spawnConfig);
+}
+
+/** Remove a per-provider concurrency limit. */
+export function removeConcurrencyProvider(key: string): void {
+  if (__spawnConfig.concurrency.providers) {
+    delete __spawnConfig.concurrency.providers[key];
+    saveSpawnConfigAtomic(__spawnConfig);
+  }
+}
+
+/** Remove a per-model concurrency limit. */
+export function removeConcurrencyModel(key: string): void {
+  if (__spawnConfig.concurrency.models) {
+    delete __spawnConfig.concurrency.models[key];
+    saveSpawnConfigAtomic(__spawnConfig);
+  }
+}
+
+/** Reset all concurrency settings to defaults. */
+export function resetConcurrency(): void {
+  __spawnConfig.concurrency = { ...DEFAULT_SPAWN_CONFIG.concurrency };
+  saveSpawnConfigAtomic(__spawnConfig);
+}
+
+/** Get the effective concurrency limit for a model key. */
+export function getConcurrencyLimit(modelKey: string): number {
+  // 1. Per-model
+  const perModel = __spawnConfig.concurrency.models?.[modelKey];
+  if (perModel != null) return perModel;
+  // 2. Per-provider
+  const provider = modelKey.split("/")[0];
+  const perProvider = __spawnConfig.concurrency.providers?.[provider];
+  if (perProvider != null) return perProvider;
+  // 3. Default
+  return __spawnConfig.concurrency.default;
+}
+
+/** Get the effective max async tickets limit. */
+export function getMaxAsyncTickets(): number {
+  return __spawnConfig.maxAsyncTickets ?? MAX_ASYNC_TICKETS;
+}
+
+/** Get the hard ceiling on total concurrent agents. */
+export function getMaxConcurrent(): number {
+  return __spawnConfig.maxConcurrent ?? MAX_CONCURRENCY;
+}
+
+/** Set the hard ceiling on total concurrent agents. */
+export function setMaxConcurrent(n: number): void {
+  __spawnConfig.maxConcurrent = Math.max(1, n);
+  saveSpawnConfigAtomic(__spawnConfig);
+}
+
 // ── Agent Pool ────────────────────────────────────────────────────────────
 
 interface PooledAgent {
@@ -266,6 +456,10 @@ export function closePooledAgent(sessionId: string): boolean {
 export function sweepPool(): void {
   const now = Date.now();
   for (const [id, pooled] of agentPool) {
+    // Skip sessions that are actively locked — closing them would abort the
+    // in-flight prompt. The wider session lock in runResolvedTask covers
+    // first-use, resume, and pool-hit runs, so any locked session has live work.
+    if (sessionLocks.has(id)) continue;
     if (now - pooled.lastUsed > POOL_TTL_MS) {
       closePooledAgent(id);
     }
@@ -918,6 +1112,10 @@ export function loadAgentsMdFiles(cwd: string): string[] {
 
 // ── Model Resolution ──────────────────────────────────────────────────────
 
+/**
+ * Resolve a model string spec against the registry.
+ * Returns undefined if the spec can't be found.
+ */
 export function resolveModel(
   spec: string | undefined,
   registry: ModelRegistry,
@@ -931,6 +1129,66 @@ export function resolveModel(
     return match ?? undefined;
   }
   return registry.find(spec.slice(0, idx), spec.slice(idx + 1)) ?? undefined;
+}
+
+/** Find an available model with the same id as the given model, preferring
+ *  a different provider if the original has no configured auth. */
+export function findAvailableAlternative(
+  model: Model<Api> | undefined,
+  registry: ModelRegistry,
+): Model<Api> | undefined {
+  if (!model) return undefined;
+  if (registry.hasConfiguredAuth(model)) return model;
+  // Look for another model with the same id that DOES have auth.
+  // Prefer a different provider (avoid returning the same broken model).
+  return registry.getAvailable().find(
+    (m) => m.id === model.id && m.provider !== model.provider,
+  );
+}
+
+/**
+ * Resolve the model spec string using the precedence chain.
+ * Returns the first non-null, non-empty string value.
+ *
+ * Precedence (highest to lowest):
+ *   1. taskModel        — per-task explicit override (from API call)
+ *   2. sessionOverrides[agentType]  — session per-type
+ *   3. sessionOverrides["default"]  — session global
+ *   4. config.agent[agentType]      — config per-type
+ *   5. config.agent["default"]     — config global
+ *   6. frontmatterModel            — agent .md frontmatter
+ *   7. parentModelId               — inherit from parent (final fallback)
+ */
+export function resolveModelSpec(options: {
+  taskModel?: string;
+  agentType: string;
+  frontmatterModel?: string;
+  parentModelId?: string;
+  config?: SpawnConfig;
+  overrides?: SessionModelOverrides;
+}): string | undefined {
+  const {
+    taskModel,
+    agentType,
+    frontmatterModel,
+    parentModelId,
+    config = __spawnConfig,
+    overrides = sessionOverrides,
+  } = options;
+
+  const candidates: Array<string | null | undefined> = [
+    taskModel,
+    overrides[agentType],
+    overrides["default"],
+    config.agent[agentType] as string | null | undefined,
+    config.agent["default"],
+    frontmatterModel,
+    parentModelId,
+  ];
+
+  return candidates.find(
+    (v): v is string => typeof v === "string" && v.length > 0,
+  );
 }
 
 // ── Settings Overrides ────────────────────────────────────────────────────
@@ -1140,13 +1398,86 @@ async function mapConcurrent<T, R>(
   let next = 0;
   const worker = async () => {
     while (true) {
-      if (signal?.aborted) return;
       const i = next++;
       if (i >= items.length) return;
+      // Deliberately do NOT check signal?.aborted here — the caller
+      // (runResolvedTask) handles abort at entry and returns a proper
+      // TaskResult. Early-returning here would leave results[i] as
+      // undefined, causing a crash in the sync result-dereference path.
       results[i] = await fn(items[i]!, i);
     }
   };
   await Promise.all(Array.from({ length: limit }, () => worker()));
+  return results;
+}
+
+/** Extract a model key string for concurrency grouping. Falls back to "_no_model" for actions without a model. */
+function getModelKey(model: Model<Api> | undefined): string {
+  // provider/id — e.g. "openrouter/deepseek/deepseek-v4-pro"
+  return model ? `${model.provider}/${model.id}` : "_no_model";
+}
+
+/**
+ * Like mapConcurrent but with per-model concurrency limits.
+ * Groups items by model key, runs each group with its own limit.
+ * All groups run in parallel (Promise.all across groups).
+ */
+async function mapConcurrentByModel<T, R>(
+  items: T[],
+  getModelKey: (item: T, index: number) => string,
+  getConcurrency: (modelKey: string) => number,
+  fn: (item: T, index: number) => Promise<R>,
+  signal?: AbortSignal,
+  maxTotal?: number,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const results: R[] = new Array(items.length);
+
+  // Group items by model key, preserving original indices
+  const groups = new Map<string, { indices: number[]; limit: number }>();
+  for (let i = 0; i < items.length; i++) {
+    const key = getModelKey(items[i]!, i);
+    let group = groups.get(key);
+    if (!group) {
+      group = { indices: [], limit: getConcurrency(key) };
+      groups.set(key, group);
+    }
+    group.indices.push(i);
+  }
+
+  // Global semaphore — caps total concurrent tasks across all model groups
+  let totalRunning = 0;
+  const totalWaiters: Array<() => void> = [];
+  const acquireTotal = async () => {
+    if (!maxTotal || totalRunning < maxTotal) { totalRunning++; return; }
+    await new Promise<void>((r) => totalWaiters.push(r));
+  };
+  const releaseTotal = () => {
+    totalRunning--;
+    if (totalWaiters.length > 0) { totalRunning++; totalWaiters.shift()!(); }
+  };
+
+  // Run all groups in parallel, each with its own concurrency limit + global cap
+  await Promise.all(
+    [...groups.entries()].map(([, group]) => {
+      const groupItems = group.indices.map((i) => items[i]!);
+      return mapConcurrent(
+        groupItems,
+        group.limit,
+        async (_item, localIdx) => {
+          await acquireTotal();
+          try {
+            const globalIdx = group.indices[localIdx]!;
+            results[globalIdx] = await fn(_item, globalIdx);
+            return results[globalIdx];
+          } finally {
+            releaseTotal();
+          }
+        },
+        signal,
+      );
+    }),
+  );
   return results;
 }
 
@@ -1384,11 +1715,10 @@ export async function runAgent(
     agent = createAgent(config, modelRegistry);
   }
 
-  // Track sessionManager — may be replaced on rehydration.
-  let currentSessionManager = sessionManager;
-
-  // Snapshot message count before first prompt — trim back to here on retry.
-  const initialMessageCount = agent.state.messages.length;
+  // Snapshot messages before any attempts — used to restore clean state on retry.
+  // The Agent's messages setter is a public API that copies the array, so this
+  // avoids poking at internals (unlike the old .length mutation approach).
+  const messagesSnapshot = [...agent.state.messages];
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal?.aborted) {
@@ -1410,23 +1740,9 @@ export async function runAgent(
         activities: [],
       });
 
+    // On retry, restore messages to pre-attempt state using the public setter.
     if (attempt > 0) {
-      if (existingAgent) {
-        existingAgent.state.messages.length = initialMessageCount;
-      } else if (currentSessionManager) {
-        const sessionFile = currentSessionManager.getSessionFile();
-        if (sessionFile) {
-          const rehydrated = rehydrateAgent(sessionFile, config, modelRegistry);
-          if (rehydrated) {
-            agent = rehydrated.agent;
-            currentSessionManager = rehydrated.sessionManager;
-          } else {
-            // Fallback: fresh agent.
-            agent = createAgent(config, modelRegistry);
-            currentSessionManager = sessionManager;
-          }
-        }
-      }
+      agent.state.messages = messagesSnapshot;
     }
 
     const messagesBeforeAttempt = agent.state.messages.length;
@@ -1437,7 +1753,7 @@ export async function runAgent(
       modelRegistry,
       signal,
       onProgress,
-      currentSessionManager,
+      sessionManager,
       gitBaseline,
       start,
       true,
@@ -1465,7 +1781,7 @@ export async function runAgent(
 
     // Flush pending messages only on success. Failed attempts (even the final
     // exhausted retry) should not pollute the session file.
-    if (currentSessionManager && !result.error) {
+    if (sessionManager && !result.error) {
       try {
         for (
           let mi = messagesBeforeAttempt;
@@ -1479,7 +1795,7 @@ export async function runAgent(
             msg.role === "toolResult" ||
             msg.role === "custom"
           ) {
-            currentSessionManager.appendMessage(msg);
+            sessionManager.appendMessage(msg);
           }
         }
       } catch {
@@ -1804,16 +2120,29 @@ async function acquireAgentSession(
     }
   }
 
-  // Pick the session — prefer resumed, then pool, then fresh.
-  const session = sessionManager
-    ? { manager: sessionManager, file: sessionFile }
-    : task.sessionId
-      ? { manager: undefined, file: undefined }
-      : createSubagentSessionManager(env.parentSessionManager, task.cwd);
+  // Fresh task (no sessionId, no resumeFrom) — create session + agent.
+  if (!agent) {
+    const fresh = createSubagentSessionManager(env.parentSessionManager, task.cwd);
+    sessionManager = fresh?.manager;
+    sessionFile = fresh?.file;
+    agent = createAgent(
+      {
+        systemPrompt: task.systemPrompt,
+        model: task.model,
+        thinking: task.thinking,
+        tools: task.tools,
+        cwd: task.cwd,
+      },
+      env.modelRegistry,
+    );
+  }
 
-  if (session?.manager && !isPoolHit && !task.resumeFrom) {
+  // At this point sessionManager/sessionFile are set for all paths except
+  // pool-miss-with-resumeFrom (which defers session creation). The agent
+  // is guaranteed to exist. Label new sessions.
+  if (sessionManager && !isPoolHit && !task.resumeFrom) {
     const label = `⎇ spawn · ${task.agentName}`;
-    session.manager.appendSessionInfo(label);
+    sessionManager.appendSessionInfo(label);
   }
 
   if (!agent) {
@@ -1823,8 +2152,8 @@ async function acquireAgentSession(
 
   return {
     agent,
-    sessionManager: session?.manager,
-    sessionFile: session?.file,
+    sessionManager,
+    sessionFile,
     isPoolHit,
     shouldPoolAfter,
     syncInserted,
@@ -1882,8 +2211,25 @@ export function commitPoolCleanup(sessionId: string, acquiredAgent: Agent): void
 }
 
 /** Run a single resolved task. Single source of truth for the per-task lifecycle.
- *  Used by both sync (params.async === false) and async (params.async === true) paths. */
+ *  Used by both sync (params.async === false) and async (params.async === true) paths.
+ *  When task.sessionId is set, the entire acquire/run/close lifecycle runs under
+ *  a per-session mutex so concurrent tasks with the same sessionId serialize
+ *  cleanly. The lock also covers action='close' and the early-busy/abort paths. */
 async function runResolvedTask(
+  env: TaskRunEnv,
+  task: ResolvedTask,
+  p: TaskProgress,
+  taskIndex: number,
+): Promise<TaskResult> {
+  if (task.sessionId) {
+    return withSessionLock(task.sessionId, () =>
+      runResolvedTaskUnlocked(env, task, p, taskIndex),
+    );
+  }
+  return runResolvedTaskUnlocked(env, task, p, taskIndex);
+}
+
+async function runResolvedTaskUnlocked(
   env: TaskRunEnv,
   task: ResolvedTask,
   p: TaskProgress,
@@ -2008,9 +2354,10 @@ async function runResolvedTask(
       }
     };
 
-    const result = acquired.isPoolHit && task.sessionId
-      ? await withSessionLock(task.sessionId, doRun)
-      : await doRun();
+    // The session lock is now taken at the top of runResolvedTask (covers the
+    // full acquire/run/close lifecycle), so doRun executes serially per sessionId
+    // without needing an inner lock here.
+    const result = await doRun();
     return finishTask(env, p, result);
   } catch (err) {
     // If we synchronously claimed a sessionId before the error, clean it up.
@@ -2868,24 +3215,29 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           if (t.sessionId && agentPool.has(t.sessionId)) {
             model = agentPool.get(t.sessionId)!.config.model;
           } else {
-            const explicitModelSpec =
-              t.model ?? agentOverride?.model ?? agent?.model;
-            const modelSpec = explicitModelSpec ?? pooledConfig?.model?.id;
+            // Use precedence chain: task > session > config > frontmatter > parent
+            const agentType = t.agent ?? "inline";
+            const modelSpec = resolveModelSpec({
+              taskModel: t.model ?? agentOverride?.model,
+              agentType,
+              frontmatterModel: agent?.model,
+              parentModelId: ctx.model?.id,
+            });
             const resolvedModel = resolveModel(
-              modelSpec,
+              modelSpec ?? pooledConfig?.model?.id,
               ctx.modelRegistry,
               ctx.model,
             );
 
-            if (explicitModelSpec && !resolvedModel) {
-              // Caller explicitly requested a specific model that couldn't be resolved.
-              // Fail loudly — silent fallback defeats the purpose of specifying a model.
+            // If the task or settings explicitly set a model but it couldn't resolve, fail loudly
+            const explicitRequest = t.model ?? agentOverride?.model;
+            if (explicitRequest && !resolvedModel) {
               throw new Error(
-                `Task ${i}: requested model '${explicitModelSpec}' is not available. Check provider config or remove the model field to use the parent model.`,
+                `Task ${i}: requested model '${explicitRequest}' is not available. Check provider config or remove the model field to use the parent model.`,
               );
             }
 
-            model = resolvedModel ?? ctx.model;
+            model = resolvedModel ?? findAvailableAlternative(ctx.model, ctx.modelRegistry) ?? ctx.model;
           }
 
           if (!model) {
@@ -2894,9 +3246,17 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             );
           }
 
-          // Resolve tools — warn about unknown tool names
+          // Resolve tools — warn about unknown tool names.
+          // For active pooled sessions, fall back to the frozen pooled config so
+          // "continue with only sessionId" works without re-supplying tools.
+          // Explicit overrides that don't match get rejected by acquireAgentSession.
+          const isPoolHit = t.sessionId ? agentPool.has(t.sessionId) : false;
           tools = expandToolsStar(
-            t.tools ?? agentOverride?.tools ?? agent?.tools ?? DEFAULT_TOOLS,
+            t.tools ??
+              agentOverride?.tools ??
+              agent?.tools ??
+              (isPoolHit ? pooledConfig?.tools : undefined) ??
+              DEFAULT_TOOLS,
           );
           const unknownTools = tools.filter(
             (name) => !(name in TOOL_FACTORIES),
@@ -2907,9 +3267,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             );
           }
 
-          // Resolve thinking — agentOverride, agent file, then 'off'
+          // Resolve thinking — for active pooled sessions, default from the
+          // frozen pooled config (same reasoning as tools above).
           const thinkingRaw =
-            t.thinking ?? agentOverride?.thinking ?? agent?.thinking ?? "off";
+            t.thinking ??
+            agentOverride?.thinking ??
+            agent?.thinking ??
+            (isPoolHit ? pooledConfig?.thinking : undefined) ??
+            "off";
           thinking = VALID_THINKING.has(thinkingRaw)
             ? (thinkingRaw as ThinkingLevel)
             : "off";
@@ -2963,12 +3328,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const runningCount = [...ticketRegistry.values()].filter(
           (t) => t.status === "running",
         ).length;
-        if (runningCount >= MAX_ASYNC_TICKETS) {
+        if (runningCount >= getMaxAsyncTickets()) {
           return {
             content: [
               {
                 type: "text",
-                text: `Too many async tickets running (${runningCount}/${MAX_ASYNC_TICKETS}). Poll existing tickets or cancel one first.`,
+                text: `Too many async tickets running (${runningCount}/${getMaxAsyncTickets()}). Poll existing tickets or cancel one first.`,
               },
             ],
             details: {
@@ -3011,28 +3376,41 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           },
         };
 
-        // Fire and forget — runs on the event loop
-        mapConcurrent(
+        // Fire and forget — runs on the event loop.
+        // Worker must store the TaskResult back into ticket.results, since
+        // formatCompletedTicket/handlePoll read from there. Without the write,
+        // completed async tasks would be reported as PENDING.
+        mapConcurrentByModel(
           resolved,
-          MAX_CONCURRENCY,
-          async (t, i) => runResolvedTask(asyncEnv, t, ticket.progress[i]!, i),
+          (t) => getModelKey(t.model),
+          getConcurrencyLimit,
+          async (t, i) => {
+            const result = await runResolvedTask(
+              asyncEnv,
+              t,
+              ticket.progress[i]!,
+              i,
+            );
+            ticket.results[i] = result;
+            return result;
+          },
           ticketSignal,
+          getMaxConcurrent(),
         )
           .then(() => {
-            // All tasks settled — determine final ticket status
+            // All tasks settled — determine final ticket status.
+            // Use progress (set by runResolvedTask) for settled-ness so the
+            // status reflects work completion, not just result-array density.
             const anyFailed = ticket.results.some(
               (r) => r && "error" in r && r.error,
             );
-            const allSettled = ticket.results.every((r) => r !== undefined);
+            const allSettled = ticket.progress.every(
+              (p) => p.status === "done" || p.status === "failed",
+            );
             if (ticket.status === "running") {
-              ticket.status =
-                allSettled && !anyFailed
-                  ? "done"
-                  : anyFailed && !ticket.results.some((r) => r && !r.error)
-                    ? "failed"
-                    : anyFailed
-                      ? "failed"
-                      : "done";
+              if (allSettled && anyFailed) ticket.status = "failed";
+              else if (allSettled) ticket.status = "done";
+              else ticket.status = "done"; // partial — report what we have
               ticket.completedAt = Date.now();
             }
             deliverTicketResults(pi, ticket);
@@ -3051,7 +3429,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               type: "text",
               text: [
                 `Async ticket: ${ticketId}`,
-                `${resolved.length} task(s) dispatched · ${runningCount + 1}/${MAX_ASYNC_TICKETS} async slots in use`,
+                `${resolved.length} task(s) dispatched · ${runningCount + 1}/${getMaxAsyncTickets()} async slots in use`,
                 "",
                 "Completed task results are available via poll. Final results delivered automatically when all tasks complete.",
                 `Check progress: spawn({ action: "poll", ticket: "${ticketId}" }) — avoid polling in a tight loop`,
@@ -3086,11 +3464,13 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         onStatusChange: () => fire(),
       };
 
-      const results = await mapConcurrent(
+      const results = await mapConcurrentByModel(
         resolved,
-        MAX_CONCURRENCY,
+        (t) => getModelKey(t.model),
+        getConcurrencyLimit,
         async (t, i) => runResolvedTask(syncEnv, t, progress[i]!, i),
         signal,
+        getMaxConcurrent(),
       );
 
       // ── Format for LLM ────────────────────────────────────────────
