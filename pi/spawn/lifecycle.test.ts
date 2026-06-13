@@ -14,9 +14,10 @@
 
 import { describe, expect, test, mock, afterEach, beforeEach } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { createAssistantMessageEventStream } from "@mariozechner/pi-ai";
 import { createTestSession } from "@marcfargas/pi-test-harness";
-import { resolve } from "node:path";
 // NOTE: The test harness loads the extension via jiti, creating a separate module
 // instance. The imported `agentPool` and `ticketRegistry` are the TEST MODULE's
 // copies, NOT the extension's. To observe the extension's internal state, we must
@@ -25,7 +26,7 @@ import { resolve } from "node:path";
 // to avoid leaking between test file runs).
 import { agentPool, ticketRegistry } from "./spawn.ts";
 
-const EXTENSION = resolve(import.meta.dirname, "./spawn.ts");
+const EXTENSION = path.resolve(import.meta.dirname, "./spawn.ts");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -135,6 +136,53 @@ describe("spawn task lifecycle integration", () => {
 		expect(details.results[0]?.output).toContain("completed the task successfully");
 		expect(details.results[0]?.tokens).toBeGreaterThan(0);
 		expect(details.results[0]?.agent).toBe("inline");
+	});
+
+	test("inline prompt does not inherit parent tool prompt or duplicate AGENTS.md", async () => {
+		const projectInstruction = "SPAWN_PROMPT_HYGIENE_PROJECT_CONTEXT";
+		let capturedSystemPrompt = "";
+		mock.module("@mariozechner/pi-ai", (orig) => ({
+			...orig,
+			streamSimple: (_model: unknown, context: { systemPrompt?: string }) => {
+				capturedSystemPrompt = context.systemPrompt ?? "";
+				return mockStream("Prompt captured.");
+			},
+		}));
+
+		ts = await createTestSession({ extensions: [EXTENSION] });
+		patchAuth(ts);
+
+		const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-prompt-"));
+		try {
+			fs.writeFileSync(path.join(taskCwd, "AGENTS.md"), projectInstruction, "utf-8");
+
+			const toolDef = getSpawnTool(ts);
+			const ctx = getExecContext(ts);
+			(ctx as any).getSystemPrompt = () => [
+				"PARENT_EFFECTIVE_PROMPT_SHOULD_NOT_LEAK",
+				"- spawn: verbose parent tool docs",
+				projectInstruction,
+			].join("\n");
+
+			const result = await toolDef.execute(
+				"tc-prompt-hygiene",
+				{ tasks: [{ prompt: "do work", cwd: taskCwd }] },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+			const details = (result as any).details as {
+				results: Array<{ error?: string }>;
+			};
+			expect(details.results[0]?.error).toBeUndefined();
+			expect(capturedSystemPrompt).toContain("You are a helpful coding assistant.");
+			expect(capturedSystemPrompt).not.toContain("PARENT_EFFECTIVE_PROMPT_SHOULD_NOT_LEAK");
+			expect(capturedSystemPrompt).not.toContain("verbose parent tool docs");
+			expect(capturedSystemPrompt.split(projectInstruction).length - 1).toBe(1);
+		} finally {
+			fs.rmSync(taskCwd, { recursive: true, force: true });
+		}
 	});
 
 	test("fresh task with systemPrompt override", async () => {
@@ -554,7 +602,7 @@ describe("spawn task lifecycle integration", () => {
 		patchAuth(ts);
 
 		// Create a minimal session file with a prior conversation.
-		const sessionFile = resolve(ts.cwd, "resume-test.jsonl");
+		const sessionFile = path.resolve(ts.cwd, "resume-test.jsonl");
 		const sessionId = "019ebcfc-0000-7000-8000-000000000001";
 		const lines = [
 			JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: ts.cwd }),
@@ -947,7 +995,7 @@ describe("spawn pool-miss with resumeFrom and sessionId", () => {
 		installStreamMock("Resumed and pooled.");
 
 		const tmpDir = fs.mkdtempSync("/tmp/spawn-pool-resume-");
-		const sessionFile = resolve(tmpDir, "pool-resume.jsonl");
+		const sessionFile = path.resolve(tmpDir, "pool-resume.jsonl");
 		const lines = [
 			JSON.stringify({ type: "session", version: 3, id: "pool-resume-session", timestamp: new Date().toISOString(), cwd: tmpDir }),
 			JSON.stringify({ type: "message", id: "msg-1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: [{ type: "text", text: "Original task" }], timestamp: Date.now() } }),

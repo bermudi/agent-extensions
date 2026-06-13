@@ -1110,6 +1110,49 @@ export function loadAgentsMdFiles(cwd: string): string[] {
   return files.sort((a, b) => a.priority - b.priority).map((f) => f.content);
 }
 
+// ── Subagent Prompt Assembly ──────────────────────────────────────────────
+
+const DEFAULT_SUBAGENT_SYSTEM_PROMPT = "You are a helpful coding assistant.";
+
+function firstNonBlank(...values: Array<string | undefined>): string | undefined {
+  return values.find((v): v is string => typeof v === "string" && v.trim().length > 0);
+}
+
+function appendPromptSections(systemPrompt: string, sections: string[]): string {
+  let result = systemPrompt.trimEnd();
+  for (const section of sections) {
+    const body = section.trim();
+    if (!body) continue;
+    result = result ? `${result}\n\n${body}` : body;
+  }
+  return result || DEFAULT_SUBAGENT_SYSTEM_PROMPT;
+}
+
+function buildSubagentSystemPrompt(options: {
+  taskSystemPrompt?: string;
+  agentSystemPrompt?: string;
+  pooledSystemPrompt?: string;
+  skillBodies: string[];
+  agentsMdFiles: string[];
+}): string {
+  // Pooled agents already have a frozen prompt baked into their Agent state.
+  // Return it unchanged so repeated sessionId calls do not re-append skills or
+  // AGENTS.md content in resolved task metadata.
+  if (options.pooledSystemPrompt?.trim()) return options.pooledSystemPrompt;
+
+  const base =
+    firstNonBlank(options.taskSystemPrompt, options.agentSystemPrompt) ??
+    DEFAULT_SUBAGENT_SYSTEM_PROMPT;
+  const agentsMdContext = options.agentsMdFiles.length
+    ? options.agentsMdFiles.join("\n\n")
+    : undefined;
+
+  return appendPromptSections(base, [
+    ...options.skillBodies,
+    agentsMdContext ?? "",
+  ]);
+}
+
 // ── Model Resolution ──────────────────────────────────────────────────────
 
 /**
@@ -3056,21 +3099,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             ? settings.agentOverrides[t.agent]
             : undefined;
 
-        // Build system prompt (pooled agents already have one baked in)
+        // Build system prompt without inheriting the parent's full effective
+        // prompt. The parent prompt contains the parent tool catalogue,
+        // promptGuidelines, and project context; subagents get their own lean
+        // base prompt plus explicit skills/AGENTS.md injection below.
         const pooledConfig = t.sessionId
           ? agentPool.get(t.sessionId)?.config
           : undefined;
-        let systemPrompt =
-          t.systemPrompt ??
-          agent?.systemPrompt ??
-          pooledConfig?.systemPrompt ??
-          "";
-        if (!systemPrompt.trim()) {
-          systemPrompt =
-            (typeof ctx.getSystemPrompt === "function"
-              ? ctx.getSystemPrompt()
-              : "") || "You are a helpful coding assistant.";
-        }
+        const usingPooledPrompt = Boolean(pooledConfig?.systemPrompt.trim());
 
         // Prompt is required for fresh tasks. ResumeFrom provides context already.
         if (
@@ -3088,21 +3124,22 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         const skillNames =
           t.skills ?? agentOverride?.skills ?? agent?.skills ?? [];
         const skillBodies: string[] = [];
-        for (const name of skillNames) {
-          const content = loadSkill(name, cwd);
-          if (content) skillBodies.push(content);
-        }
-        if (skillBodies.length) {
-          systemPrompt =
-            systemPrompt.trimEnd() + "\n\n" + skillBodies.join("\n\n");
+        if (!usingPooledPrompt) {
+          for (const name of skillNames) {
+            const content = loadSkill(name, cwd);
+            if (content) skillBodies.push(content);
+          }
         }
 
         // Inject AGENTS.md context files (global + cwd ancestors)
-        const agentsMdFiles = loadAgentsMdFiles(cwd);
-        if (agentsMdFiles.length) {
-          systemPrompt =
-            systemPrompt.trimEnd() + "\n\n" + agentsMdFiles.join("\n\n");
-        }
+        const agentsMdFiles = usingPooledPrompt ? [] : loadAgentsMdFiles(cwd);
+        const systemPrompt = buildSubagentSystemPrompt({
+          taskSystemPrompt: t.systemPrompt,
+          agentSystemPrompt: agent?.systemPrompt,
+          pooledSystemPrompt: pooledConfig?.systemPrompt,
+          skillBodies,
+          agentsMdFiles,
+        });
 
         // Build prompt — wrap with parent context if using with-parent-transcript
         let prompt =
