@@ -7,7 +7,7 @@
     "test:extensions": "bun run test:arena && bun run test:pi-debate && bun run test:delegate && bun run test:supervise && bun run test:roundtable && bun run test:trim-context",
     "test:arena": "bun test pi/arena",
     "test:pi-debate": "bun test pi/pi-debate",
-    "test:delegate": "bun test pi/spawn",
+    "test:delegate": "bun test pi/delegate",
     "test:supervise": "bun test pi/supervise",
     "test:roundtable": "bun test pi/roundtable",
     "test:trim-context": "bun test pi/trim-context",

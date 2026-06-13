@@ -1,5 +1,5 @@
 /**
- * spawn — In-process subagent delegation for pi.
+ * delegate — In-process subagent delegation for pi.
  *
  * Borrows apple-pi's architecture (pi-agent-core Agent class, Promise.all
  * parallelism) with per-task overrides for model, skills, tools, thinking
@@ -194,10 +194,10 @@ const ASYNC_TICKET_TTL_MS = 30 * 60 * 1000;
 /** Hard timeout per async ticket. 30 minutes. */
 const ASYNC_MAX_RUNTIME_MS = 30 * 60 * 1000;
 
-// ── Spawn Config ─────────────────────────────────────────────────────────
+// ── Delegate Config ──────────────────────────────────────────────────────
 
-/** Shape of ~/.pi/agent/spawn.json — persisted config for spawn extension. */
-export interface SpawnConfig {
+/** Shape of ~/.pi/agent/delegate.json — persisted config for delegate extension. */
+export interface DelegateConfig {
   agent: {
     /** Global default model for all agent types. */
     default: string | null;
@@ -225,20 +225,20 @@ export interface SessionModelOverrides {
   [agentType: string]: string | null | undefined;
 }
 
-const SPAWN_CONFIG_DIR = path.join(os.homedir(), ".pi", "agent");
-const SPAWN_CONFIG_PATH = path.join(SPAWN_CONFIG_DIR, "spawn.json");
+const DELEGATE_CONFIG_DIR = path.join(os.homedir(), ".pi", "agent");
+const DELEGATE_CONFIG_PATH = path.join(DELEGATE_CONFIG_DIR, "delegate.json");
 
-const DEFAULT_SPAWN_CONFIG: SpawnConfig = {
+const DEFAULT_DELEGATE_CONFIG: DelegateConfig = {
   agent: { default: null },
   concurrency: { default: MAX_CONCURRENCY },
   maxConcurrent: MAX_CONCURRENCY,
 };
 
 /** Module-level config singleton. Loaded lazily, mutated by setters. */
-let __spawnConfig: SpawnConfig = {
-  ...DEFAULT_SPAWN_CONFIG,
-  agent: { ...DEFAULT_SPAWN_CONFIG.agent },
-  concurrency: { ...DEFAULT_SPAWN_CONFIG.concurrency },
+let __delegateConfig: DelegateConfig = {
+  ...DEFAULT_DELEGATE_CONFIG,
+  agent: { ...DEFAULT_DELEGATE_CONFIG.agent },
+  concurrency: { ...DEFAULT_DELEGATE_CONFIG.concurrency },
 };
 
 /** Session-only overrides. Cleared on session_start. */
@@ -248,140 +248,140 @@ export function resetSessionOverrides(): void {
   sessionOverrides = { default: null };
 }
 
-/** Read spawn config from disk. Returns defaults if file missing or corrupt. */
-export function loadSpawnConfig(): SpawnConfig {
+/** Read delegate config from disk. Returns defaults if file missing or corrupt. */
+export function loadDelegateConfig(): DelegateConfig {
   try {
-    const raw = fs.readFileSync(SPAWN_CONFIG_PATH, "utf-8");
+    const raw = fs.readFileSync(DELEGATE_CONFIG_PATH, "utf-8");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      return structuredClone(DEFAULT_SPAWN_CONFIG);
+      return structuredClone(DEFAULT_DELEGATE_CONFIG);
     // Merge with defaults so new fields are always present
     return {
-      ...DEFAULT_SPAWN_CONFIG,
+      ...DEFAULT_DELEGATE_CONFIG,
       ...parsed,
-      agent: { ...DEFAULT_SPAWN_CONFIG.agent, ...(parsed.agent ?? {}) },
-      concurrency: { ...DEFAULT_SPAWN_CONFIG.concurrency, ...(parsed.concurrency ?? {}) },
-    } as SpawnConfig;
+      agent: { ...DEFAULT_DELEGATE_CONFIG.agent, ...(parsed.agent ?? {}) },
+      concurrency: { ...DEFAULT_DELEGATE_CONFIG.concurrency, ...(parsed.concurrency ?? {}) },
+    } as DelegateConfig;
   } catch {
-    return structuredClone(DEFAULT_SPAWN_CONFIG);
+    return structuredClone(DEFAULT_DELEGATE_CONFIG);
   }
 }
 
-/** Write spawn config to disk with atomic rename. */
-export function saveSpawnConfigAtomic(config: SpawnConfig): void {
-  const tmpPath = SPAWN_CONFIG_PATH + ".tmp";
+/** Write delegate config to disk with atomic rename. */
+export function saveDelegateConfigAtomic(config: DelegateConfig): void {
+  const tmpPath = DELEGATE_CONFIG_PATH + ".tmp";
   try {
-    fs.mkdirSync(SPAWN_CONFIG_DIR, { recursive: true });
+    fs.mkdirSync(DELEGATE_CONFIG_DIR, { recursive: true });
     fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2), "utf-8");
-    fs.renameSync(tmpPath, SPAWN_CONFIG_PATH);
+    fs.renameSync(tmpPath, DELEGATE_CONFIG_PATH);
   } catch (err) {
-    console.error(`[spawn] Failed to save config: ${err}`);
+    console.error(`[delegate] Failed to save config: ${err}`);
   }
 }
 
 /** Initialize module config from disk. Called once at extension load. */
-function initSpawnConfig(): void {
-  __spawnConfig = loadSpawnConfig();
+function initDelegateConfig(): void {
+  __delegateConfig = loadDelegateConfig();
 }
 
 // Auto-init on module load
-initSpawnConfig();
+initDelegateConfig();
 
 // ── Config Mutators ──────────────────────────────────────────────────────
 
 /** Set or update a model override for an agent type (or "default" for global). */
 export function setModelOverride(type: string, value: string | null): void {
-  __spawnConfig.agent[type] = value;
-  saveSpawnConfigAtomic(__spawnConfig);
+  __delegateConfig.agent[type] = value;
+  saveDelegateConfigAtomic(__delegateConfig);
 }
 
 /** Set the global default model. */
 export function setDefaultModel(value: string | null): void {
-  __spawnConfig.agent.default = value;
-  saveSpawnConfigAtomic(__spawnConfig);
+  __delegateConfig.agent.default = value;
+  saveDelegateConfigAtomic(__delegateConfig);
 }
 
 /** Clear a single per-type model override. */
 export function clearModelOverride(type: string): void {
-  delete __spawnConfig.agent[type];
-  saveSpawnConfigAtomic(__spawnConfig);
+  delete __delegateConfig.agent[type];
+  saveDelegateConfigAtomic(__delegateConfig);
 }
 
 /** Clear all model overrides, preserving non-model config. */
 export function clearAllModelOverrides(): void {
-  __spawnConfig.agent = { default: null };
-  saveSpawnConfigAtomic(__spawnConfig);
+  __delegateConfig.agent = { default: null };
+  saveDelegateConfigAtomic(__delegateConfig);
 }
 
 /** Set the global concurrency default. */
 export function setConcurrencyDefault(n: number): void {
-  __spawnConfig.concurrency.default = Math.max(1, n);
-  saveSpawnConfigAtomic(__spawnConfig);
+  __delegateConfig.concurrency.default = Math.max(1, n);
+  saveDelegateConfigAtomic(__delegateConfig);
 }
 
 /** Set or update a per-provider concurrency limit. */
 export function setConcurrencyProvider(key: string, n: number): void {
-  const current = __spawnConfig.concurrency.providers ?? {};
-  __spawnConfig.concurrency.providers = { ...current, [key]: Math.max(1, n) };
-  saveSpawnConfigAtomic(__spawnConfig);
+  const current = __delegateConfig.concurrency.providers ?? {};
+  __delegateConfig.concurrency.providers = { ...current, [key]: Math.max(1, n) };
+  saveDelegateConfigAtomic(__delegateConfig);
 }
 
 /** Set or update a per-model concurrency limit. */
 export function setConcurrencyModel(key: string, n: number): void {
-  const current = __spawnConfig.concurrency.models ?? {};
-  __spawnConfig.concurrency.models = { ...current, [key]: Math.max(1, n) };
-  saveSpawnConfigAtomic(__spawnConfig);
+  const current = __delegateConfig.concurrency.models ?? {};
+  __delegateConfig.concurrency.models = { ...current, [key]: Math.max(1, n) };
+  saveDelegateConfigAtomic(__delegateConfig);
 }
 
 /** Remove a per-provider concurrency limit. */
 export function removeConcurrencyProvider(key: string): void {
-  if (__spawnConfig.concurrency.providers) {
-    delete __spawnConfig.concurrency.providers[key];
-    saveSpawnConfigAtomic(__spawnConfig);
+  if (__delegateConfig.concurrency.providers) {
+    delete __delegateConfig.concurrency.providers[key];
+    saveDelegateConfigAtomic(__delegateConfig);
   }
 }
 
 /** Remove a per-model concurrency limit. */
 export function removeConcurrencyModel(key: string): void {
-  if (__spawnConfig.concurrency.models) {
-    delete __spawnConfig.concurrency.models[key];
-    saveSpawnConfigAtomic(__spawnConfig);
+  if (__delegateConfig.concurrency.models) {
+    delete __delegateConfig.concurrency.models[key];
+    saveDelegateConfigAtomic(__delegateConfig);
   }
 }
 
 /** Reset all concurrency settings to defaults. */
 export function resetConcurrency(): void {
-  __spawnConfig.concurrency = { ...DEFAULT_SPAWN_CONFIG.concurrency };
-  saveSpawnConfigAtomic(__spawnConfig);
+  __delegateConfig.concurrency = { ...DEFAULT_DELEGATE_CONFIG.concurrency };
+  saveDelegateConfigAtomic(__delegateConfig);
 }
 
 /** Get the effective concurrency limit for a model key. */
 export function getConcurrencyLimit(modelKey: string): number {
   // 1. Per-model
-  const perModel = __spawnConfig.concurrency.models?.[modelKey];
+  const perModel = __delegateConfig.concurrency.models?.[modelKey];
   if (perModel != null) return perModel;
   // 2. Per-provider
   const provider = modelKey.split("/")[0];
-  const perProvider = __spawnConfig.concurrency.providers?.[provider];
+  const perProvider = __delegateConfig.concurrency.providers?.[provider];
   if (perProvider != null) return perProvider;
   // 3. Default
-  return __spawnConfig.concurrency.default;
+  return __delegateConfig.concurrency.default;
 }
 
 /** Get the effective max async tickets limit. */
 export function getMaxAsyncTickets(): number {
-  return __spawnConfig.maxAsyncTickets ?? MAX_ASYNC_TICKETS;
+  return __delegateConfig.maxAsyncTickets ?? MAX_ASYNC_TICKETS;
 }
 
 /** Get the hard ceiling on total concurrent agents. */
 export function getMaxConcurrent(): number {
-  return __spawnConfig.maxConcurrent ?? MAX_CONCURRENCY;
+  return __delegateConfig.maxConcurrent ?? MAX_CONCURRENCY;
 }
 
 /** Set the hard ceiling on total concurrent agents. */
 export function setMaxConcurrent(n: number): void {
-  __spawnConfig.maxConcurrent = Math.max(1, n);
-  saveSpawnConfigAtomic(__spawnConfig);
+  __delegateConfig.maxConcurrent = Math.max(1, n);
+  saveDelegateConfigAtomic(__delegateConfig);
 }
 
 // ── Agent Pool ────────────────────────────────────────────────────────────
@@ -562,7 +562,7 @@ function formatCompletedTicket(
       if (r.sessionFile && fs.existsSync(r.sessionFile)) {
         const safePath = JSON.stringify(r.sessionFile);
         parts.push(
-          `→ To retry: spawn({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
+          `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
         );
       }
     } else {
@@ -1207,7 +1207,7 @@ export function resolveModelSpec(options: {
   agentType: string;
   frontmatterModel?: string;
   parentModelId?: string;
-  config?: SpawnConfig;
+  config?: DelegateConfig;
   overrides?: SessionModelOverrides;
 }): string | undefined {
   const {
@@ -1215,7 +1215,7 @@ export function resolveModelSpec(options: {
     agentType,
     frontmatterModel,
     parentModelId,
-    config = __spawnConfig,
+    config = __delegateConfig,
     overrides = sessionOverrides,
   } = options;
 
@@ -1909,7 +1909,7 @@ function failTask(
 }
 
 /** Build a successful TaskResult for session-management actions (close/list).
- *  Pass elapsedMs to record wall time since spawn started (matches the live progress UI). */
+ *  Pass elapsedMs to record wall time since delegate started (matches the live progress UI). */
 function completeSessionAction(
   task: ResolvedTask,
   output: string,
@@ -1967,8 +1967,8 @@ interface TaskRunEnv {
   parentSessionManager: { getSessionFile?(): string | undefined } | undefined;
   /** Ticket id for busy-guard self-checks. undefined for sync. */
   ticketId?: string;
-  /** When the spawn started. Used for close/list progress (elapsed time). */
-  spawnStartedAt: number;
+  /** When the delegate started. Used for close/list progress (elapsed time). */
+  delegateStartedAt: number;
   /** Called for every progress update from runAgent. */
   onProgress: (p: TaskProgress, u: AgentProgressUpdate) => void;
   /** Called after every TaskProgress mutation (early-returns, completion). Sync uses this to fire onUpdate. */
@@ -2184,7 +2184,7 @@ async function acquireAgentSession(
   // pool-miss-with-resumeFrom (which defers session creation). The agent
   // is guaranteed to exist. Label new sessions.
   if (sessionManager && !isPoolHit && !task.resumeFrom) {
-    const label = `⎇ spawn · ${task.agentName}`;
+    const label = `⎇ delegate · ${task.agentName}`;
     sessionManager.appendSessionInfo(label);
   }
 
@@ -2312,7 +2312,7 @@ async function runResolvedTaskUnlocked(
           closed
             ? `Session '${task.sessionId}' closed.`
             : `Session '${task.sessionId}' not found.`,
-          Date.now() - env.spawnStartedAt,
+          Date.now() - env.delegateStartedAt,
         ),
       );
     }
@@ -2324,7 +2324,7 @@ async function runResolvedTaskUnlocked(
         completeSessionAction(
           task,
           `Active sessions:\n${listPooledAgents().join("\n")}`,
-          Date.now() - env.spawnStartedAt,
+          Date.now() - env.delegateStartedAt,
         ),
       );
     }
@@ -2799,7 +2799,7 @@ export function handleCancel(params: {
 
 // ── Extracted schema constant ───────────────────────────────────────────
 // Avoids inline `this` context issues and lets TypeScript infer params safely.
-const spawnParameters = Type.Object({
+const delegateParameters = Type.Object({
   action: Type.Optional(
     Type.String({
       enum: ["poll", "cancel"],
@@ -2867,9 +2867,9 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     : "_(none defined)_";
 
   return [
-    "# Spawn Tool Manual",
+    "# Delegate Tool Manual",
     "",
-    "Spawn subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, skills, and thinking level.",
+    "Delegate subagents to execute tasks in parallel. Each subagent gets an independent context, system prompt, model, tools, skills, and thinking level.",
     "",
     "## Available Agents",
     "",
@@ -2925,7 +2925,7 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "## Resuming Previous Sessions",
     "",
     "Use `resumeFrom` to continue a failed or interrupted subagent from where it left off.",
-    "Pass the absolute path to the session `.jsonl` file (shown in spawn output).",
+    "Pass the absolute path to the session `.jsonl` file (shown in delegate output).",
     "The agent gets the full conversation history and the new `prompt` continues naturally.",
     "",
     "```json",
@@ -2947,13 +2947,13 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
     "Set `async: true` on the top-level call to fire tasks in the background:",
     "",
     "```json",
-    'spawn({ async: true, tasks: [{ agent: "scout", prompt: "Investigate auth" }] })',
+    'delegate({ async: true, tasks: [{ agent: "scout", prompt: "Investigate auth" }] })',
     "```",
     "\u2192 Returns ticket ID immediately. Parent keeps working.",
     "",
-    '- `spawn({ action: "poll" })` \u2014 list all tickets',
-    '- `spawn({ action: "poll", ticket: "abc123" })` \u2014 check one ticket',
-    '- `spawn({ action: "cancel", ticket: "abc123" })` \u2014 abort a running ticket',
+    '- `delegate({ action: "poll" })` \u2014 list all tickets',
+    '- `delegate({ action: "poll", ticket: "abc123" })` \u2014 check one ticket',
+    '- `delegate({ action: "cancel", ticket: "abc123" })` \u2014 abort a running ticket',
     "",
     "Max 5 concurrent async tickets. Results are delivered automatically when all tasks finish. Poll for progress while running, but avoid polling in a tight loop \u2014 do other work while waiting.",
   ].join("\n");
@@ -2961,10 +2961,10 @@ function getSubagentManualMarkdown(agents: Map<string, AgentConfig>): string {
 
 export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
-    name: "spawn",
-    label: "Spawn Subagents",
+    name: "delegate",
+    label: "Delegate to Subagents",
     description: ".",
-    parameters: spawnParameters,
+    parameters: delegateParameters,
 
     async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
       const parentModelId = ctx.model?.id;
@@ -3058,7 +3058,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           content: [
             {
               type: "text",
-              text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call spawn with an empty tasks array for help.`,
+              text: `Unknown agent(s): ${unknown.join(", ")}. Available: ${names.join(", ") || "(none)"}. Call delegate with an empty tasks array for help.`,
             },
           ],
           details: {
@@ -3332,7 +3332,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           modelRegistry,
           parentSessionManager: ctx.sessionManager,
           ticketId,
-          spawnStartedAt: ticket.created,
+          delegateStartedAt: ticket.created,
           onProgress: (p, u) => {
             updateProgressFromRun(p, u);
           },
@@ -3394,8 +3394,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
                 `${resolved.length} task(s) dispatched · ${runningCount + 1}/${getMaxAsyncTickets()} async slots in use`,
                 "",
                 "Completed task results are available via poll. Final results delivered automatically when all tasks complete.",
-                `Check progress: spawn({ action: "poll", ticket: "${ticketId}" }) — avoid polling in a tight loop`,
-                `Cancel if needed: spawn({ action: "cancel", ticket: "${ticketId}" })`,
+                `Check progress: delegate({ action: "poll", ticket: "${ticketId}" }) — avoid polling in a tight loop`,
+                `Cancel if needed: delegate({ action: "cancel", ticket: "${ticketId}" })`,
               ].join("\n"),
             },
           ],
@@ -3418,7 +3418,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         modelRegistry: ctx.modelRegistry,
         parentSessionManager: ctx.sessionManager,
         ticketId: undefined,
-        spawnStartedAt: startedAt,
+        delegateStartedAt: startedAt,
         onProgress: (p, u) => {
           updateProgressFromRun(p, u);
           fire();
@@ -3461,7 +3461,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           if (r.sessionFile && fs.existsSync(r.sessionFile)) {
             const safePath = JSON.stringify(r.sessionFile);
             parts.push(
-              `→ To retry: spawn({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
+              `→ To retry: delegate({ tasks: [{ resumeFrom: ${safePath}, prompt: "continue" }] })`,
             );
           }
         } else {
@@ -3499,7 +3499,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       const text =
         (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       if (!tasks.length) {
-        text.setText(theme.fg("toolTitle", theme.bold("spawn")));
+        text.setText(theme.fg("toolTitle", theme.bold("delegate")));
         return text;
       }
       // Minimal call rendering — renderResult handles all detail.
@@ -3513,7 +3513,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           theme.fg(
             "toolTitle",
             theme.bold(
-              `${spinnerFrame()} spawn ${tasks.length} task${tasks.length > 1 ? "s" : ""} · ${elapsed}`,
+              `${spinnerFrame()} delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""} · ${elapsed}`,
             ),
           ),
         );
@@ -3523,7 +3523,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         theme.fg(
           "toolTitle",
           theme.bold(
-            `spawn ${tasks.length} task${tasks.length > 1 ? "s" : ""}`,
+            `delegate ${tasks.length} task${tasks.length > 1 ? "s" : ""}`,
           ),
         ),
       );

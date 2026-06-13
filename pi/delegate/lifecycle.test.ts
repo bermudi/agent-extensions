@@ -1,11 +1,11 @@
 /**
- * Integration tests for spawn extension's task execution lifecycle.
+ * Integration tests for delegate extension's task execution lifecycle.
  *
  * These tests exercise the full execute() → acquireAgentSession → runAgent path,
  * verifying that tasks actually create agents and produce output (or correct errors).
  *
  * Strategy:
- * - Use pi-test-harness to create a real session with the spawn extension loaded.
+ * - Use pi-test-harness to create a real session with the delegate extension loaded.
  * - Use the runner's createContext() to get a proper ExtensionContext with model, registry, etc.
  * - Patch modelRegistry.getApiKeyAndHeaders to return fake auth.
  * - Mock @mariozechner/pi-ai's streamSimple to return canned responses.
@@ -24,9 +24,9 @@ import { createTestSession } from "@marcfargas/pi-test-harness";
 // go through execute() (e.g., list action for pool state, poll for tickets).
 // We import these only for cleanup in afterEach (clearing our own module's maps
 // to avoid leaking between test file runs).
-import { agentPool, ticketRegistry } from "./spawn.ts";
+import { agentPool, ticketRegistry } from "./delegate.ts";
 
-const EXTENSION = path.resolve(import.meta.dirname, "./spawn.ts");
+const EXTENSION = path.resolve(import.meta.dirname, "./delegate.ts");
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -75,12 +75,12 @@ function patchAuth(ts: TestSession) {
 	});
 }
 
-/** Get spawn tool definition from the test session. */
-function getSpawnTool(ts: TestSession) {
+/** Get delegate tool definition from the test session. */
+function getDelegateTool(ts: TestSession) {
 	const runner = ts.session.extensionRunner;
 	if (!runner) throw new Error("No extensionRunner on session");
-	const toolDef = runner.getToolDefinition("spawn");
-	if (!toolDef) throw new Error("spawn tool not found");
+	const toolDef = runner.getToolDefinition("delegate");
+	if (!toolDef) throw new Error("delegate tool not found");
 	return toolDef;
 }
 
@@ -93,7 +93,7 @@ function getExecContext(ts: TestSession) {
 
 // ── Test Suite ─────────────────────────────────────────────────────────────
 
-describe("spawn task lifecycle integration", () => {
+describe("delegate task lifecycle integration", () => {
 	let ts: TestSession | undefined;
 
 	beforeEach(() => {
@@ -115,7 +115,7 @@ describe("spawn task lifecycle integration", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -152,15 +152,15 @@ describe("spawn task lifecycle integration", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-prompt-"));
+		const taskCwd = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-prompt-"));
 		try {
 			fs.writeFileSync(path.join(taskCwd, "AGENTS.md"), projectInstruction, "utf-8");
 
-			const toolDef = getSpawnTool(ts);
+			const toolDef = getDelegateTool(ts);
 			const ctx = getExecContext(ts);
 			(ctx as any).getSystemPrompt = () => [
 				"PARENT_EFFECTIVE_PROMPT_SHOULD_NOT_LEAK",
-				"- spawn: verbose parent tool docs",
+				"- delegate: verbose parent tool docs",
 				projectInstruction,
 			].join("\n");
 
@@ -191,7 +191,7 @@ describe("spawn task lifecycle integration", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -262,7 +262,7 @@ describe("spawn task lifecycle integration", () => {
 
 		// The parent's model has no auth (provider is "openai", not "opencode-go").
 		// The alternative has auth. The sub-agent should use the alternative.
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -296,7 +296,7 @@ describe("spawn task lifecycle integration", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -331,7 +331,7 @@ describe("spawn task lifecycle integration", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -376,7 +376,7 @@ describe("spawn task lifecycle integration", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		// First call — creates the pool
@@ -428,7 +428,7 @@ describe("spawn task lifecycle integration", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		// Create
@@ -482,7 +482,7 @@ describe("spawn task lifecycle integration", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		// Create a session
@@ -516,7 +516,7 @@ describe("spawn task lifecycle integration", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const dispatch = await toolDef.execute(
@@ -562,7 +562,7 @@ describe("spawn task lifecycle integration", () => {
 	test("unknown agent name produces clear error", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -581,7 +581,7 @@ describe("spawn task lifecycle integration", () => {
 	test("task without prompt (and not close/list/resume) throws", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		await expect(
@@ -611,7 +611,7 @@ describe("spawn task lifecycle integration", () => {
 		];
 		fs.writeFileSync(sessionFile, lines.join("\n") + "\n");
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -636,7 +636,7 @@ describe("spawn task lifecycle integration", () => {
 	test("resumeFrom with nonexistent file returns error", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -660,7 +660,7 @@ describe("spawn task lifecycle integration", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		// Create with default tools
@@ -733,7 +733,7 @@ function installFailingThenSuccess(failCount: number, failMessage: string, succe
 	}));
 }
 
-describe("spawn retry and error recovery", () => {
+describe("delegate retry and error recovery", () => {
 	let ts: TestSession | undefined;
 
 	beforeEach(() => {
@@ -755,7 +755,7 @@ describe("spawn retry and error recovery", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -782,7 +782,7 @@ describe("spawn retry and error recovery", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -814,7 +814,7 @@ describe("spawn retry and error recovery", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -846,7 +846,7 @@ describe("spawn retry and error recovery", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -887,7 +887,7 @@ describe("spawn retry and error recovery", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const result = await toolDef.execute(
@@ -923,7 +923,7 @@ describe("spawn retry and error recovery", () => {
 
 // ── Abort Behavior ───────────────────────────────────────────────────────────
 
-describe("spawn abort behavior", () => {
+describe("delegate abort behavior", () => {
 	let ts: TestSession | undefined;
 
 	afterEach(() => {
@@ -948,7 +948,7 @@ describe("spawn abort behavior", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		const controller = new AbortController();
@@ -980,7 +980,7 @@ describe("spawn abort behavior", () => {
 
 // ── Pool-Miss + ResumeFrom + SessionId Combination ──────────────────────────
 
-describe("spawn pool-miss with resumeFrom and sessionId", () => {
+describe("delegate pool-miss with resumeFrom and sessionId", () => {
 	let ts: TestSession | undefined;
 
 	afterEach(() => {
@@ -994,7 +994,7 @@ describe("spawn pool-miss with resumeFrom and sessionId", () => {
 	test("sessionId not in pool + resumeFrom set → resumes and pools for reuse", async () => {
 		installStreamMock("Resumed and pooled.");
 
-		const tmpDir = fs.mkdtempSync("/tmp/spawn-pool-resume-");
+		const tmpDir = fs.mkdtempSync("/tmp/delegate-pool-resume-");
 		const sessionFile = path.resolve(tmpDir, "pool-resume.jsonl");
 		const lines = [
 			JSON.stringify({ type: "session", version: 3, id: "pool-resume-session", timestamp: new Date().toISOString(), cwd: tmpDir }),
@@ -1006,7 +1006,7 @@ describe("spawn pool-miss with resumeFrom and sessionId", () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		patchAuth(ts);
 
-		const toolDef = getSpawnTool(ts);
+		const toolDef = getDelegateTool(ts);
 		const ctx = getExecContext(ts);
 
 		// First call: sessionId is new (pool miss) + resumeFrom set.
