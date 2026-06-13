@@ -12,16 +12,16 @@
  *   - UUID or path: summarize an arbitrary session
  */
 
-import { complete } from "@earendil-works/pi-ai";
+import { complete } from "@mariozechner/pi-ai";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
-} from "@earendil-works/pi-coding-agent";
+} from "@mariozechner/pi-coding-agent";
 import {
   DynamicBorder,
   getMarkdownTheme,
-} from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
+} from "@mariozechner/pi-coding-agent";
+import { Container, Markdown, matchesKey, Text } from "@mariozechner/pi-tui";
 import { readFileSync } from "node:fs";
 import { resolve, basename } from "node:path";
 import { homedir } from "node:os";
@@ -213,10 +213,10 @@ function buildCondensedTranscript(entries: SessionEntry[]): string {
 
   // Walk from leaf to root
   const chain: SessionEntry[] = [];
-  let current = leaf;
+  let current: SessionEntry | undefined = leaf;
   while (current) {
     chain.unshift(current);
-    const pid = current.parentId;
+    const pid: string | null | undefined = current.parentId;
     current = pid ? byId.get(pid) : undefined;
   }
 

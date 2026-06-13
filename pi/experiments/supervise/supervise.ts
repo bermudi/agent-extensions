@@ -35,6 +35,8 @@ import { Type } from "@sinclair/typebox";
 
 // ── Reused from delegate ─────────────────────────────────────────────────
 
+// NOTE: cross-repo import — delegate was extracted to the sibling ../pi-delegate repo.
+// Path is relative to this experiment's location; update if the repo layout moves.
 import {
   DEFAULT_TOOLS,
   VALID_THINKING,
@@ -46,7 +48,7 @@ import {
   discoverAgents,
   loadSkill,
   resolveModel,
-} from "../delegate/delegate.ts";
+} from "../../../../pi-delegate/delegate.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 

@@ -10,7 +10,7 @@
  * Falls back to `populateConfigFromFS` in the proxy if the config
  * block is absent (e.g. requests not from pi).
  */
-import type { ExtensionAPI, ExecResult } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExecResult } from "@mariozechner/pi-coding-agent";
 import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -246,7 +246,7 @@ export default function (pi: ExtensionAPI) {
     const skills = readSkills(ctx.cwd);
 
     const payload: Record<string, any> = {
-      ...event.payload,
+      ...(event.payload as Record<string, unknown>),
       x_command_code_working_dir: ctx.cwd,
       x_command_code_config: config,
       // pi's user has taste learning OFF (their command-code

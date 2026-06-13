@@ -9,10 +9,10 @@
  *   - zed              /z                open Zed on cwd
  */
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import copyWithModel from "./copy-with-model";
-import nameWithAi from "./name-with-ai";
-import notify from "./notify";
-import zed from "./zed";
+import copyWithModel from "./copy-with-model.ts";
+import nameWithAi from "./name-with-ai.ts";
+import notify from "./notify.ts";
+import zed from "./zed.ts";
 
 export default function bermundisPiGoodies(pi: ExtensionAPI) {
   copyWithModel(pi);
