@@ -3,17 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "bun run test:extensions && bun run test:agent-pty",
-    "test:extensions": "bun run test:arena && bun run test:pi-debate && bun run test:delegate && bun run test:supervise && bun run test:roundtable && bun run test:trim-context",
-    "test:arena": "bun test pi/arena",
-    "test:pi-debate": "bun test pi/pi-debate",
-    "test:delegate": "bun test pi/delegate",
-    "test:supervise": "bun test pi/supervise",
-    "test:roundtable": "bun test pi/roundtable",
-    "test:trim-context": "bun test pi/trim-context",
-    "test:agent-pty": "cd pi/agent-pty && bun test",
-    "build:delegate": "esbuild pi/delegate/delegate.ts --bundle --platform=neutral --packages=external --format=esm --outfile=pi/delegate/delegate.bundle.ts",
-    "typecheck": "tsc --noEmit"
+    "test": "bun test pi/bermundis-pi-goodies pi/cc-cwd pi/diff pi/session-summarizer pi/experiments",
+    "test:active": "bun test pi/bermundis-pi-goodies pi/cc-cwd pi/diff pi/session-summarizer",
+    "test:experiments": "bun test pi/experiments",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"pi/**/*.ts\""
   },
   "devDependencies": {
     "@marcfargas/pi-test-harness": "^0.5.0",
@@ -21,6 +15,7 @@
     "@mariozechner/pi-ai": "npm:@earendil-works/pi-ai@^0.75.3",
     "@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@^0.75.3",
     "@mariozechner/pi-tui": "npm:@earendil-works/pi-tui@^0.75.3",
+    "@sinclair/typebox": "^0.34.0",
     "prettier": "^3.8.4"
   }
 }

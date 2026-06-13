@@ -10,12 +10,13 @@
     "allowImportingTsExtensions": true
   },
   "include": [
-    "pi/**/*.ts",
-    "opencode/**/*.ts"
+    "pi/**/*.ts"
   ],
   "exclude": [
     "node_modules",
-    "pi/reference",
+    "reference",
+    "pi/experiments",
+    "**/*.bundle.ts",
     "**/*.test.ts",
     "**/__tests__/**"
   ]
