@@ -12,6 +12,7 @@
     "test:roundtable": "bun test pi/roundtable",
     "test:trim-context": "bun test pi/trim-context",
     "test:agent-pty": "cd pi/agent-pty && bun test",
+    "build:delegate": "esbuild pi/delegate/delegate.ts --bundle --platform=neutral --packages=external --format=esm --outfile=pi/delegate/delegate.bundle.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
