@@ -27,13 +27,23 @@ function makeUserMessage(text: string) {
 function makeAssistantMessage(opts: {
   thinking?: string;
   text?: string;
-  toolCalls?: Array<{ id: string; name: string; arguments?: Record<string, any> }>;
+  toolCalls?: Array<{
+    id: string;
+    name: string;
+    arguments?: Record<string, any>;
+  }>;
 }) {
   const content: any[] = [];
-  if (opts.thinking) content.push({ type: "thinking", thinking: opts.thinking });
+  if (opts.thinking)
+    content.push({ type: "thinking", thinking: opts.thinking });
   if (opts.text) content.push({ type: "text", text: opts.text });
   for (const tc of opts.toolCalls ?? []) {
-    content.push({ type: "toolCall", id: tc.id, name: tc.name, arguments: tc.arguments ?? {} });
+    content.push({
+      type: "toolCall",
+      id: tc.id,
+      name: tc.name,
+      arguments: tc.arguments ?? {},
+    });
   }
   return { role: "assistant", content };
 }
@@ -70,9 +80,15 @@ describe("groupIntoTurns", () => {
       makeAssistantMessage({
         thinking: "The auth bug is likely in the token validation logic.",
         text: "I'll check the token validation code.",
-        toolCalls: [{ id: "tc1", name: "read", arguments: { path: "src/login.ts" } }],
+        toolCalls: [
+          { id: "tc1", name: "read", arguments: { path: "src/login.ts" } },
+        ],
       }),
-      makeToolResult({ toolCallId: "tc1", toolName: "read", content: "file contents..." }),
+      makeToolResult({
+        toolCallId: "tc1",
+        toolName: "read",
+        content: "file contents...",
+      }),
     ];
 
     const turns = groupIntoTurns(messages);
@@ -80,7 +96,9 @@ describe("groupIntoTurns", () => {
     expect(turns.length).toBe(1);
     expect(turns[0].label).toBe("Turn 1");
     expect(turns[0].request).toBe("Fix the auth bug in login.ts");
-    expect(turns[0].reasoning).toEqual(["The auth bug is likely in the token validation logic."]);
+    expect(turns[0].reasoning).toEqual([
+      "The auth bug is likely in the token validation logic.",
+    ]);
     // "I'll check the token validation code." is filler — starts with "I'll" + check
     expect(turns[0].responses).toEqual([]);
     // read tool result with no error is filtered out
@@ -131,35 +149,57 @@ describe("groupIntoTurns", () => {
 
     expect(turns.length).toBeGreaterThanOrEqual(1);
     // The compaction summary should appear in the first context turn's responses
-    const firstTurn = turns.find((t) => t.responses.some((r) => r.includes("Previous session")));
+    const firstTurn = turns.find((t) =>
+      t.responses.some((r) => r.includes("Previous session")),
+    );
     expect(firstTurn).toBeDefined();
   });
 
   it("categorizes tool results correctly — edit success", () => {
     const turn = createTurn("Turn", "test");
-    ingestAssistantMessage(turn, makeAssistantMessage({
-      toolCalls: [{ id: "tc1", name: "edit", arguments: { path: "src/auth.ts" } }],
-    }));
-    ingestToolResult(turn, makeToolResult({
-      toolCallId: "tc1",
-      toolName: "edit",
-      content: "File updated",
-    }));
+    ingestAssistantMessage(
+      turn,
+      makeAssistantMessage({
+        toolCalls: [
+          { id: "tc1", name: "edit", arguments: { path: "src/auth.ts" } },
+        ],
+      }),
+    );
+    ingestToolResult(
+      turn,
+      makeToolResult({
+        toolCallId: "tc1",
+        toolName: "edit",
+        content: "File updated",
+      }),
+    );
 
     expect(turn.evidence).toEqual(["edit succeeded on src/auth.ts"]);
   });
 
   it("categorizes tool results correctly — error results", () => {
     const turn = createTurn("Turn", "test");
-    ingestAssistantMessage(turn, makeAssistantMessage({
-      toolCalls: [{ id: "tc1", name: "write", arguments: { path: "/root/forbidden.ts" } }],
-    }));
-    ingestToolResult(turn, makeToolResult({
-      toolCallId: "tc1",
-      toolName: "write",
-      content: "Permission denied",
-      isError: true,
-    }));
+    ingestAssistantMessage(
+      turn,
+      makeAssistantMessage({
+        toolCalls: [
+          {
+            id: "tc1",
+            name: "write",
+            arguments: { path: "/root/forbidden.ts" },
+          },
+        ],
+      }),
+    );
+    ingestToolResult(
+      turn,
+      makeToolResult({
+        toolCallId: "tc1",
+        toolName: "write",
+        content: "Permission denied",
+        isError: true,
+      }),
+    );
 
     expect(turn.evidence[0]).toContain("error");
     expect(turn.evidence[0]).toContain("Permission denied");
@@ -171,7 +211,9 @@ describe("groupIntoTurns", () => {
       role: "toolResult",
       toolCallId: "tc99",
       toolName: "bash",
-      content: [{ type: "text", text: "PASS: test_auth\nFAIL: test_login\n2 failures" }],
+      content: [
+        { type: "text", text: "PASS: test_auth\nFAIL: test_login\n2 failures" },
+      ],
       isError: false,
     });
 
@@ -181,15 +223,28 @@ describe("groupIntoTurns", () => {
 
   it("filters filler assistant text", () => {
     const turn = createTurn("Turn", "test");
-    ingestAssistantMessage(turn, makeAssistantMessage({ text: "Let me check the file." }));
+    ingestAssistantMessage(
+      turn,
+      makeAssistantMessage({ text: "Let me check the file." }),
+    );
     expect(turn.responses).toEqual([]);
 
-    ingestAssistantMessage(turn, makeAssistantMessage({ text: "The authentication module uses JWT tokens with a 24-hour expiry window." }));
-    expect(turn.responses).toEqual(["The authentication module uses JWT tokens with a 24-hour expiry window."]);
+    ingestAssistantMessage(
+      turn,
+      makeAssistantMessage({
+        text: "The authentication module uses JWT tokens with a 24-hour expiry window.",
+      }),
+    );
+    expect(turn.responses).toEqual([
+      "The authentication module uses JWT tokens with a 24-hour expiry window.",
+    ]);
   });
 
   it("does not filter long filler-ish text", () => {
-    const longText = "Let me check the file and see what's going on with the authentication module. ".repeat(4);
+    const longText =
+      "Let me check the file and see what's going on with the authentication module. ".repeat(
+        4,
+      );
     const turn = createTurn("Turn", "test");
     ingestAssistantMessage(turn, makeAssistantMessage({ text: longText }));
     expect(turn.responses.length).toBe(1);
@@ -203,13 +258,21 @@ describe("summarizeBashEvidence", () => {
   });
 
   it("returns test summary for test commands", () => {
-    const result = summarizeBashEvidence("go test ./...", "PASS\nok  pkg/auth  0.012s", false);
+    const result = summarizeBashEvidence(
+      "go test ./...",
+      "PASS\nok  pkg/auth  0.012s",
+      false,
+    );
     expect(result).toContain("Test");
     expect(result).toContain("passed");
   });
 
   it("returns test failure summary", () => {
-    const result = summarizeBashEvidence("pytest", "FAIL test_auth.py - AssertionError", false);
+    const result = summarizeBashEvidence(
+      "pytest",
+      "FAIL test_auth.py - AssertionError",
+      false,
+    );
     expect(result).toContain("Test");
     expect(result).toContain("failed");
   });
@@ -221,17 +284,29 @@ describe("summarizeBashEvidence", () => {
   });
 
   it("returns check problems when errors present", () => {
-    const result = summarizeBashEvidence("eslint src/", "error: Unexpected any", true);
+    const result = summarizeBashEvidence(
+      "eslint src/",
+      "error: Unexpected any",
+      true,
+    );
     expect(result).toContain("reported problems");
   });
 
   it("returns git diff summary", () => {
-    const result = summarizeBashEvidence("git diff HEAD", "+new line\n-old line", false);
+    const result = summarizeBashEvidence(
+      "git diff HEAD",
+      "+new line\n-old line",
+      false,
+    );
     expect(result).toContain("Git diff");
   });
 
   it("returns bash summary for error on generic command", () => {
-    const result = summarizeBashEvidence("ls /nonexistent", "No such file or directory", true);
+    const result = summarizeBashEvidence(
+      "ls /nonexistent",
+      "No such file or directory",
+      true,
+    );
     expect(result).toContain("Bash");
     expect(result).toContain("errored");
   });
@@ -244,7 +319,10 @@ describe("pickInterestingLines", () => {
   });
 
   it("picks lines with keywords", () => {
-    const result = pickInterestingLines("ok\nPASS: test1\ninfo\nFAIL: test2\ninfo2", 8);
+    const result = pickInterestingLines(
+      "ok\nPASS: test1\ninfo\nFAIL: test2\ninfo2",
+      8,
+    );
     expect(result).toEqual(["PASS: test1", "FAIL: test2"]);
   });
 
@@ -274,9 +352,14 @@ describe("looksLikeFiller", () => {
   });
 
   it("does not flag long messages", () => {
-    expect(looksLikeFiller("Let me check the file and then implement the full solution.")).toBe(true);
+    expect(
+      looksLikeFiller(
+        "Let me check the file and then implement the full solution.",
+      ),
+    ).toBe(true);
     // >180 chars should not be flagged even if it starts with a filler phrase
-    const longFiller = "Let me check " + "the authentication module ".repeat(10) + "for issues.";
+    const longFiller =
+      "Let me check " + "the authentication module ".repeat(10) + "for issues.";
     expect(longFiller.length).toBeGreaterThan(180);
     expect(looksLikeFiller(longFiller)).toBe(false);
   });
@@ -329,7 +412,9 @@ describe("describeTurnRequest", () => {
   });
 
   it("describes bash execution commands", () => {
-    expect(describeTurnRequest(makeBashExecution("npm test"))).toContain("npm test");
+    expect(describeTurnRequest(makeBashExecution("npm test"))).toContain(
+      "npm test",
+    );
   });
 
   it("handles null messages", () => {

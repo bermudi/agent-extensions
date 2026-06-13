@@ -9,7 +9,9 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 const DEBUG_DIR = join(homedir(), ".pi", "logs", "thinking-compaction");
 
 const EXTENSION_NAME = "thinking-compaction";
-const SUMMARY_MODEL_CANDIDATES: Array<[string, string]> = [["google", "gemini-2.5-flash"]];
+const SUMMARY_MODEL_CANDIDATES: Array<[string, string]> = [
+  ["google", "gemini-2.5-flash"],
+];
 
 type AnyRecord = Record<string, any>;
 
@@ -40,7 +42,14 @@ async function loadEngine() {
 export default function (pi: ExtensionAPI) {
   pi.on("session_before_compact", async (event, ctx) => {
     const { preparation, customInstructions, signal } = event;
-    const { messagesToSummarize, turnPrefixMessages, previousSummary, firstKeptEntryId, tokensBefore, fileOps } = preparation;
+    const {
+      messagesToSummarize,
+      turnPrefixMessages,
+      previousSummary,
+      firstKeptEntryId,
+      tokensBefore,
+      fileOps,
+    } = preparation;
 
     const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
     const runId = new Date().toISOString().replace(/[:.]/g, "-");
@@ -54,12 +63,21 @@ export default function (pi: ExtensionAPI) {
 
     const modelChoice = await resolveSummaryModel(ctx);
     if (!modelChoice) {
-      ctx.ui.notify("Thinking compaction: no summary model available, falling back to default compaction", "warning");
+      ctx.ui.notify(
+        "Thinking compaction: no summary model available, falling back to default compaction",
+        "warning",
+      );
       return;
     }
 
-    const systemPrompt = previousSummary ? engine.UPDATE_PROMPT : engine.INITIAL_PROMPT;
-    const maxPromptChars = engine.computeCharBudget(modelChoice.model.contextWindow as number | undefined, engine.SUMMARY_MAX_TOKENS, systemPrompt);
+    const systemPrompt = previousSummary
+      ? engine.UPDATE_PROMPT
+      : engine.INITIAL_PROMPT;
+    const maxPromptChars = engine.computeCharBudget(
+      modelChoice.model.contextWindow as number | undefined,
+      engine.SUMMARY_MAX_TOKENS,
+      systemPrompt,
+    );
     const transcript = engine.buildTranscript(turns, maxPromptChars);
     if (!transcript.trim()) return;
 
@@ -72,20 +90,27 @@ export default function (pi: ExtensionAPI) {
     // ── Observability ────────────────────────────────────────────────────
     await mkdir(runDir, { recursive: true });
     await Promise.all([
-      writeFile(join(runDir, "inputs.json"), JSON.stringify({
-        timestamp: new Date().toISOString(),
-        tokensBefore,
-        messagesToSummarizeCount: messagesToSummarize.length,
-        turnPrefixMessagesCount: turnPrefixMessages.length,
-        firstKeptEntryId,
-        hasPreviousSummary: Boolean(previousSummary),
-        customInstructions,
-        fileOps: {
-          read: fileOps?.read ? [...fileOps.read] : [],
-          written: fileOps?.written ? [...fileOps.written] : [],
-          edited: fileOps?.edited ? [...fileOps.edited] : [],
-        },
-      }, null, 2)),
+      writeFile(
+        join(runDir, "inputs.json"),
+        JSON.stringify(
+          {
+            timestamp: new Date().toISOString(),
+            tokensBefore,
+            messagesToSummarizeCount: messagesToSummarize.length,
+            turnPrefixMessagesCount: turnPrefixMessages.length,
+            firstKeptEntryId,
+            hasPreviousSummary: Boolean(previousSummary),
+            customInstructions,
+            fileOps: {
+              read: fileOps?.read ? [...fileOps.read] : [],
+              written: fileOps?.written ? [...fileOps.written] : [],
+              edited: fileOps?.edited ? [...fileOps.edited] : [],
+            },
+          },
+          null,
+          2,
+        ),
+      ),
       writeFile(join(runDir, "transcript.md"), transcript),
       writeFile(join(runDir, "prompt.txt"), prompt),
     ]);
@@ -99,7 +124,9 @@ export default function (pi: ExtensionAPI) {
       const response = await complete(
         modelChoice.model as any,
         {
-          systemPrompt: previousSummary ? engine.UPDATE_PROMPT : engine.INITIAL_PROMPT,
+          systemPrompt: previousSummary
+            ? engine.UPDATE_PROMPT
+            : engine.INITIAL_PROMPT,
           messages: [
             {
               role: "user",
@@ -117,14 +144,20 @@ export default function (pi: ExtensionAPI) {
       );
 
       const summary = response.content
-        .filter((part): part is { type: "text"; text: string } => part.type === "text")
+        .filter(
+          (part): part is { type: "text"; text: string } =>
+            part.type === "text",
+        )
         .map((part) => part.text)
         .join("\n")
         .trim();
 
       if (!summary) {
         if (!signal.aborted) {
-          ctx.ui.notify("Thinking compaction produced an empty summary, falling back to default compaction", "warning");
+          ctx.ui.notify(
+            "Thinking compaction produced an empty summary, falling back to default compaction",
+            "warning",
+          );
         }
         return;
       }
@@ -134,17 +167,24 @@ export default function (pi: ExtensionAPI) {
 
       // ── Observability: output ─────────────────────────────────────────
       await writeFile(join(runDir, "summary.md"), finalSummary);
-      await writeFile(join(runDir, "details.json"), JSON.stringify({
-        version: 2,
-        strategy: EXTENSION_NAME,
-        readFiles,
-        modifiedFiles,
-        turns: turns.length,
-        model: `${modelChoice.model.provider}/${modelChoice.model.id}`,
-        summaryLength: finalSummary.length,
-        transcriptLength: transcript.length,
-        promptLength: prompt.length,
-      }, null, 2));
+      await writeFile(
+        join(runDir, "details.json"),
+        JSON.stringify(
+          {
+            version: 2,
+            strategy: EXTENSION_NAME,
+            readFiles,
+            modifiedFiles,
+            turns: turns.length,
+            model: `${modelChoice.model.provider}/${modelChoice.model.id}`,
+            summaryLength: finalSummary.length,
+            transcriptLength: transcript.length,
+            promptLength: prompt.length,
+          },
+          null,
+          2,
+        ),
+      );
 
       return {
         compaction: {
@@ -169,7 +209,6 @@ export default function (pi: ExtensionAPI) {
       return;
     }
   });
-
 }
 
 // ── Model resolution ──────────────────────────────────────────────────

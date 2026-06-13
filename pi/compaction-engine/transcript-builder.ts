@@ -3,7 +3,11 @@ import type { Turn } from "./turn-grouper";
 // Rough heuristic: 1 token ≈ 3.5 characters. Conservative to avoid overshooting.
 export const CHARS_PER_TOKEN = 3.5;
 
-export function computeCharBudget(contextWindow: number | undefined, maxOutputTokens: number, systemPrompt: string) {
+export function computeCharBudget(
+  contextWindow: number | undefined,
+  maxOutputTokens: number,
+  systemPrompt: string,
+) {
   // Fallback to 128k tokens if contextWindow is unknown — conservative default.
   const cw = contextWindow ?? 128_000;
   const systemPromptTokens = Math.ceil(systemPrompt.length / CHARS_PER_TOKEN);
@@ -38,7 +42,8 @@ export function buildTranscript(turns: Turn[], maxChars: number): string {
   const droppedCount = turns.length - 1 - recentInOrder.length;
   const parts: string[] = [];
   if (firstTurn) parts.push(firstTurn);
-  if (droppedCount > 0) parts.push(`[… ${droppedCount} earlier turns omitted …]`);
+  if (droppedCount > 0)
+    parts.push(`[… ${droppedCount} earlier turns omitted …]`);
   parts.push(...recentInOrder);
   return parts.join("\n\n");
 }
@@ -49,15 +54,21 @@ export function formatTurn(turn: Turn): string {
   section.push(`Request: ${turn.request}`);
 
   if (turn.reasoning.length > 0) {
-    section.push(`Reasoning:\n${turn.reasoning.map((item) => `- ${indentBullet(item)}`).join("\n")}`);
+    section.push(
+      `Reasoning:\n${turn.reasoning.map((item) => `- ${indentBullet(item)}`).join("\n")}`,
+    );
   }
 
   if (turn.responses.length > 0) {
-    section.push(`Stated conclusions:\n${turn.responses.map((item) => `- ${indentBullet(item)}`).join("\n")}`);
+    section.push(
+      `Stated conclusions:\n${turn.responses.map((item) => `- ${indentBullet(item)}`).join("\n")}`,
+    );
   }
 
   if (turn.evidence.length > 0) {
-    section.push(`Relevant evidence:\n${turn.evidence.map((item) => `- ${indentBullet(item)}`).join("\n")}`);
+    section.push(
+      `Relevant evidence:\n${turn.evidence.map((item) => `- ${indentBullet(item)}`).join("\n")}`,
+    );
   }
 
   return section.join("\n\n");

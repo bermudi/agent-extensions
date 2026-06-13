@@ -12,7 +12,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent, type AgentMessage, type AgentTool, type ThinkingLevel } from "@mariozechner/pi-agent-core";
+import {
+  Agent,
+  type AgentMessage,
+  type AgentTool,
+  type ThinkingLevel,
+} from "@mariozechner/pi-agent-core";
 import { type Api, type Model, streamSimple } from "@mariozechner/pi-ai";
 import {
   buildSessionContext,
@@ -93,7 +98,14 @@ const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<any>> = {
   ls: createLsTool,
 };
 
-const VALID_THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const VALID_THINKING = new Set([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
 
 const DEFAULT_ROUNDS = 3;
 const MAX_ROUNDS = 10;
@@ -146,7 +158,11 @@ export function fmtDuration(ms: number): string {
 }
 
 export function fmtTokens(n: number): string {
-  return n < 1000 ? `${n}` : n < 10000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`;
+  return n < 1000
+    ? `${n}`
+    : n < 10000
+      ? `${(n / 1000).toFixed(1)}k`
+      : `${Math.round(n / 1000)}k`;
 }
 
 export function trunc(s: string, n: number): string {
@@ -171,7 +187,9 @@ function buildDebateSystemPrompt(args: {
     2: "Rebuttal — directly engage with your opponent's points",
   };
 
-  const roundHint = roundLabels[args.round] ?? `Rebuttal — sharpen your arguments and address weaknesses`;
+  const roundHint =
+    roundLabels[args.round] ??
+    `Rebuttal — sharpen your arguments and address weaknesses`;
 
   return [
     "You are participating in a structured debate.",
@@ -250,7 +268,12 @@ async function runDebateTurn(args: {
   prompt: string;
   modelRegistry: ModelRegistry;
   signal?: AbortSignal;
-}): Promise<{ output: string; error?: string; durationMs: number; tokens: number }> {
+}): Promise<{
+  output: string;
+  error?: string;
+  durationMs: number;
+  tokens: number;
+}> {
   const start = Date.now();
 
   const tools = args.tools
@@ -268,12 +291,22 @@ async function runDebateTurn(args: {
     streamFn: async (m, context, options) => {
       const auth = await args.modelRegistry.getApiKeyAndHeaders(m);
       if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-      return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+      return streamSimple(m, context, {
+        ...options,
+        apiKey: auth.apiKey,
+        headers: auth.headers ?? undefined,
+      });
     },
   });
 
   if (args.signal) {
-    const onAbort = () => { try { agent.abort(); } catch { /* */ } };
+    const onAbort = () => {
+      try {
+        agent.abort();
+      } catch {
+        /* */
+      }
+    };
     args.signal.addEventListener("abort", onAbort, { once: true });
   }
 
@@ -309,7 +342,12 @@ type DebateState = { transcript: DebateEntry[]; progress: DebateProgress[] };
 
 async function runDebate(
   params: DebateArgs,
-  ctx: { modelRegistry: ModelRegistry; model?: Model<Api>; cwd: string; signal?: AbortSignal },
+  ctx: {
+    modelRegistry: ModelRegistry;
+    model?: Model<Api>;
+    cwd: string;
+    signal?: AbortSignal;
+  },
   onProgress?: (state: DebateState) => void,
 ) {
   const startedAt = Date.now();
@@ -320,11 +358,22 @@ async function runDebate(
   const modelA = resolveModel(params.modelA, ctx.modelRegistry, ctx.model);
   if (!modelA) {
     return {
-      content: [{ type: "text" as const, text: "❌ Could not resolve model for participant A. Provide modelA or ensure the parent session has a model set." }],
-      details: { topic: params.topic, rounds, transcript: [] as DebateEntry[], progress: [] as DebateProgress[] },
+      content: [
+        {
+          type: "text" as const,
+          text: "❌ Could not resolve model for participant A. Provide modelA or ensure the parent session has a model set.",
+        },
+      ],
+      details: {
+        topic: params.topic,
+        rounds,
+        transcript: [] as DebateEntry[],
+        progress: [] as DebateProgress[],
+      },
     };
   }
-  const modelB = resolveModel(params.modelB, ctx.modelRegistry, modelA) ?? modelA;
+  const modelB =
+    resolveModel(params.modelB, ctx.modelRegistry, modelA) ?? modelA;
   const judgeModel = params.judge?.model
     ? (resolveModel(params.judge.model, ctx.modelRegistry, ctx.model) ?? modelA)
     : modelA;
@@ -333,7 +382,9 @@ async function runDebate(
   const tools = params.tools ?? DEFAULT_TOOLS;
   const unknownTools = tools.filter((name) => !(name in TOOL_FACTORIES));
   const thinkingRaw = params.thinking ?? "off";
-  const thinking: ThinkingLevel = VALID_THINKING.has(thinkingRaw) ? (thinkingRaw as ThinkingLevel) : "off";
+  const thinking: ThinkingLevel = VALID_THINKING.has(thinkingRaw)
+    ? (thinkingRaw as ThinkingLevel)
+    : "off";
 
   // ── Build positions ──────────────────────────────────────────────
   const positionA = params.positionA ?? "pro (in favor of the proposition)";
@@ -349,7 +400,14 @@ async function runDebate(
   };
 
   if (unknownTools.length) {
-    fire({ phase: "setup", round: 0, totalRounds: rounds, speaker: "A", tokens: 0, durationMs: 0 });
+    fire({
+      phase: "setup",
+      round: 0,
+      totalRounds: rounds,
+      speaker: "A",
+      tokens: 0,
+      durationMs: 0,
+    });
   }
 
   // ── Debate rounds ────────────────────────────────────────────────
@@ -361,21 +419,48 @@ async function runDebate(
 
     // ── Turn A ────────────────────────────────────────────────────
     const systemPromptA = buildDebateSystemPrompt({
-      role: "A", topic: params.topic, position: positionA, opponentPosition: positionB,
-      customPrompt: params.systemPromptA, round, totalRounds: rounds,
+      role: "A",
+      topic: params.topic,
+      position: positionA,
+      opponentPosition: positionB,
+      customPrompt: params.systemPromptA,
+      round,
+      totalRounds: rounds,
     });
 
-    fire({ phase: "round", round, totalRounds: rounds, speaker: "A", tokens: 0, durationMs: 0 });
+    fire({
+      phase: "round",
+      round,
+      totalRounds: rounds,
+      speaker: "A",
+      tokens: 0,
+      durationMs: 0,
+    });
 
     const resultA = await runDebateTurn({
-      systemPrompt: systemPromptA, model: modelA, thinking, tools, cwd,
-      prompt: buildTurnPrompt({ speakerName: "Participant A", round, totalRounds: rounds, transcript: transcriptText }),
-      modelRegistry: ctx.modelRegistry, signal: ctx.signal,
+      systemPrompt: systemPromptA,
+      model: modelA,
+      thinking,
+      tools,
+      cwd,
+      prompt: buildTurnPrompt({
+        speakerName: "Participant A",
+        round,
+        totalRounds: rounds,
+        transcript: transcriptText,
+      }),
+      modelRegistry: ctx.modelRegistry,
+      signal: ctx.signal,
     });
 
     const entryA: DebateEntry = {
-      round, speaker: "A", model: `${modelA.provider}/${modelA.id}`,
-      output: resultA.output, durationMs: resultA.durationMs, tokens: resultA.tokens, error: resultA.error,
+      round,
+      speaker: "A",
+      model: `${modelA.provider}/${modelA.id}`,
+      output: resultA.output,
+      durationMs: resultA.durationMs,
+      tokens: resultA.tokens,
+      error: resultA.error,
     };
     transcript.push(entryA);
 
@@ -391,21 +476,48 @@ async function runDebate(
     transcriptText += `\n### Round ${round} — Participant A\n\n${entryA.output}\n`;
 
     const systemPromptB = buildDebateSystemPrompt({
-      role: "B", topic: params.topic, position: positionB, opponentPosition: positionA,
-      customPrompt: params.systemPromptB, round, totalRounds: rounds,
+      role: "B",
+      topic: params.topic,
+      position: positionB,
+      opponentPosition: positionA,
+      customPrompt: params.systemPromptB,
+      round,
+      totalRounds: rounds,
     });
 
-    fire({ phase: "round", round, totalRounds: rounds, speaker: "B", tokens: 0, durationMs: 0 });
+    fire({
+      phase: "round",
+      round,
+      totalRounds: rounds,
+      speaker: "B",
+      tokens: 0,
+      durationMs: 0,
+    });
 
     const resultB = await runDebateTurn({
-      systemPrompt: systemPromptB, model: modelB, thinking, tools, cwd,
-      prompt: buildTurnPrompt({ speakerName: "Participant B", round, totalRounds: rounds, transcript: transcriptText }),
-      modelRegistry: ctx.modelRegistry, signal: ctx.signal,
+      systemPrompt: systemPromptB,
+      model: modelB,
+      thinking,
+      tools,
+      cwd,
+      prompt: buildTurnPrompt({
+        speakerName: "Participant B",
+        round,
+        totalRounds: rounds,
+        transcript: transcriptText,
+      }),
+      modelRegistry: ctx.modelRegistry,
+      signal: ctx.signal,
     });
 
     const entryB: DebateEntry = {
-      round, speaker: "B", model: `${modelB.provider}/${modelB.id}`,
-      output: resultB.output, durationMs: resultB.durationMs, tokens: resultB.tokens, error: resultB.error,
+      round,
+      speaker: "B",
+      model: `${modelB.provider}/${modelB.id}`,
+      output: resultB.output,
+      durationMs: resultB.durationMs,
+      tokens: resultB.tokens,
+      error: resultB.error,
     };
     transcript.push(entryB);
 
@@ -421,20 +533,40 @@ async function runDebate(
   // ── Optional judge ──────────────────────────────────────────────
   let judgeVerdict: string | undefined;
   if (params.judge && !ctx.signal?.aborted) {
-    fire({ phase: "judge", round: rounds, totalRounds: rounds, speaker: "judge", tokens: 0, durationMs: 0 });
+    fire({
+      phase: "judge",
+      round: rounds,
+      totalRounds: rounds,
+      speaker: "judge",
+      tokens: 0,
+      durationMs: 0,
+    });
 
     const fullTranscript = transcript
-      .map((e) => `### Round ${e.round} — Participant ${e.speaker} (${e.model})\n\n${e.output}`)
+      .map(
+        (e) =>
+          `### Round ${e.round} — Participant ${e.speaker} (${e.model})\n\n${e.output}`,
+      )
       .join("\n\n");
 
     const judgeResult = await runDebateTurn({
-      systemPrompt: buildJudgeSystemPrompt({ topic: params.topic, transcript: fullTranscript, customPrompt: params.judge?.prompt }),
-      model: judgeModel, thinking, tools: [], cwd,
+      systemPrompt: buildJudgeSystemPrompt({
+        topic: params.topic,
+        transcript: fullTranscript,
+        customPrompt: params.judge?.prompt,
+      }),
+      model: judgeModel,
+      thinking,
+      tools: [],
+      cwd,
       prompt: "Review the debate and deliver your verdict.",
-      modelRegistry: ctx.modelRegistry, signal: ctx.signal,
+      modelRegistry: ctx.modelRegistry,
+      signal: ctx.signal,
     });
 
-    judgeVerdict = judgeResult.error ? `[JUDGE ERROR: ${judgeResult.error}]` : judgeResult.output;
+    judgeVerdict = judgeResult.error
+      ? `[JUDGE ERROR: ${judgeResult.error}]`
+      : judgeResult.output;
 
     const lastP = progress[progress.length - 1]!;
     lastP.durationMs = judgeResult.durationMs;
@@ -442,7 +574,14 @@ async function runDebate(
     lastP.phase = "done";
     fire();
   } else {
-    fire({ phase: "done", round: rounds, totalRounds: rounds, speaker: "A", tokens: 0, durationMs: 0 });
+    fire({
+      phase: "done",
+      round: rounds,
+      totalRounds: rounds,
+      speaker: "A",
+      tokens: 0,
+      durationMs: 0,
+    });
   }
 
   // ── Format output ────────────────────────────────────────────────
@@ -451,8 +590,11 @@ async function runDebate(
   const parts: string[] = [];
 
   parts.push(`# Debate: ${params.topic}`);
-  parts.push(`Rounds: ${rounds} · Wall time: ${fmtDuration(elapsedTotal)} · Total tokens: ${fmtTokens(totalTokens)}`);
-  if (unknownTools.length) parts.push(`⚠ Unknown tools ignored: ${unknownTools.join(", ")}`);
+  parts.push(
+    `Rounds: ${rounds} · Wall time: ${fmtDuration(elapsedTotal)} · Total tokens: ${fmtTokens(totalTokens)}`,
+  );
+  if (unknownTools.length)
+    parts.push(`⚠ Unknown tools ignored: ${unknownTools.join(", ")}`);
   parts.push("");
 
   for (const entry of transcript) {
@@ -460,7 +602,7 @@ async function runDebate(
     const label = entry.error ? "⚠ FAILED" : "OK";
     parts.push(
       `## Round ${entry.round} — Participant ${name} (${entry.model})\n` +
-      `[${label} | ${fmtDuration(entry.durationMs)} | ${fmtTokens(entry.tokens)} tokens]\n\n${entry.output}\n`,
+        `[${label} | ${fmtDuration(entry.durationMs)} | ${fmtTokens(entry.tokens)} tokens]\n\n${entry.output}\n`,
     );
   }
 
@@ -472,7 +614,13 @@ async function runDebate(
 
   return {
     content: [{ type: "text" as const, text: parts.join("\n") }],
-    details: { topic: params.topic, rounds, transcript, judgeVerdict, progress },
+    details: {
+      topic: params.topic,
+      rounds,
+      transcript,
+      judgeVerdict,
+      progress,
+    },
   };
 }
 
@@ -487,7 +635,10 @@ export default function debateExtension(pi: ExtensionAPI): void {
       // Get topic: from args or prompt the user
       let topic = args?.trim();
       if (!topic) {
-        topic = await ctx.ui.input("Debate topic:", "e.g. Is Rust better than Go for CLIs?");
+        topic = await ctx.ui.input(
+          "Debate topic:",
+          "e.g. Is Rust better than Go for CLIs?",
+        );
         if (!topic) return;
       }
 
@@ -539,70 +690,118 @@ export default function debateExtension(pi: ExtensionAPI): void {
       "Each participant gets independent tools, model, and thinking level.",
     parameters: Type.Object({
       topic: Type.String({ description: "The debate topic or question." }),
-      rounds: Type.Optional(Type.Number({
-        minimum: 1,
-        maximum: MAX_ROUNDS,
-        default: DEFAULT_ROUNDS,
-        description: `Number of back-and-forth rounds (1-${MAX_ROUNDS}, default ${DEFAULT_ROUNDS}).`,
-      })),
-      modelA: Type.Optional(Type.String({
-        description: "Model for participant A (pro). Falls back to parent model.",
-      })),
-      modelB: Type.Optional(Type.String({
-        description: "Model for participant B (con). Falls back to model A, then parent model.",
-      })),
-      positionA: Type.Optional(Type.String({
-        description: "Position/perspective for A (default: 'pro / in favor').",
-      })),
-      positionB: Type.Optional(Type.String({
-        description: "Position/perspective for B (default: 'con / against').",
-      })),
-      systemPromptA: Type.Optional(Type.String({
-        description: "Custom system prompt for A. Overrides the default debate framing.",
-      })),
-      systemPromptB: Type.Optional(Type.String({
-        description: "Custom system prompt for B. Overrides the default debate framing.",
-      })),
-      judge: Type.Optional(Type.Object({
-        model: Type.Optional(Type.String({
-          description: "Model for the judge. Defaults to parent model.",
-        })),
-        prompt: Type.Optional(Type.String({
-          description: "Custom judge prompt. Overrides the default evaluation format.",
-        })),
-      })),
-      cwd: Type.Optional(Type.String({
-        description: "Working directory for both participants. Defaults to parent session cwd.",
-      })),
-      tools: Type.Optional(Type.Array(Type.String(), {
-        description: "Tools both participants may use: read, write, edit, bash, grep, find, ls.",
-      })),
-      thinking: Type.Optional(Type.String({
-        description: "Thinking level for both participants: off, minimal, low, medium, high, xhigh. Defaults to off.",
-      })),
+      rounds: Type.Optional(
+        Type.Number({
+          minimum: 1,
+          maximum: MAX_ROUNDS,
+          default: DEFAULT_ROUNDS,
+          description: `Number of back-and-forth rounds (1-${MAX_ROUNDS}, default ${DEFAULT_ROUNDS}).`,
+        }),
+      ),
+      modelA: Type.Optional(
+        Type.String({
+          description:
+            "Model for participant A (pro). Falls back to parent model.",
+        }),
+      ),
+      modelB: Type.Optional(
+        Type.String({
+          description:
+            "Model for participant B (con). Falls back to model A, then parent model.",
+        }),
+      ),
+      positionA: Type.Optional(
+        Type.String({
+          description:
+            "Position/perspective for A (default: 'pro / in favor').",
+        }),
+      ),
+      positionB: Type.Optional(
+        Type.String({
+          description: "Position/perspective for B (default: 'con / against').",
+        }),
+      ),
+      systemPromptA: Type.Optional(
+        Type.String({
+          description:
+            "Custom system prompt for A. Overrides the default debate framing.",
+        }),
+      ),
+      systemPromptB: Type.Optional(
+        Type.String({
+          description:
+            "Custom system prompt for B. Overrides the default debate framing.",
+        }),
+      ),
+      judge: Type.Optional(
+        Type.Object({
+          model: Type.Optional(
+            Type.String({
+              description: "Model for the judge. Defaults to parent model.",
+            }),
+          ),
+          prompt: Type.Optional(
+            Type.String({
+              description:
+                "Custom judge prompt. Overrides the default evaluation format.",
+            }),
+          ),
+        }),
+      ),
+      cwd: Type.Optional(
+        Type.String({
+          description:
+            "Working directory for both participants. Defaults to parent session cwd.",
+        }),
+      ),
+      tools: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "Tools both participants may use: read, write, edit, bash, grep, find, ls.",
+        }),
+      ),
+      thinking: Type.Optional(
+        Type.String({
+          description:
+            "Thinking level for both participants: off, minimal, low, medium, high, xhigh. Defaults to off.",
+        }),
+      ),
     }),
 
     async execute(_id, params: DebateArgs, signal, onUpdate, ctx) {
-      return runDebate(params, {
-        modelRegistry: ctx.modelRegistry,
-        model: ctx.model,
-        cwd: ctx.cwd,
-        signal,
-      }, ({ transcript, progress }) => {
-        onUpdate?.({
-          content: [{ type: "text", text: `Debating: ${trunc(params.topic, 60)}` }],
-          details: { topic: params.topic, rounds: params.rounds ?? DEFAULT_ROUNDS, transcript, progress },
-        });
-      });
+      return runDebate(
+        params,
+        {
+          modelRegistry: ctx.modelRegistry,
+          model: ctx.model,
+          cwd: ctx.cwd,
+          signal,
+        },
+        ({ transcript, progress }) => {
+          onUpdate?.({
+            content: [
+              { type: "text", text: `Debating: ${trunc(params.topic, 60)}` },
+            ],
+            details: {
+              topic: params.topic,
+              rounds: params.rounds ?? DEFAULT_ROUNDS,
+              transcript,
+              progress,
+            },
+          });
+        },
+      );
     },
 
     // ── TUI Renderers ────────────────────────────────────────────────
 
     renderCall(args, theme, ctx) {
       const state = ctx.state as { startedAt?: number };
-      if (ctx.executionStarted && state.startedAt === undefined) state.startedAt = Date.now();
+      if (ctx.executionStarted && state.startedAt === undefined)
+        state.startedAt = Date.now();
       const a = args as DebateArgs;
-      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const rd = a.rounds ?? DEFAULT_ROUNDS;
       const hasJudge = !!a.judge;
       const lines = [
@@ -619,33 +818,48 @@ export default function debateExtension(pi: ExtensionAPI): void {
       const details = result.details as DebateDetails | undefined;
 
       if (!details?.progress?.length) {
-        const content = (result.content as Array<{ type: string; text: string }>)
-          ?.filter((c) => c.type === "text")
-          .map((c) => c.text)
-          .join("\n") ?? "";
-        const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+        const content =
+          (result.content as Array<{ type: string; text: string }>)
+            ?.filter((c) => c.type === "text")
+            .map((c) => c.text)
+            .join("\n") ?? "";
+        const text =
+          (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
         text.setText(content ? `\n${content}` : "");
         return text;
       }
 
       const { progress, transcript } = details;
-      const elapsed = state.startedAt ? ` · ${fmtDuration(Date.now() - state.startedAt)}` : "";
+      const elapsed = state.startedAt
+        ? ` · ${fmtDuration(Date.now() - state.startedAt)}`
+        : "";
 
       // ── Partial (still running) ────────────────────────────────
       if (options.isPartial) {
-        const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-        const lines: string[] = ["", theme.fg("muted", `Debating${elapsed}`), ""];
+        const text =
+          (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+        const lines: string[] = [
+          "",
+          theme.fg("muted", `Debating${elapsed}`),
+          "",
+        ];
 
         for (const p of progress) {
           switch (p.phase) {
             case "setup":
-              lines.push(`  ${theme.fg("warning", "⚠")} ${theme.fg("muted", "validating…")}`);
+              lines.push(
+                `  ${theme.fg("warning", "⚠")} ${theme.fg("muted", "validating…")}`,
+              );
               break;
             case "round":
-              lines.push(`  ${theme.fg("warning", "●")} Round ${p.round}/${p.totalRounds} — ${theme.bold(p.speaker)}${p.tokens > 0 ? theme.fg("muted", ` · ${fmtTokens(p.tokens)} tokens`) : ""}`);
+              lines.push(
+                `  ${theme.fg("warning", "●")} Round ${p.round}/${p.totalRounds} — ${theme.bold(p.speaker)}${p.tokens > 0 ? theme.fg("muted", ` · ${fmtTokens(p.tokens)} tokens`) : ""}`,
+              );
               break;
             case "judge":
-              lines.push(`  ${theme.fg("warning", "●")} ${theme.bold("Judge")} deliberating…`);
+              lines.push(
+                `  ${theme.fg("warning", "●")} ${theme.bold("Judge")} deliberating…`,
+              );
               break;
             case "done":
               break;
@@ -664,27 +878,40 @@ export default function debateExtension(pi: ExtensionAPI): void {
       // ── Complete — expanded (Ctrl+O) ──────────────────────────
       const totalTokens = transcript.reduce((sum, e) => sum + e.tokens, 0);
       const totalMs = transcript.reduce((sum, e) => sum + e.durationMs, 0);
-      const wallTime = state.startedAt ? fmtDuration(Date.now() - state.startedAt) : fmtDuration(totalMs);
+      const wallTime = state.startedAt
+        ? fmtDuration(Date.now() - state.startedAt)
+        : fmtDuration(totalMs);
 
       if (options.expanded) {
         const mdTheme = getMarkdownTheme();
         const container = new Container();
 
         // Header
-        container.addChild(new Text(
-          theme.fg("muted", `${transcript.length}/${details.rounds * 2} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`),
-          0, 0,
-        ));
+        container.addChild(
+          new Text(
+            theme.fg(
+              "muted",
+              `${transcript.length}/${details.rounds * 2} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`,
+            ),
+            0,
+            0,
+          ),
+        );
         container.addChild(new Spacer(1));
 
         // Full transcript
         for (const entry of transcript) {
-          const icon = entry.error ? theme.fg("error", "✗") : theme.fg("success", "✓");
+          const icon = entry.error
+            ? theme.fg("error", "✗")
+            : theme.fg("success", "✓");
           const label = `Round ${entry.round} — Participant ${entry.speaker}`;
-          container.addChild(new Text(
-            `${icon} ${theme.bold(label)} ${theme.fg("muted", `(${entry.model})`)}${theme.fg("muted", ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`)}`,
-            0, 0,
-          ));
+          container.addChild(
+            new Text(
+              `${icon} ${theme.bold(label)} ${theme.fg("muted", `(${entry.model})`)}${theme.fg("muted", ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`)}`,
+              0,
+              0,
+            ),
+          );
           container.addChild(new Markdown(entry.output, 1, 0, mdTheme));
           container.addChild(new Spacer(1));
         }
@@ -701,19 +928,29 @@ export default function debateExtension(pi: ExtensionAPI): void {
       // ── Complete — collapsed (default) ────────────────────────
       // Reuse lastComponent only if it's a Text; expanded path returns Container
       const last = ctx.lastComponent as Record<string, unknown> | undefined;
-      const text = (last && "setText" in last ? ctx.lastComponent as Text : undefined) ?? new Text("", 0, 0);
+      const text =
+        (last && "setText" in last ? (ctx.lastComponent as Text) : undefined) ??
+        new Text("", 0, 0);
       const lines: string[] = [
         "",
-        theme.fg("muted", `${transcript.length}/${details.rounds * 2} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`),
+        theme.fg(
+          "muted",
+          `${transcript.length}/${details.rounds * 2} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`,
+        ),
         "",
       ];
 
       for (const entry of transcript) {
-        const icon = entry.error ? theme.fg("error", "✗") : theme.fg("success", "✓");
+        const icon = entry.error
+          ? theme.fg("error", "✗")
+          : theme.fg("success", "✓");
         const label = `Round ${entry.round} — ${entry.speaker}`;
         lines.push(
           `${icon} ${theme.bold(label)} ${theme.fg("muted", `(${entry.model})`)}` +
-          theme.fg("muted", ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`),
+            theme.fg(
+              "muted",
+              ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`,
+            ),
         );
       }
 
@@ -726,12 +963,17 @@ export default function debateExtension(pi: ExtensionAPI): void {
           lines.push(`  ${theme.fg("toolOutput", line)}`);
         }
         if (verdictLines.length > maxLines) {
-          lines.push(`  ${theme.fg("muted", `… ${verdictLines.length - maxLines} more lines`)}`);
+          lines.push(
+            `  ${theme.fg("muted", `… ${verdictLines.length - maxLines} more lines`)}`,
+          );
         }
       }
 
       try {
-        lines.push("", theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`));
+        lines.push(
+          "",
+          theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`),
+        );
       } catch {
         lines.push("", theme.fg("muted", "(Ctrl+O to expand)"));
       }

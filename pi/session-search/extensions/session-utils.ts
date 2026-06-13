@@ -139,11 +139,18 @@ function timestampValue(timestamp: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-export function compareTimestampDesc(left: { timestamp: string }, right: { timestamp: string }): number {
+export function compareTimestampDesc(
+  left: { timestamp: string },
+  right: { timestamp: string },
+): number {
   return timestampValue(right.timestamp) - timestampValue(left.timestamp);
 }
 
-export function clampPositiveInteger(value: number | undefined, fallback: number, max: number): number {
+export function clampPositiveInteger(
+  value: number | undefined,
+  fallback: number,
+  max: number,
+): number {
   if (!Number.isFinite(value)) return fallback;
   const normalized = Math.trunc(value ?? fallback);
   if (normalized < 1) return fallback;
@@ -210,7 +217,9 @@ export function extractThinking(content: unknown): string {
   return parts.join("\n\n");
 }
 
-export function extractToolCalls(content: unknown): Array<{ name: string; arguments: string }> {
+export function extractToolCalls(
+  content: unknown,
+): Array<{ name: string; arguments: string }> {
   if (!Array.isArray(content)) return [];
 
   const toolCalls: Array<{ name: string; arguments: string }> = [];
@@ -317,20 +326,27 @@ export function parseSessionText(data: string): ParsedSession | null {
 }
 
 function getTreeEntries(entries: readonly SessionEntry[]): GenericEntry[] {
-  return entries.filter((entry) => entry.type !== "session_info") as GenericEntry[];
+  return entries.filter(
+    (entry) => entry.type !== "session_info",
+  ) as GenericEntry[];
 }
 
 function getLeafCandidates(entries: readonly GenericEntry[]): GenericEntry[] {
   const parentIds = new Set(
     entries
       .map((entry) => entry.parentId)
-      .filter((parentId): parentId is string => typeof parentId === "string" && parentId.length > 0),
+      .filter(
+        (parentId): parentId is string =>
+          typeof parentId === "string" && parentId.length > 0,
+      ),
   );
 
   return entries.filter((entry) => !parentIds.has(entry.id));
 }
 
-function sortEntriesByTimestampDesc(entries: readonly GenericEntry[]): GenericEntry[] {
+function sortEntriesByTimestampDesc(
+  entries: readonly GenericEntry[],
+): GenericEntry[] {
   return [...entries].sort((left, right) => {
     const timestampCompare = compareTimestampDesc(left, right);
     if (timestampCompare !== 0) return timestampCompare;
@@ -338,7 +354,9 @@ function sortEntriesByTimestampDesc(entries: readonly GenericEntry[]): GenericEn
   });
 }
 
-function buildChildrenMap(entries: readonly GenericEntry[]): Map<string, GenericEntry[]> {
+function buildChildrenMap(
+  entries: readonly GenericEntry[],
+): Map<string, GenericEntry[]> {
   const children = new Map<string, GenericEntry[]>();
   for (const entry of entries) {
     if (entry.parentId === null) continue;
@@ -349,7 +367,10 @@ function buildChildrenMap(entries: readonly GenericEntry[]): Map<string, Generic
   return children;
 }
 
-function collectDescendantLeaves(startId: string, children: ReadonlyMap<string, GenericEntry[]>): GenericEntry[] {
+function collectDescendantLeaves(
+  startId: string,
+  children: ReadonlyMap<string, GenericEntry[]>,
+): GenericEntry[] {
   const leaves: GenericEntry[] = [];
   const stack = [startId];
   const visited = new Set<string>();
@@ -390,7 +411,10 @@ export function hasEntryId(session: ParsedSession, entryId: string): boolean {
   return getTreeEntries(session.entries).some((entry) => entry.id === entryId);
 }
 
-export function selectLeafEntryId(session: ParsedSession, preferredEntryId?: string): string | null {
+export function selectLeafEntryId(
+  session: ParsedSession,
+  preferredEntryId?: string,
+): string | null {
   const treeEntries = getTreeEntries(session.entries);
   if (treeEntries.length === 0) return null;
 
@@ -407,11 +431,15 @@ export function selectLeafEntryId(session: ParsedSession, preferredEntryId?: str
   }
 
   const leafCandidates = getLeafCandidates(treeEntries);
-  if (leafCandidates.length > 0) return sortEntriesByTimestampDesc(leafCandidates)[0].id;
+  if (leafCandidates.length > 0)
+    return sortEntriesByTimestampDesc(leafCandidates)[0].id;
   return sortEntriesByTimestampDesc(treeEntries)[0].id;
 }
 
-export function selectBranchMessages(session: ParsedSession, preferredEntryId?: string): MessageEntry[] {
+export function selectBranchMessages(
+  session: ParsedSession,
+  preferredEntryId?: string,
+): MessageEntry[] {
   const leafEntryId = selectLeafEntryId(session, preferredEntryId);
   if (!leafEntryId) return [];
 
@@ -428,7 +456,10 @@ export function selectBranchMessages(session: ParsedSession, preferredEntryId?: 
     currentId = currentEntry?.parentId ?? null;
   }
 
-  return session.entries.filter((entry): entry is MessageEntry => entry.type === "message" && branchIds.has(entry.id));
+  return session.entries.filter(
+    (entry): entry is MessageEntry =>
+      entry.type === "message" && branchIds.has(entry.id),
+  );
 }
 
 function snippetForMatch(text: string, query: string): string {
@@ -450,7 +481,10 @@ function snippetForMatch(text: string, query: string): string {
   if (index < 0) return limitText(normalizedText, MAX_SNIPPET_CHARS);
 
   const start = Math.max(0, index - 40);
-  const end = Math.min(normalizedText.length, index + Math.max(lowerQuery.length, 40) + 80);
+  const end = Math.min(
+    normalizedText.length,
+    index + Math.max(lowerQuery.length, 40) + 80,
+  );
   const snippet = normalizedText.slice(start, end);
   return `${start > 0 ? "…" : ""}${snippet}${end < normalizedText.length ? "…" : ""}`;
 }
@@ -464,7 +498,8 @@ function searchScore(field: SearchField, text: string, query: string): number {
   const prefix = normalizedText.startsWith(normalizedQuery);
   const substring = normalizedText.includes(normalizedQuery);
   const terms = normalizedQuery.split(" ").filter(Boolean);
-  const allTerms = terms.length > 1 && terms.every((term) => normalizedText.includes(term));
+  const allTerms =
+    terms.length > 1 && terms.every((term) => normalizedText.includes(term));
 
   if (!substring && !allTerms) return 0;
 
@@ -529,14 +564,25 @@ export function findSessionMatch(
   return best;
 }
 
-export function buildSessionSummary(file: string, session: ParsedSession): SessionSummary {
-  const firstUserMessageEntry = session.entries.find((entry): entry is MessageEntry => {
-    if (entry.type !== "message") return false;
-    const messageEntry = entry as MessageEntry;
-    return messageEntry.message.role === "user" && extractText(messageEntry.message.content).length > 0;
-  });
+export function buildSessionSummary(
+  file: string,
+  session: ParsedSession,
+): SessionSummary {
+  const firstUserMessageEntry = session.entries.find(
+    (entry): entry is MessageEntry => {
+      if (entry.type !== "message") return false;
+      const messageEntry = entry as MessageEntry;
+      return (
+        messageEntry.message.role === "user" &&
+        extractText(messageEntry.message.content).length > 0
+      );
+    },
+  );
   const firstUserMessage = firstUserMessageEntry
-    ? limitText(extractText(firstUserMessageEntry.message.content), MAX_FIRST_USER_MESSAGE_CHARS)
+    ? limitText(
+        extractText(firstUserMessageEntry.message.content),
+        MAX_FIRST_USER_MESSAGE_CHARS,
+      )
     : "";
 
   const segments: SearchSegment[] = [
@@ -550,7 +596,11 @@ export function buildSessionSummary(file: string, session: ParsedSession): Sessi
     segments.push({ field: "name", text: session.name });
   }
   if (firstUserMessage) {
-    segments.push({ field: "first_user_message", text: firstUserMessage, entryId: firstUserMessageEntry?.id });
+    segments.push({
+      field: "first_user_message",
+      text: firstUserMessage,
+      entryId: firstUserMessageEntry?.id,
+    });
   }
 
   for (const entry of session.entries) {
@@ -561,15 +611,27 @@ export function buildSessionSummary(file: string, session: ParsedSession): Sessi
     if (!text) continue;
 
     if (messageEntry.message.role === "user") {
-      segments.push({ field: "user_message", text: limitText(text, MAX_SEARCH_TEXT_CHARS), entryId: messageEntry.id });
+      segments.push({
+        field: "user_message",
+        text: limitText(text, MAX_SEARCH_TEXT_CHARS),
+        entryId: messageEntry.id,
+      });
       continue;
     }
     if (messageEntry.message.role === "assistant") {
-      segments.push({ field: "assistant_message", text: limitText(text, MAX_SEARCH_TEXT_CHARS), entryId: messageEntry.id });
+      segments.push({
+        field: "assistant_message",
+        text: limitText(text, MAX_SEARCH_TEXT_CHARS),
+        entryId: messageEntry.id,
+      });
       continue;
     }
     if (messageEntry.message.role === "toolResult") {
-      segments.push({ field: "tool_result", text: limitText(text, MAX_SEARCH_TEXT_CHARS), entryId: messageEntry.id });
+      segments.push({
+        field: "tool_result",
+        text: limitText(text, MAX_SEARCH_TEXT_CHARS),
+        entryId: messageEntry.id,
+      });
     }
   }
 
@@ -585,7 +647,11 @@ export function buildSessionSummary(file: string, session: ParsedSession): Sessi
   };
 }
 
-function windowAroundIndex(messages: MessageEntry[], anchorIndex: number, window: number): { start: number; end: number } {
+function windowAroundIndex(
+  messages: MessageEntry[],
+  anchorIndex: number,
+  window: number,
+): { start: number; end: number } {
   // window = number of neighbor user turns on each side of the anchor.
   // window=0 → anchor + trailing non-user only (no neighbor user turns).
   // window=1 → anchor + 1 user turn before + 1 after (and all messages between them).
@@ -611,10 +677,16 @@ function windowAroundIndex(messages: MessageEntry[], anchorIndex: number, window
     // Anchor is not a user turn (assistant/tool) — include nearest user turns within window
     let lo = -1;
     for (let i = userIndices.length - 1; i >= 0; i--) {
-      if (userIndices[i] <= anchorIndex) { lo = i; break; }
+      if (userIndices[i] <= anchorIndex) {
+        lo = i;
+        break;
+      }
     }
     const startRank = lo >= 0 ? Math.max(0, lo - window + 1) : 0;
-    const endRank = lo >= 0 ? Math.min(userIndices.length - 1, lo + window) : Math.min(userIndices.length - 1, window - 1);
+    const endRank =
+      lo >= 0
+        ? Math.min(userIndices.length - 1, lo + window)
+        : Math.min(userIndices.length - 1, window - 1);
     firstUserIdx = userIndices[startRank] ?? anchorIndex;
     lastUserIdx = userIndices[endRank] ?? anchorIndex;
   }
@@ -622,14 +694,20 @@ function windowAroundIndex(messages: MessageEntry[], anchorIndex: number, window
   // The span includes all messages from firstUserIdx to lastUserIdx + trailing non-user
   const start = Math.min(firstUserIdx, anchorIndex);
   let end = Math.max(lastUserIdx, anchorIndex);
-  while (end + 1 < messages.length && messages[end + 1].message.role !== "user") {
+  while (
+    end + 1 < messages.length &&
+    messages[end + 1].message.role !== "user"
+  ) {
     end++;
   }
 
   return { start, end };
 }
 
-export function formatConversation(session: ParsedSession, options: FormatConversationOptions = {}): FormattedConversation {
+export function formatConversation(
+  session: ParsedSession,
+  options: FormatConversationOptions = {},
+): FormattedConversation {
   const maxTurns = options.maxTurns ?? 50;
   const detail = options.detail ?? "outline";
   const branchMessages = selectBranchMessages(session, options.entryId);
@@ -642,11 +720,17 @@ export function formatConversation(session: ParsedSession, options: FormatConver
   if (options.entryId && options.window !== undefined) {
     const anchorIdx = branchMessages.findIndex((m) => m.id === options.entryId);
     if (anchorIdx >= 0) {
-      const { start, end } = windowAroundIndex(branchMessages, anchorIdx, options.window);
+      const { start, end } = windowAroundIndex(
+        branchMessages,
+        anchorIdx,
+        options.window,
+      );
       messages = branchMessages.slice(start, end + 1);
       if (start > 0) out.push("… (earlier turns omitted) …");
     } else {
-      out.push(`Note: entry_id ${options.entryId} not on this branch; showing full branch.`);
+      out.push(
+        `Note: entry_id ${options.entryId} not on this branch; showing full branch.`,
+      );
     }
   }
 
@@ -659,7 +743,9 @@ export function formatConversation(session: ParsedSession, options: FormatConver
       if (!text) continue;
 
       if (detail === "outline") {
-        out.push(`\n### User (id: ${entry.id})\n${limitText(collapseWhitespace(text), 150)}`);
+        out.push(
+          `\n### User (id: ${entry.id})\n${limitText(collapseWhitespace(text), 150)}`,
+        );
       } else if (detail === "compact") {
         out.push(`\n### User (id: ${entry.id})\n${limitText(text, 500)}`);
       } else {
@@ -670,7 +756,10 @@ export function formatConversation(session: ParsedSession, options: FormatConver
 
     if (msg.role === "assistant") {
       const text = extractText(msg.content);
-      const toolCalls = detail !== "outline" && options.includeTools ? extractToolCalls(msg.content) : [];
+      const toolCalls =
+        detail !== "outline" && options.includeTools
+          ? extractToolCalls(msg.content)
+          : [];
 
       if (detail === "outline") {
         const parts: string[] = [];
@@ -692,7 +781,9 @@ export function formatConversation(session: ParsedSession, options: FormatConver
           out.push(`\n### Assistant (id: ${entry.id})\n${parts.join("\n")}`);
         }
       } else {
-        const thinking = options.includeThinking ? extractThinking(msg.content) : "";
+        const thinking = options.includeThinking
+          ? extractThinking(msg.content)
+          : "";
         const hasContent = thinking || text || toolCalls.length > 0;
         if (hasContent) {
           out.push(`\n### Assistant`);
@@ -715,7 +806,9 @@ export function formatConversation(session: ParsedSession, options: FormatConver
         if (options.includeTools) {
           const text = extractText(msg.content);
           if (text) {
-            out.push(`\n[Result (${msg.toolName ?? "tool"}): ${limitText(text, 300)}]`);
+            out.push(
+              `\n[Result (${msg.toolName ?? "tool"}): ${limitText(text, 300)}]`,
+            );
           }
         }
         continue;
@@ -724,7 +817,9 @@ export function formatConversation(session: ParsedSession, options: FormatConver
       if (options.includeTools) {
         const text = extractText(msg.content);
         if (text) {
-          out.push(`\n[Result (${msg.toolName ?? "tool"}): ${limitText(text, 500)}]`);
+          out.push(
+            `\n[Result (${msg.toolName ?? "tool"}): ${limitText(text, 500)}]`,
+          );
         }
       }
     }
@@ -733,8 +828,13 @@ export function formatConversation(session: ParsedSession, options: FormatConver
   if (options.entryId && options.window !== undefined) {
     const anchorIdx = branchMessages.findIndex((m) => m.id === options.entryId);
     if (anchorIdx >= 0) {
-      const { end } = windowAroundIndex(branchMessages, anchorIdx, options.window);
-      if (end < branchMessages.length - 1) out.push("… (later turns omitted) …");
+      const { end } = windowAroundIndex(
+        branchMessages,
+        anchorIdx,
+        options.window,
+      );
+      if (end < branchMessages.length - 1)
+        out.push("… (later turns omitted) …");
     }
   }
 
@@ -747,15 +847,24 @@ export function formatConversation(session: ParsedSession, options: FormatConver
 
 export function matchFieldLabel(field: SearchField): string {
   switch (field) {
-    case "id": return "UUID";
-    case "cwd": return "CWD";
-    case "file": return "file path";
-    case "timestamp": return "timestamp";
-    case "name": return "session name";
-    case "first_user_message": return "first user message";
-    case "user_message": return "user message";
-    case "assistant_message": return "assistant message";
-    case "tool_result": return "tool result";
+    case "id":
+      return "UUID";
+    case "cwd":
+      return "CWD";
+    case "file":
+      return "file path";
+    case "timestamp":
+      return "timestamp";
+    case "name":
+      return "session name";
+    case "first_user_message":
+      return "first user message";
+    case "user_message":
+      return "user message";
+    case "assistant_message":
+      return "assistant message";
+    case "tool_result":
+      return "tool result";
   }
 }
 
@@ -763,10 +872,15 @@ export function formatSessionDate(timestamp: string): string {
   return new Date(timestamp).toLocaleString();
 }
 
-export function filterByCwd(summaries: readonly SessionSummary[], cwdFilter?: string): SessionSummary[] {
+export function filterByCwd(
+  summaries: readonly SessionSummary[],
+  cwdFilter?: string,
+): SessionSummary[] {
   const normalizedFilter = cwdFilter?.trim().toLowerCase();
   if (!normalizedFilter) return [...summaries];
-  return summaries.filter((summary) => summary.cwd.toLowerCase().includes(normalizedFilter));
+  return summaries.filter((summary) =>
+    summary.cwd.toLowerCase().includes(normalizedFilter),
+  );
 }
 
 export function searchSessions(
@@ -778,13 +892,16 @@ export function searchSessions(
   const hits: SearchHit[] = [];
 
   for (const summary of candidates) {
-    const match = findSessionMatch(summary, query, { searchTools: options.searchTools });
+    const match = findSessionMatch(summary, query, {
+      searchTools: options.searchTools,
+    });
     if (!match) continue;
     hits.push({ summary, match });
   }
 
   hits.sort((left, right) => {
-    if (right.match.score !== left.match.score) return right.match.score - left.match.score;
+    if (right.match.score !== left.match.score)
+      return right.match.score - left.match.score;
     return compareTimestampDesc(left.summary, right.summary);
   });
 

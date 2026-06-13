@@ -11,10 +11,7 @@
 
 import { Agent, type ThinkingLevel } from "@mariozechner/pi-agent-core";
 import { type Api, type Model, streamSimple } from "@mariozechner/pi-ai";
-import {
-  convertToLlm,
-  type ExtensionAPI,
-} from "@mariozechner/pi-coding-agent";
+import { convertToLlm, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 const NAMING_PROMPT = [
   "You are a session naming engine. Given a user's message, produce a short, descriptive session name.",
@@ -22,12 +19,14 @@ const NAMING_PROMPT = [
   "Rules:",
   "- Maximum 60 characters.",
   "- No quotes, no markdown, no punctuation at the end.",
-  "- Use imperative or noun-phrase style (e.g. \"Refactor auth middleware\", \"Fix CSS grid layout\").",
-  "- Be specific, not generic. \"Add retry logic to fetch helper\" > \"Code changes\".",
+  '- Use imperative or noun-phrase style (e.g. "Refactor auth middleware", "Fix CSS grid layout").',
+  '- Be specific, not generic. "Add retry logic to fetch helper" > "Code changes".',
   "- Output ONLY the name. Nothing else.",
 ].join("\n");
 
-function extractLastAssistantText(messages: Array<{ role: string; content?: unknown }>): string {
+function extractLastAssistantText(
+  messages: Array<{ role: string; content?: unknown }>,
+): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]!;
     if (msg.role !== "assistant") continue;
@@ -35,7 +34,13 @@ function extractLastAssistantText(messages: Array<{ role: string; content?: unkn
     if (Array.isArray(msg.content)) {
       const parts: string[] = [];
       for (const block of msg.content) {
-        if (typeof block === "object" && block !== null && "type" in block && block.type === "text" && "text" in block)
+        if (
+          typeof block === "object" &&
+          block !== null &&
+          "type" in block &&
+          block.type === "text" &&
+          "text" in block
+        )
           parts.push((block as { text?: string }).text ?? "");
       }
       return parts.join("\n").trim();
@@ -49,8 +54,11 @@ function extractText(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .filter((b): b is { type: string; text?: string } => typeof b === "object" && b !== null)
-      .map((b) => (b.type === "text" ? b.text ?? "" : ""))
+      .filter(
+        (b): b is { type: string; text?: string } =>
+          typeof b === "object" && b !== null,
+      )
+      .map((b) => (b.type === "text" ? (b.text ?? "") : ""))
       .filter(Boolean)
       .join("\n");
   }
@@ -97,18 +105,23 @@ export default function nameWithAiExtension(pi: ExtensionAPI) {
       const msgContent = (firstUser.message as { content?: unknown }).content;
       const prompt = extractText(msgContent);
       if (!prompt) {
-        ctx.ui.notify("First message is empty — can't generate a name", "warning");
+        ctx.ui.notify(
+          "First message is empty — can't generate a name",
+          "warning",
+        );
         return;
       }
 
       // Truncate long messages to keep the call cheap
-      const snippet = prompt.length > 1000 ? prompt.slice(0, 997) + "…" : prompt;
+      const snippet =
+        prompt.length > 1000 ? prompt.slice(0, 997) + "…" : prompt;
 
       ctx.ui.setStatus("name-with-ai", "Generating name…");
 
       const abortController = new AbortController();
       const onCtxAbort = () => abortController.abort();
-      if (ctx.signal) ctx.signal.addEventListener("abort", onCtxAbort, { once: true });
+      if (ctx.signal)
+        ctx.signal.addEventListener("abort", onCtxAbort, { once: true });
 
       try {
         const model = ctx.model as Model<Api>;
@@ -123,15 +136,30 @@ export default function nameWithAiExtension(pi: ExtensionAPI) {
           convertToLlm,
           streamFn: async (m, context, options) => {
             const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
-            if (!auth.ok) throw new Error(`Auth failed: ${(auth as { error: string }).error}`);
-            return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+            if (!auth.ok)
+              throw new Error(
+                `Auth failed: ${(auth as { error: string }).error}`,
+              );
+            return streamSimple(m, context, {
+              ...options,
+              apiKey: auth.apiKey,
+              headers: auth.headers ?? undefined,
+            });
           },
         });
 
         if (abortController.signal.aborted) return;
 
-        const abortHandler = () => { try { agent.abort(); } catch { /* */ } };
-        abortController.signal.addEventListener("abort", abortHandler, { once: true });
+        const abortHandler = () => {
+          try {
+            agent.abort();
+          } catch {
+            /* */
+          }
+        };
+        abortController.signal.addEventListener("abort", abortHandler, {
+          once: true,
+        });
 
         await agent.prompt(snippet);
         await agent.waitForIdle();
@@ -143,12 +171,18 @@ export default function nameWithAiExtension(pi: ExtensionAPI) {
           pi.setSessionName(name);
           ctx.ui.notify(`Named: ${name}`, "info");
         } else {
-          ctx.ui.notify("AI returned an empty name — try /name-with-ai <name>", "warning");
+          ctx.ui.notify(
+            "AI returned an empty name — try /name-with-ai <name>",
+            "warning",
+          );
         }
 
         abortController.signal.removeEventListener("abort", abortHandler);
       } catch (err) {
-        ctx.ui.notify(`Naming failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+        ctx.ui.notify(
+          `Naming failed: ${err instanceof Error ? err.message : String(err)}`,
+          "error",
+        );
       } finally {
         if (ctx.signal) ctx.signal.removeEventListener("abort", onCtxAbort);
         ctx.ui.setStatus("name-with-ai", undefined);

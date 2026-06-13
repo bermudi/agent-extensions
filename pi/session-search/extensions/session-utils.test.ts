@@ -70,7 +70,9 @@ describe("looksLikeUuid heuristic", () => {
   });
 
   test("rejects paths", () => {
-    expect(looksLikeUuid("/home/user/.pi/agent/sessions/file.jsonl")).toBe(false);
+    expect(looksLikeUuid("/home/user/.pi/agent/sessions/file.jsonl")).toBe(
+      false,
+    );
   });
 
   test("case insensitive", () => {
@@ -127,7 +129,10 @@ const BRANCHED_SESSION = jsonl([
     id: "a-new",
     parentId: "u2",
     timestamp: "2026-04-15T00:00:05.000Z",
-    message: { role: "assistant", content: textBlock("new leaf mentions zeroclaw") },
+    message: {
+      role: "assistant",
+      content: textBlock("new leaf mentions zeroclaw"),
+    },
   },
 ]);
 
@@ -151,7 +156,11 @@ const TOOL_RESULT_SESSION = jsonl([
     id: "t1",
     parentId: "u1",
     timestamp: "2026-04-15T00:00:02.000Z",
-    message: { role: "toolResult", toolName: "bash", content: textBlock("super-secret-needle") },
+    message: {
+      role: "toolResult",
+      toolName: "bash",
+      content: textBlock("super-secret-needle"),
+    },
   },
 ]);
 
@@ -168,18 +177,28 @@ const CONTENT_BEATS_PATH_SESSION = jsonl([
     id: "u1",
     parentId: null,
     timestamp: "2026-04-15T00:00:01.000Z",
-    message: { role: "user", content: textBlock("how does zeroclaw hands work?") },
+    message: {
+      role: "user",
+      content: textBlock("how does zeroclaw hands work?"),
+    },
   },
   {
     type: "message",
     id: "a1",
     parentId: "u1",
     timestamp: "2026-04-15T00:00:02.000Z",
-    message: { role: "assistant", content: textBlock("zeroclaw hands are not wired up yet") },
+    message: {
+      role: "assistant",
+      content: textBlock("zeroclaw hands are not wired up yet"),
+    },
   },
 ]);
 
-function makeSummaryWithSegment(file: string, field: SearchField, text: string): SessionSummary {
+function makeSummaryWithSegment(
+  file: string,
+  field: SearchField,
+  text: string,
+): SessionSummary {
   return {
     file,
     id: "test-id",
@@ -194,20 +213,41 @@ function makeSummaryWithSegment(file: string, field: SearchField, text: string):
 
 describe("parseHeader", () => {
   test("parses a valid session header", () => {
-    const header = parseHeader(JSON.stringify({ type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/home" }));
-    expect(header).toEqual({ id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/home" });
+    const header = parseHeader(
+      JSON.stringify({
+        type: "session",
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/home",
+      }),
+    );
+    expect(header).toEqual({
+      id: "s1",
+      timestamp: "2026-01-01T00:00:00Z",
+      cwd: "/home",
+    });
   });
 
   test("returns null for missing type", () => {
-    expect(parseHeader(JSON.stringify({ id: "s1", timestamp: "2026-01-01T00:00:00Z" }))).toBeNull();
+    expect(
+      parseHeader(
+        JSON.stringify({ id: "s1", timestamp: "2026-01-01T00:00:00Z" }),
+      ),
+    ).toBeNull();
   });
 
   test("returns null for missing id", () => {
-    expect(parseHeader(JSON.stringify({ type: "session", timestamp: "2026-01-01T00:00:00Z" }))).toBeNull();
+    expect(
+      parseHeader(
+        JSON.stringify({ type: "session", timestamp: "2026-01-01T00:00:00Z" }),
+      ),
+    ).toBeNull();
   });
 
   test("returns null for missing timestamp", () => {
-    expect(parseHeader(JSON.stringify({ type: "session", id: "s1" }))).toBeNull();
+    expect(
+      parseHeader(JSON.stringify({ type: "session", id: "s1" })),
+    ).toBeNull();
   });
 
   test("returns null for invalid JSON", () => {
@@ -215,53 +255,81 @@ describe("parseHeader", () => {
   });
 
   test("defaults cwd to empty string", () => {
-    const header = parseHeader(JSON.stringify({ type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z" }));
-    expect(header).toEqual({ id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "" });
+    const header = parseHeader(
+      JSON.stringify({
+        type: "session",
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+      }),
+    );
+    expect(header).toEqual({
+      id: "s1",
+      timestamp: "2026-01-01T00:00:00Z",
+      cwd: "",
+    });
   });
 });
 
 describe("parseEntry", () => {
   test("parses a message entry", () => {
-    const entry = parseEntry(JSON.stringify({
-      type: "message",
-      id: "m1",
-      parentId: null,
-      timestamp: "2026-01-01T00:00:00Z",
-      message: { role: "user", content: "hi" },
-    }));
+    const entry = parseEntry(
+      JSON.stringify({
+        type: "message",
+        id: "m1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:00Z",
+        message: { role: "user", content: "hi" },
+      }),
+    );
     expect(entry).not.toBeNull();
     expect(entry!.type).toBe("message");
     expect((entry as any).message.role).toBe("user");
   });
 
   test("parses a session_info entry", () => {
-    const entry = parseEntry(JSON.stringify({ type: "session_info", name: "My Session" }));
+    const entry = parseEntry(
+      JSON.stringify({ type: "session_info", name: "My Session" }),
+    );
     expect(entry).not.toBeNull();
     expect(entry!.type).toBe("session_info");
     expect((entry as any).name).toBe("My Session");
   });
 
   test("parses a generic entry", () => {
-    const entry = parseEntry(JSON.stringify({
-      type: "custom",
-      id: "c1",
-      parentId: "p1",
-      timestamp: "2026-01-01T00:00:00Z",
-    }));
+    const entry = parseEntry(
+      JSON.stringify({
+        type: "custom",
+        id: "c1",
+        parentId: "p1",
+        timestamp: "2026-01-01T00:00:00Z",
+      }),
+    );
     expect(entry).not.toBeNull();
     expect(entry!.type).toBe("custom");
   });
 
   test("returns null for missing type", () => {
-    expect(parseEntry(JSON.stringify({ id: "m1", parentId: null, timestamp: "2026-01-01T00:00:00Z" }))).toBeNull();
+    expect(
+      parseEntry(
+        JSON.stringify({
+          id: "m1",
+          parentId: null,
+          timestamp: "2026-01-01T00:00:00Z",
+        }),
+      ),
+    ).toBeNull();
   });
 
   test("returns null for missing id on non-session_info", () => {
-    expect(parseEntry(JSON.stringify({
-      type: "message",
-      parentId: null,
-      timestamp: "2026-01-01T00:00:00Z",
-    }))).toBeNull();
+    expect(
+      parseEntry(
+        JSON.stringify({
+          type: "message",
+          parentId: null,
+          timestamp: "2026-01-01T00:00:00Z",
+        }),
+      ),
+    ).toBeNull();
   });
 
   test("returns null for invalid JSON", () => {
@@ -283,12 +351,19 @@ describe("parseSessionText", () => {
   });
 
   test("returns null when first line is not a header", () => {
-    expect(parseSessionText(JSON.stringify({ type: "message", id: "m1" }))).toBeNull();
+    expect(
+      parseSessionText(JSON.stringify({ type: "message", id: "m1" })),
+    ).toBeNull();
   });
 
   test("extracts name from session_info entries", () => {
     const data = jsonl([
-      { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/" },
+      {
+        type: "session",
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/",
+      },
       { type: "session_info", name: "Named Session" },
     ]);
     const parsed = parseSessionText(data);
@@ -302,11 +377,21 @@ describe("extractText", () => {
   });
 
   test("joins text blocks from array", () => {
-    expect(extractText([{ type: "text", text: "a" }, { type: "text", text: "b" }])).toBe("a\nb");
+    expect(
+      extractText([
+        { type: "text", text: "a" },
+        { type: "text", text: "b" },
+      ]),
+    ).toBe("a\nb");
   });
 
   test("ignores non-text blocks", () => {
-    expect(extractText([{ type: "toolCall", name: "x" }, { type: "text", text: "ok" }])).toBe("ok");
+    expect(
+      extractText([
+        { type: "toolCall", name: "x" },
+        { type: "text", text: "ok" },
+      ]),
+    ).toBe("ok");
   });
 
   test("returns empty for non-array", () => {
@@ -324,7 +409,9 @@ describe("extractToolCalls", () => {
     const calls = extractToolCalls([
       { type: "toolCall", name: "bash", arguments: { cmd: "ls" } },
     ]);
-    expect(calls).toEqual([{ name: "bash", arguments: JSON.stringify({ cmd: "ls" }) }]);
+    expect(calls).toEqual([
+      { name: "bash", arguments: JSON.stringify({ cmd: "ls" }) },
+    ]);
   });
 
   test("returns empty for non-array", () => {
@@ -376,7 +463,12 @@ describe("hasEntryId", () => {
 
   test("ignores session_info entries", () => {
     const data = jsonl([
-      { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/" },
+      {
+        type: "session",
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/",
+      },
       { type: "session_info", id: "info-1", name: "test" },
     ]);
     const parsed = parseSessionText(data)!;
@@ -407,7 +499,12 @@ describe("selectLeafEntryId", () => {
 
   test("returns null for empty entries", () => {
     const data = jsonl([
-      { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/" },
+      {
+        type: "session",
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/",
+      },
     ]);
     const parsed = parseSessionText(data)!;
     expect(selectLeafEntryId(parsed)).toBeNull();
@@ -415,8 +512,19 @@ describe("selectLeafEntryId", () => {
 
   test("returns the only entry in a single-entry session", () => {
     const data = jsonl([
-      { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/" },
-      { type: "message", id: "m1", parentId: null, timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "hi" } },
+      {
+        type: "session",
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/",
+      },
+      {
+        type: "message",
+        id: "m1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:00Z",
+        message: { role: "user", content: "hi" },
+      },
     ]);
     const parsed = parseSessionText(data)!;
     expect(selectLeafEntryId(parsed)).toBe("m1");
@@ -438,7 +546,12 @@ describe("selectBranchMessages", () => {
 
   test("returns empty array for empty session", () => {
     const data = jsonl([
-      { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/" },
+      {
+        type: "session",
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/",
+      },
     ]);
     const parsed = parseSessionText(data)!;
     expect(selectBranchMessages(parsed)).toEqual([]);
@@ -457,7 +570,10 @@ describe("formatConversation", () => {
 
   test("can anchor to an explicit branch entry", () => {
     const parsed = parseSessionText(BRANCHED_SESSION)!;
-    const formatted = formatConversation(parsed, { entryId: "a-old", maxTurns: 10 });
+    const formatted = formatConversation(parsed, {
+      entryId: "a-old",
+      maxTurns: 10,
+    });
     expect(formatted.leafEntryId).toBe("a-old");
     expect(formatted.text).toContain("old leaf");
     expect(formatted.text).not.toContain("new leaf mentions zeroclaw");
@@ -472,16 +588,29 @@ describe("formatConversation", () => {
 
   test("includeTools shows tool calls and results", () => {
     const parsed = parseSessionText(TOOL_RESULT_SESSION)!;
-    const withTools = formatConversation(parsed, { includeTools: true, maxTurns: 10, detail: "full" });
+    const withTools = formatConversation(parsed, {
+      includeTools: true,
+      maxTurns: 10,
+      detail: "full",
+    });
     expect(withTools.text).toContain("[Result (bash): super-secret-needle]");
 
-    const withoutTools = formatConversation(parsed, { includeTools: false, maxTurns: 10, detail: "full" });
+    const withoutTools = formatConversation(parsed, {
+      includeTools: false,
+      maxTurns: 10,
+      detail: "full",
+    });
     expect(withoutTools.text).not.toContain("super-secret-needle");
   });
 
   test("includes assistant tool calls when includeTools is true", () => {
     const data = jsonl([
-      { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/" },
+      {
+        type: "session",
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/",
+      },
       {
         type: "message",
         id: "u1",
@@ -496,60 +625,113 @@ describe("formatConversation", () => {
         timestamp: "2026-01-01T00:00:02Z",
         message: {
           role: "assistant",
-          content: [{ type: "toolCall", name: "bash", arguments: { cmd: "ls" } }],
+          content: [
+            { type: "toolCall", name: "bash", arguments: { cmd: "ls" } },
+          ],
         },
       },
     ]);
     const parsed = parseSessionText(data)!;
-    const formatted = formatConversation(parsed, { includeTools: true, maxTurns: 10, detail: "full" });
+    const formatted = formatConversation(parsed, {
+      includeTools: true,
+      maxTurns: 10,
+      detail: "full",
+    });
     expect(formatted.text).toContain("[Tool: bash(");
   });
 });
 
 describe("formatConversation detail levels", () => {
   const MULTI_TURN = jsonl([
-    { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/project" },
     {
-      type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+      type: "session",
+      id: "s1",
+      timestamp: "2026-01-01T00:00:00Z",
+      cwd: "/project",
+    },
+    {
+      type: "message",
+      id: "u1",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:01Z",
       message: { role: "user", content: textBlock("first user message here") },
     },
     {
-      type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+      type: "message",
+      id: "a1",
+      parentId: "u1",
+      timestamp: "2026-01-01T00:00:02Z",
       message: {
         role: "assistant",
         content: [
-          ...textBlock("Long assistant response that definitely exceeds one hundred and fifty characters so we can verify truncation behavior works correctly in outline mode which is why we need this to be very long indeed.",
+          ...textBlock(
+            "Long assistant response that definitely exceeds one hundred and fifty characters so we can verify truncation behavior works correctly in outline mode which is why we need this to be very long indeed.",
           ),
-          { type: "toolCall", name: "bash", arguments: { command: "ls -la /very/long/path" } },
-          { type: "toolCall", name: "read", arguments: { path: "/some/file.ts" } },
+          {
+            type: "toolCall",
+            name: "bash",
+            arguments: { command: "ls -la /very/long/path" },
+          },
+          {
+            type: "toolCall",
+            name: "read",
+            arguments: { path: "/some/file.ts" },
+          },
         ],
       },
     },
     {
-      type: "message", id: "t1", parentId: "a1", timestamp: "2026-01-01T00:00:03Z",
-      message: { role: "toolResult", toolName: "bash", content: textBlock("tool output result that should be hidden in outline") },
+      type: "message",
+      id: "t1",
+      parentId: "a1",
+      timestamp: "2026-01-01T00:00:03Z",
+      message: {
+        role: "toolResult",
+        toolName: "bash",
+        content: textBlock(
+          "tool output result that should be hidden in outline",
+        ),
+      },
     },
     {
-      type: "message", id: "u2", parentId: "t1", timestamp: "2026-01-01T00:00:04Z",
-      message: { role: "user", content: textBlock("second user turn about something") },
+      type: "message",
+      id: "u2",
+      parentId: "t1",
+      timestamp: "2026-01-01T00:00:04Z",
+      message: {
+        role: "user",
+        content: textBlock("second user turn about something"),
+      },
     },
     {
-      type: "message", id: "a2", parentId: "u2", timestamp: "2026-01-01T00:00:05Z",
+      type: "message",
+      id: "a2",
+      parentId: "u2",
+      timestamp: "2026-01-01T00:00:05Z",
       message: { role: "assistant", content: textBlock("short reply") },
     },
     {
-      type: "message", id: "u3", parentId: "a2", timestamp: "2026-01-01T00:00:06Z",
+      type: "message",
+      id: "u3",
+      parentId: "a2",
+      timestamp: "2026-01-01T00:00:06Z",
       message: { role: "user", content: textBlock("third turn") },
     },
     {
-      type: "message", id: "a3", parentId: "u3", timestamp: "2026-01-01T00:00:07Z",
+      type: "message",
+      id: "a3",
+      parentId: "u3",
+      timestamp: "2026-01-01T00:00:07Z",
       message: { role: "assistant", content: textBlock("third answer") },
     },
   ]);
 
   test("outline truncates user messages to ~150 chars", () => {
     const parsed = parseSessionText(MULTI_TURN)!;
-    const formatted = formatConversation(parsed, { detail: "outline", maxTurns: 10 });
+    const formatted = formatConversation(parsed, {
+      detail: "outline",
+      maxTurns: 10,
+    });
     // User messages should include entry IDs
     expect(formatted.text).toContain("id: u1");
     expect(formatted.text).toContain("id: u2");
@@ -559,7 +741,10 @@ describe("formatConversation detail levels", () => {
 
   test("outline shows tool names but not tool results", () => {
     const parsed = parseSessionText(MULTI_TURN)!;
-    const formatted = formatConversation(parsed, { detail: "outline", maxTurns: 10 });
+    const formatted = formatConversation(parsed, {
+      detail: "outline",
+      maxTurns: 10,
+    });
     expect(formatted.text).toContain("[Tool: bash]");
     expect(formatted.text).toContain("[Tool: read]");
     expect(formatted.text).not.toContain("super-secret-needle");
@@ -568,16 +753,25 @@ describe("formatConversation detail levels", () => {
 
   test("outline truncates assistant text to ~150 chars", () => {
     const parsed = parseSessionText(MULTI_TURN)!;
-    const formatted = formatConversation(parsed, { detail: "outline", maxTurns: 10 });
+    const formatted = formatConversation(parsed, {
+      detail: "outline",
+      maxTurns: 10,
+    });
     // The long text should be truncated (150 char limit + ellipsis)
     expect(formatted.text).toContain("id: a1");
     // Should NOT contain text that falls beyond the 150-char truncation point
-    expect(formatted.text).not.toContain("in outline mode which is why we need this to be very long indeed");
+    expect(formatted.text).not.toContain(
+      "in outline mode which is why we need this to be very long indeed",
+    );
   });
 
   test("compact shows ~500 chars per message and truncated tool results", () => {
     const parsed = parseSessionText(MULTI_TURN)!;
-    const formatted = formatConversation(parsed, { detail: "compact", includeTools: true, maxTurns: 10 });
+    const formatted = formatConversation(parsed, {
+      detail: "compact",
+      includeTools: true,
+      maxTurns: 10,
+    });
     expect(formatted.text).toContain("id: u1");
     expect(formatted.text).toContain("id: a1");
     // Tool results should appear in compact with includeTools
@@ -586,7 +780,11 @@ describe("formatConversation detail levels", () => {
 
   test("full mode is unchanged (backward compat)", () => {
     const parsed = parseSessionText(MULTI_TURN)!;
-    const formatted = formatConversation(parsed, { detail: "full", includeTools: true, maxTurns: 10 });
+    const formatted = formatConversation(parsed, {
+      detail: "full",
+      includeTools: true,
+      maxTurns: 10,
+    });
     // No entry IDs in full mode
     expect(formatted.text).not.toContain("id: u1");
     // Full text present
@@ -652,21 +850,41 @@ describe("formatConversation detail levels", () => {
 
   test("outline with tool-call-only assistant shows tool names", () => {
     const data = jsonl([
-      { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/" },
       {
-        type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+        type: "session",
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/",
+      },
+      {
+        type: "message",
+        id: "u1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:01Z",
         message: { role: "user", content: textBlock("run it") },
       },
       {
-        type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+        type: "message",
+        id: "a1",
+        parentId: "u1",
+        timestamp: "2026-01-01T00:00:02Z",
         message: {
           role: "assistant",
-          content: [{ type: "toolCall", name: "bash", arguments: { command: "echo hello" } }],
+          content: [
+            {
+              type: "toolCall",
+              name: "bash",
+              arguments: { command: "echo hello" },
+            },
+          ],
         },
       },
     ]);
     const parsed = parseSessionText(data)!;
-    const formatted = formatConversation(parsed, { detail: "outline", maxTurns: 10 });
+    const formatted = formatConversation(parsed, {
+      detail: "outline",
+      maxTurns: 10,
+    });
     expect(formatted.text).toContain("[Tool: bash]");
   });
 });
@@ -688,7 +906,9 @@ describe("findSessionMatch", () => {
     const summary = buildSessionSummary("/tmp/session-2.jsonl", parsed);
     expect(findSessionMatch(summary, "super-secret-needle")).toBeNull();
 
-    const toolMatch = findSessionMatch(summary, "super-secret-needle", { searchTools: true });
+    const toolMatch = findSessionMatch(summary, "super-secret-needle", {
+      searchTools: true,
+    });
     expect(toolMatch).not.toBeNull();
     expect(toolMatch!.field).toBe("tool_result");
     expect(toolMatch!.entryId).toBe("t1");
@@ -700,46 +920,98 @@ describe("findSessionMatch", () => {
     const match = findSessionMatch(summary, "zeroclaw");
 
     expect(match).not.toBeNull();
-    expect(["first_user_message", "user_message", "assistant_message"]).toContain(match!.field);
+    expect([
+      "first_user_message",
+      "user_message",
+      "assistant_message",
+    ]).toContain(match!.field);
   });
 
   test("exact match outranks prefix match", () => {
-    const exact = makeSummaryWithSegment("exact.jsonl", "user_message", "hello world");
-    const prefix = makeSummaryWithSegment("prefix.jsonl", "user_message", "hello world wide");
+    const exact = makeSummaryWithSegment(
+      "exact.jsonl",
+      "user_message",
+      "hello world",
+    );
+    const prefix = makeSummaryWithSegment(
+      "prefix.jsonl",
+      "user_message",
+      "hello world wide",
+    );
     const hits = searchSessions([prefix, exact], "hello world", { limit: 10 });
     expect(hits[0].summary.file).toBe("exact.jsonl");
     expect(hits[1].summary.file).toBe("prefix.jsonl");
   });
 
   test("prefix match outranks substring match", () => {
-    const prefix = makeSummaryWithSegment("prefix.jsonl", "user_message", "hello world wide");
-    const substring = makeSummaryWithSegment("substring.jsonl", "user_message", "say hello world now");
-    const hits = searchSessions([substring, prefix], "hello world", { limit: 10 });
+    const prefix = makeSummaryWithSegment(
+      "prefix.jsonl",
+      "user_message",
+      "hello world wide",
+    );
+    const substring = makeSummaryWithSegment(
+      "substring.jsonl",
+      "user_message",
+      "say hello world now",
+    );
+    const hits = searchSessions([substring, prefix], "hello world", {
+      limit: 10,
+    });
     expect(hits[0].summary.file).toBe("prefix.jsonl");
     expect(hits[1].summary.file).toBe("substring.jsonl");
   });
 
   test("substring match outranks all-terms match", () => {
-    const substring = makeSummaryWithSegment("substring.jsonl", "user_message", "say hello world now");
-    const allTerms = makeSummaryWithSegment("allterms.jsonl", "user_message", "hello there world");
-    const hits = searchSessions([allTerms, substring], "hello world", { limit: 10 });
+    const substring = makeSummaryWithSegment(
+      "substring.jsonl",
+      "user_message",
+      "say hello world now",
+    );
+    const allTerms = makeSummaryWithSegment(
+      "allterms.jsonl",
+      "user_message",
+      "hello there world",
+    );
+    const hits = searchSessions([allTerms, substring], "hello world", {
+      limit: 10,
+    });
     expect(hits[0].summary.file).toBe("substring.jsonl");
     expect(hits[1].summary.file).toBe("allterms.jsonl");
   });
 
   test("all-terms match outranks no match", () => {
-    const allTerms = makeSummaryWithSegment("allterms.jsonl", "user_message", "hello there world");
-    const noMatch = makeSummaryWithSegment("nomatch.jsonl", "user_message", "goodbye");
-    const hits = searchSessions([noMatch, allTerms], "hello world", { limit: 10 });
+    const allTerms = makeSummaryWithSegment(
+      "allterms.jsonl",
+      "user_message",
+      "hello there world",
+    );
+    const noMatch = makeSummaryWithSegment(
+      "nomatch.jsonl",
+      "user_message",
+      "goodbye",
+    );
+    const hits = searchSessions([noMatch, allTerms], "hello world", {
+      limit: 10,
+    });
     expect(hits.length).toBe(1);
     expect(hits[0].summary.file).toBe("allterms.jsonl");
   });
 
   test("field priority: id > name > first_user_message", () => {
     const idMatch = makeSummaryWithSegment("id.jsonl", "id", "hello world");
-    const nameMatch = makeSummaryWithSegment("name.jsonl", "name", "hello world");
-    const fumMatch = makeSummaryWithSegment("fum.jsonl", "first_user_message", "hello world");
-    const hits = searchSessions([fumMatch, nameMatch, idMatch], "hello world", { limit: 10 });
+    const nameMatch = makeSummaryWithSegment(
+      "name.jsonl",
+      "name",
+      "hello world",
+    );
+    const fumMatch = makeSummaryWithSegment(
+      "fum.jsonl",
+      "first_user_message",
+      "hello world",
+    );
+    const hits = searchSessions([fumMatch, nameMatch, idMatch], "hello world", {
+      limit: 10,
+    });
     expect(hits[0].summary.file).toBe("id.jsonl");
     expect(hits[1].summary.file).toBe("name.jsonl");
     expect(hits[2].summary.file).toBe("fum.jsonl");
@@ -748,7 +1020,9 @@ describe("findSessionMatch", () => {
   test("id prefix gets extra boost", () => {
     const idPrefix = makeSummaryWithSegment("id.jsonl", "id", "abc-123-xyz");
     const nameExact = makeSummaryWithSegment("name.jsonl", "name", "abc-123");
-    const hits = searchSessions([nameExact, idPrefix], "abc-123", { limit: 10 });
+    const hits = searchSessions([nameExact, idPrefix], "abc-123", {
+      limit: 10,
+    });
     expect(hits[0].summary.file).toBe("id.jsonl");
   });
 });
@@ -760,19 +1034,36 @@ describe("buildSessionSummary", () => {
     expect(summary.id).toBe("session-1");
     expect(summary.cwd).toBe("/workspace/project");
     expect(summary.firstUserMessage).toBe("hello");
-    expect(summary.segments.some((s) => s.field === "first_user_message")).toBe(true);
+    expect(summary.segments.some((s) => s.field === "first_user_message")).toBe(
+      true,
+    );
   });
 
   test("includes session name from session_info", () => {
     const data = jsonl([
-      { type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/" },
+      {
+        type: "session",
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/",
+      },
       { type: "session_info", name: "My Session" },
-      { type: "message", id: "m1", parentId: null, timestamp: "2026-01-01T00:00:01Z", message: { role: "user", content: "hi" } },
+      {
+        type: "message",
+        id: "m1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:01Z",
+        message: { role: "user", content: "hi" },
+      },
     ]);
     const parsed = parseSessionText(data)!;
     const summary = buildSessionSummary("/tmp/session.jsonl", parsed);
     expect(summary.name).toBe("My Session");
-    expect(summary.segments.some((s) => s.field === "name" && s.text === "My Session")).toBe(true);
+    expect(
+      summary.segments.some(
+        (s) => s.field === "name" && s.text === "My Session",
+      ),
+    ).toBe(true);
   });
 
   test("latestLeafId is populated", () => {
@@ -784,9 +1075,15 @@ describe("buildSessionSummary", () => {
 
 describe("path security", () => {
   test("isSameProjectPath matches parent and child directories", () => {
-    expect(isSameProjectPath("/workspace/project", "/workspace/project/subdir")).toBe(true);
-    expect(isSameProjectPath("/workspace/project/subdir", "/workspace/project")).toBe(true);
-    expect(isSameProjectPath("/workspace/project-a", "/workspace/project-b")).toBe(false);
+    expect(
+      isSameProjectPath("/workspace/project", "/workspace/project/subdir"),
+    ).toBe(true);
+    expect(
+      isSameProjectPath("/workspace/project/subdir", "/workspace/project"),
+    ).toBe(true);
+    expect(
+      isSameProjectPath("/workspace/project-a", "/workspace/project-b"),
+    ).toBe(false);
   });
 
   test("isSameProjectPath rejects empty paths", () => {
@@ -795,9 +1092,15 @@ describe("path security", () => {
   });
 
   test("isPathWithinDir rejects traversal outside the root", () => {
-    expect(isPathWithinDir("/root/sessions", "/root/sessions/a.jsonl")).toBe(true);
-    expect(isPathWithinDir("/root/sessions", "/root/sessions/nested/b.jsonl")).toBe(true);
-    expect(isPathWithinDir("/root/sessions", "/root/other/b.jsonl")).toBe(false);
+    expect(isPathWithinDir("/root/sessions", "/root/sessions/a.jsonl")).toBe(
+      true,
+    );
+    expect(
+      isPathWithinDir("/root/sessions", "/root/sessions/nested/b.jsonl"),
+    ).toBe(true);
+    expect(isPathWithinDir("/root/sessions", "/root/other/b.jsonl")).toBe(
+      false,
+    );
   });
 
   test("isPathWithinDir allows the root itself", () => {
@@ -863,8 +1166,26 @@ describe("formatSessionDate", () => {
 
 describe("filterByCwd", () => {
   const summaries: SessionSummary[] = [
-    { file: "a.jsonl", id: "1", timestamp: "2026-01-01T00:00:00Z", cwd: "/home/user/project-a", firstUserMessage: "", name: null, latestLeafId: null, segments: [] },
-    { file: "b.jsonl", id: "2", timestamp: "2026-01-01T00:00:00Z", cwd: "/home/user/project-b", firstUserMessage: "", name: null, latestLeafId: null, segments: [] },
+    {
+      file: "a.jsonl",
+      id: "1",
+      timestamp: "2026-01-01T00:00:00Z",
+      cwd: "/home/user/project-a",
+      firstUserMessage: "",
+      name: null,
+      latestLeafId: null,
+      segments: [],
+    },
+    {
+      file: "b.jsonl",
+      id: "2",
+      timestamp: "2026-01-01T00:00:00Z",
+      cwd: "/home/user/project-b",
+      firstUserMessage: "",
+      name: null,
+      latestLeafId: null,
+      segments: [],
+    },
   ];
 
   test("returns all summaries when no filter", () => {
@@ -885,18 +1206,33 @@ describe("filterByCwd", () => {
 
 describe("searchSessions", () => {
   const s1: SessionSummary = {
-    file: "a.jsonl", id: "1", timestamp: "2026-04-15T00:00:00Z", cwd: "/project/a",
-    firstUserMessage: "hello world", name: null, latestLeafId: null,
+    file: "a.jsonl",
+    id: "1",
+    timestamp: "2026-04-15T00:00:00Z",
+    cwd: "/project/a",
+    firstUserMessage: "hello world",
+    name: null,
+    latestLeafId: null,
     segments: [{ field: "first_user_message", text: "hello world" }],
   };
   const s2: SessionSummary = {
-    file: "b.jsonl", id: "2", timestamp: "2026-04-16T00:00:00Z", cwd: "/project/b",
-    firstUserMessage: "goodbye", name: null, latestLeafId: null,
+    file: "b.jsonl",
+    id: "2",
+    timestamp: "2026-04-16T00:00:00Z",
+    cwd: "/project/b",
+    firstUserMessage: "goodbye",
+    name: null,
+    latestLeafId: null,
     segments: [{ field: "first_user_message", text: "goodbye" }],
   };
   const s3: SessionSummary = {
-    file: "c.jsonl", id: "3", timestamp: "2026-04-14T00:00:00Z", cwd: "/project/a",
-    firstUserMessage: "hello there", name: null, latestLeafId: null,
+    file: "c.jsonl",
+    id: "3",
+    timestamp: "2026-04-14T00:00:00Z",
+    cwd: "/project/a",
+    firstUserMessage: "hello there",
+    name: null,
+    latestLeafId: null,
     segments: [{ field: "first_user_message", text: "hello there" }],
   };
 
@@ -912,29 +1248,51 @@ describe("searchSessions", () => {
   });
 
   test("respects cwdFilter", () => {
-    const hits = searchSessions([s1, s2, s3], "hello", { cwdFilter: "/project/a", limit: 10 });
+    const hits = searchSessions([s1, s2, s3], "hello", {
+      cwdFilter: "/project/a",
+      limit: 10,
+    });
     expect(hits.map((h) => h.summary.file)).toEqual(["a.jsonl", "c.jsonl"]);
   });
 
   test("respects searchTools", () => {
     const toolSummary: SessionSummary = {
-      file: "tool.jsonl", id: "4", timestamp: "2026-04-15T00:00:00Z", cwd: "/",
-      firstUserMessage: "", name: null, latestLeafId: null,
+      file: "tool.jsonl",
+      id: "4",
+      timestamp: "2026-04-15T00:00:00Z",
+      cwd: "/",
+      firstUserMessage: "",
+      name: null,
+      latestLeafId: null,
       segments: [{ field: "tool_result", text: "needle" }],
     };
-    expect(searchSessions([toolSummary], "needle", { limit: 10 })).toHaveLength(0);
-    expect(searchSessions([toolSummary], "needle", { limit: 10, searchTools: true })).toHaveLength(1);
+    expect(searchSessions([toolSummary], "needle", { limit: 10 })).toHaveLength(
+      0,
+    );
+    expect(
+      searchSessions([toolSummary], "needle", { limit: 10, searchTools: true }),
+    ).toHaveLength(1);
   });
 
   test("tie-breaks equal scores by newer timestamp", () => {
     const older: SessionSummary = {
-      file: "older.jsonl", id: "o", timestamp: "2026-04-14T00:00:00Z", cwd: "/",
-      firstUserMessage: "match", name: null, latestLeafId: null,
+      file: "older.jsonl",
+      id: "o",
+      timestamp: "2026-04-14T00:00:00Z",
+      cwd: "/",
+      firstUserMessage: "match",
+      name: null,
+      latestLeafId: null,
       segments: [{ field: "first_user_message", text: "match" }],
     };
     const newer: SessionSummary = {
-      file: "newer.jsonl", id: "n", timestamp: "2026-04-16T00:00:00Z", cwd: "/",
-      firstUserMessage: "match", name: null, latestLeafId: null,
+      file: "newer.jsonl",
+      id: "n",
+      timestamp: "2026-04-16T00:00:00Z",
+      cwd: "/",
+      firstUserMessage: "match",
+      name: null,
+      latestLeafId: null,
       segments: [{ field: "first_user_message", text: "match" }],
     };
     const hits = searchSessions([older, newer], "match", { limit: 10 });
@@ -956,7 +1314,7 @@ describe("sanitizeTokens", () => {
     expect(sanitizeTokens("hello world")).toEqual(["hello", "world"]);
   });
 
-  test("splits \"can't\" into [\"can\", \"t\"]", () => {
+  test('splits "can\'t" into ["can", "t"]', () => {
     expect(sanitizeTokens("can't")).toEqual(["can", "t"]);
   });
 
@@ -965,7 +1323,11 @@ describe("sanitizeTokens", () => {
   });
 
   test("strips unicode punctuation", () => {
-    expect(sanitizeTokens("hello—world…now")).toEqual(["hello", "world", "now"]);
+    expect(sanitizeTokens("hello—world…now")).toEqual([
+      "hello",
+      "world",
+      "now",
+    ]);
   });
 });
 
@@ -988,15 +1350,69 @@ describe("buildFtsQuery", () => {
 });
 
 const DEEP_BRANCH_SESSION = jsonl([
-  { type: "session", version: 3, id: "session-deep", timestamp: "2026-04-15T00:00:00.000Z", cwd: "/deep" },
-  { type: "message", id: "u1", parentId: null, timestamp: "2026-04-15T00:00:01.000Z", message: { role: "user", content: textBlock("level 1") } },
-  { type: "message", id: "a1", parentId: "u1", timestamp: "2026-04-15T00:00:02.000Z", message: { role: "assistant", content: textBlock("response 1") } },
-  { type: "message", id: "u2", parentId: "a1", timestamp: "2026-04-15T00:00:03.000Z", message: { role: "user", content: textBlock("level 2") } },
-  { type: "message", id: "a2", parentId: "u2", timestamp: "2026-04-15T00:00:04.000Z", message: { role: "assistant", content: textBlock("response 2") } },
-  { type: "message", id: "u3", parentId: "a2", timestamp: "2026-04-15T00:00:05.000Z", message: { role: "user", content: textBlock("level 3") } },
-  { type: "message", id: "a3", parentId: "u3", timestamp: "2026-04-15T00:00:06.000Z", message: { role: "assistant", content: textBlock("deep leaf") } },
-  { type: "message", id: "u3b", parentId: "a2", timestamp: "2026-04-15T00:00:05.500Z", message: { role: "user", content: textBlock("level 3 alt") } },
-  { type: "message", id: "a3b", parentId: "u3b", timestamp: "2026-04-15T00:00:06.500Z", message: { role: "assistant", content: textBlock("deep leaf alt") } },
+  {
+    type: "session",
+    version: 3,
+    id: "session-deep",
+    timestamp: "2026-04-15T00:00:00.000Z",
+    cwd: "/deep",
+  },
+  {
+    type: "message",
+    id: "u1",
+    parentId: null,
+    timestamp: "2026-04-15T00:00:01.000Z",
+    message: { role: "user", content: textBlock("level 1") },
+  },
+  {
+    type: "message",
+    id: "a1",
+    parentId: "u1",
+    timestamp: "2026-04-15T00:00:02.000Z",
+    message: { role: "assistant", content: textBlock("response 1") },
+  },
+  {
+    type: "message",
+    id: "u2",
+    parentId: "a1",
+    timestamp: "2026-04-15T00:00:03.000Z",
+    message: { role: "user", content: textBlock("level 2") },
+  },
+  {
+    type: "message",
+    id: "a2",
+    parentId: "u2",
+    timestamp: "2026-04-15T00:00:04.000Z",
+    message: { role: "assistant", content: textBlock("response 2") },
+  },
+  {
+    type: "message",
+    id: "u3",
+    parentId: "a2",
+    timestamp: "2026-04-15T00:00:05.000Z",
+    message: { role: "user", content: textBlock("level 3") },
+  },
+  {
+    type: "message",
+    id: "a3",
+    parentId: "u3",
+    timestamp: "2026-04-15T00:00:06.000Z",
+    message: { role: "assistant", content: textBlock("deep leaf") },
+  },
+  {
+    type: "message",
+    id: "u3b",
+    parentId: "a2",
+    timestamp: "2026-04-15T00:00:05.500Z",
+    message: { role: "user", content: textBlock("level 3 alt") },
+  },
+  {
+    type: "message",
+    id: "a3b",
+    parentId: "u3b",
+    timestamp: "2026-04-15T00:00:06.500Z",
+    message: { role: "assistant", content: textBlock("deep leaf alt") },
+  },
 ]);
 
 describe("deep branch traversal (3+ levels)", () => {
@@ -1008,7 +1424,14 @@ describe("deep branch traversal (3+ levels)", () => {
   test("selectBranchMessages traces through all levels", () => {
     const parsed = parseSessionText(DEEP_BRANCH_SESSION)!;
     const branch = selectBranchMessages(parsed);
-    expect(branch.map((m) => m.id)).toEqual(["u1", "a1", "u2", "a2", "u3b", "a3b"]);
+    expect(branch.map((m) => m.id)).toEqual([
+      "u1",
+      "a1",
+      "u2",
+      "a2",
+      "u3b",
+      "a3b",
+    ]);
   });
 
   test("formatConversation includes messages from all levels", () => {
@@ -1026,9 +1449,27 @@ describe("deep branch traversal (3+ levels)", () => {
 });
 
 const CORRUPT_PARENT_SESSION = jsonl([
-  { type: "session", version: 3, id: "session-corrupt", timestamp: "2026-04-15T00:00:00.000Z", cwd: "/corrupt" },
-  { type: "message", id: "a", parentId: "b", timestamp: "2026-04-15T00:00:01.000Z", message: { role: "user", content: textBlock("a points to b") } },
-  { type: "message", id: "b", parentId: "a", timestamp: "2026-04-15T00:00:02.000Z", message: { role: "assistant", content: textBlock("b points to a") } },
+  {
+    type: "session",
+    version: 3,
+    id: "session-corrupt",
+    timestamp: "2026-04-15T00:00:00.000Z",
+    cwd: "/corrupt",
+  },
+  {
+    type: "message",
+    id: "a",
+    parentId: "b",
+    timestamp: "2026-04-15T00:00:01.000Z",
+    message: { role: "user", content: textBlock("a points to b") },
+  },
+  {
+    type: "message",
+    id: "b",
+    parentId: "a",
+    timestamp: "2026-04-15T00:00:02.000Z",
+    message: { role: "assistant", content: textBlock("b points to a") },
+  },
 ]);
 
 describe("corrupt parentId cycle", () => {
@@ -1045,8 +1486,19 @@ describe("corrupt parentId cycle", () => {
 describe("formatConversation empty text blocks", () => {
   test("message with empty text block produces no output line", () => {
     const data = jsonl([
-      { type: "session", id: "s-empty", timestamp: "2026-04-15T00:00:00.000Z", cwd: "/empty" },
-      { type: "message", id: "m1", parentId: null, timestamp: "2026-04-15T00:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "" }] } },
+      {
+        type: "session",
+        id: "s-empty",
+        timestamp: "2026-04-15T00:00:00.000Z",
+        cwd: "/empty",
+      },
+      {
+        type: "message",
+        id: "m1",
+        parentId: null,
+        timestamp: "2026-04-15T00:00:01.000Z",
+        message: { role: "user", content: [{ type: "text", text: "" }] },
+      },
     ]);
     const parsed = parseSessionText(data)!;
     const formatted = formatConversation(parsed, { maxTurns: 10 });
@@ -1059,16 +1511,30 @@ describe("formatConversation empty text blocks", () => {
 describe("tool-call-only assistant in full mode", () => {
   test("renders with ### Assistant header when includeTools=true", () => {
     const data = jsonl([
-      { type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/test" },
       {
-        type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+        type: "session",
+        version: 3,
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/test",
+      },
+      {
+        type: "message",
+        id: "u1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:01Z",
         message: { role: "user", content: textBlock("go") },
       },
       {
-        type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+        type: "message",
+        id: "a1",
+        parentId: "u1",
+        timestamp: "2026-01-01T00:00:02Z",
         message: {
           role: "assistant",
-          content: [{ type: "toolCall", name: "bash", arguments: { cmd: "ls" } }],
+          content: [
+            { type: "toolCall", name: "bash", arguments: { cmd: "ls" } },
+          ],
         },
       },
     ]);
@@ -1085,16 +1551,30 @@ describe("tool-call-only assistant in full mode", () => {
 
   test("produces no assistant output when includeTools=false", () => {
     const data = jsonl([
-      { type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/test" },
       {
-        type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+        type: "session",
+        version: 3,
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/test",
+      },
+      {
+        type: "message",
+        id: "u1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:01Z",
         message: { role: "user", content: textBlock("go") },
       },
       {
-        type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+        type: "message",
+        id: "a1",
+        parentId: "u1",
+        timestamp: "2026-01-01T00:00:02Z",
         message: {
           role: "assistant",
-          content: [{ type: "toolCall", name: "bash", arguments: { cmd: "ls" } }],
+          content: [
+            { type: "toolCall", name: "bash", arguments: { cmd: "ls" } },
+          ],
         },
       },
     ]);
@@ -1112,30 +1592,54 @@ describe("tool-call-only assistant in full mode", () => {
 describe("buildSessionSummary edge cases", () => {
   test("no user messages sets firstUserMessage to empty string", () => {
     const data = jsonl([
-      { type: "session", id: "s-assist", timestamp: "2026-04-15T00:00:00.000Z", cwd: "/assist" },
-      { type: "message", id: "a1", parentId: null, timestamp: "2026-04-15T00:00:01.000Z", message: { role: "assistant", content: textBlock("only assistant") } },
+      {
+        type: "session",
+        id: "s-assist",
+        timestamp: "2026-04-15T00:00:00.000Z",
+        cwd: "/assist",
+      },
+      {
+        type: "message",
+        id: "a1",
+        parentId: null,
+        timestamp: "2026-04-15T00:00:01.000Z",
+        message: { role: "assistant", content: textBlock("only assistant") },
+      },
     ]);
     const parsed = parseSessionText(data)!;
     const summary = buildSessionSummary("/tmp/session.jsonl", parsed);
     expect(summary.firstUserMessage).toBe("");
-    expect(summary.segments.some((s) => s.field === "first_user_message")).toBe(false);
+    expect(summary.segments.some((s) => s.field === "first_user_message")).toBe(
+      false,
+    );
   });
 
   test("empty session (no messages) sets firstUserMessage to empty string and latestLeafId to null", () => {
     const data = jsonl([
-      { type: "session", id: "s-empty", timestamp: "2026-04-15T00:00:00.000Z", cwd: "/empty" },
+      {
+        type: "session",
+        id: "s-empty",
+        timestamp: "2026-04-15T00:00:00.000Z",
+        cwd: "/empty",
+      },
     ]);
     const parsed = parseSessionText(data)!;
     const summary = buildSessionSummary("/tmp/session.jsonl", parsed);
     expect(summary.firstUserMessage).toBe("");
     expect(summary.latestLeafId).toBeNull();
-    expect(summary.segments.some((s) => s.field === "first_user_message")).toBe(false);
+    expect(summary.segments.some((s) => s.field === "first_user_message")).toBe(
+      false,
+    );
   });
 });
 
 describe("snippetForMatch multi-term fallback", () => {
   test("findSessionMatch returns a match for all-terms query", () => {
-    const allTerms = makeSummaryWithSegment("allterms.jsonl", "user_message", "hello there world");
+    const allTerms = makeSummaryWithSegment(
+      "allterms.jsonl",
+      "user_message",
+      "hello there world",
+    );
     const match = findSessionMatch(allTerms, "hello world");
     expect(match).not.toBeNull();
     expect(match!.snippet).toContain("hello");
@@ -1150,7 +1654,12 @@ describe("extractTextFlat", () => {
 
     const { extractTextFlat } = mod as any;
     expect(extractTextFlat("hello world")).toBe("hello world");
-    expect(extractTextFlat([{ type: "text", text: "a" }, { type: "text", text: "b" }])).toBe("a b");
+    expect(
+      extractTextFlat([
+        { type: "text", text: "a" },
+        { type: "text", text: "b" },
+      ]),
+    ).toBe("a b");
     expect(extractTextFlat(42)).toBe("");
     expect(extractTextFlat(null)).toBe("");
     expect(extractTextFlat([])).toBe("");
@@ -1189,7 +1698,13 @@ describe("extractThinking", () => {
 
 describe("formatConversation includeThinking", () => {
   const THINKING_SESSION = jsonl([
-    { type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/test" },
+    {
+      type: "session",
+      version: 3,
+      id: "s1",
+      timestamp: "2026-01-01T00:00:00Z",
+      cwd: "/test",
+    },
     {
       type: "message",
       id: "u1",
@@ -1262,13 +1777,25 @@ describe("formatConversation includeThinking", () => {
 
   test("thinking-only assistant (no text) renders with single header", () => {
     const data = jsonl([
-      { type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/test" },
       {
-        type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+        type: "session",
+        version: 3,
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/test",
+      },
+      {
+        type: "message",
+        id: "u1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:01Z",
         message: { role: "user", content: textBlock("go") },
       },
       {
-        type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+        type: "message",
+        id: "a1",
+        parentId: "u1",
+        timestamp: "2026-01-01T00:00:02Z",
         message: {
           role: "assistant",
           content: [{ type: "thinking", thinking: "Planning my approach..." }],
@@ -1288,18 +1815,34 @@ describe("formatConversation includeThinking", () => {
 
   test("thinking + tool calls (no text) renders correctly", () => {
     const data = jsonl([
-      { type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/test" },
       {
-        type: "message", id: "u1", parentId: null, timestamp: "2026-01-01T00:00:01Z",
+        type: "session",
+        version: 3,
+        id: "s1",
+        timestamp: "2026-01-01T00:00:00Z",
+        cwd: "/test",
+      },
+      {
+        type: "message",
+        id: "u1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:01Z",
         message: { role: "user", content: textBlock("go") },
       },
       {
-        type: "message", id: "a1", parentId: "u1", timestamp: "2026-01-01T00:00:02Z",
+        type: "message",
+        id: "a1",
+        parentId: "u1",
+        timestamp: "2026-01-01T00:00:02Z",
         message: {
           role: "assistant",
           content: [
             { type: "thinking", thinking: "Need to read the file." },
-            { type: "toolCall", name: "bash", arguments: { cmd: "cat foo.txt" } },
+            {
+              type: "toolCall",
+              name: "bash",
+              arguments: { cmd: "cat foo.txt" },
+            },
           ],
         },
       },

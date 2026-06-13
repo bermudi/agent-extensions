@@ -9,7 +9,11 @@
  * full file scan when the index is cold.
  */
 
-import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ExtensionCommandContext,
+} from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Text } from "@mariozechner/pi-tui";
 import * as fsp from "node:fs/promises";
@@ -148,7 +152,11 @@ async function loadSession(filePath: string): Promise<CachedSession | null> {
   if (!fileStat.isFile()) return null;
 
   const cached = sessionCache.get(filePath);
-  if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
+  if (
+    cached &&
+    cached.mtimeMs === fileStat.mtimeMs &&
+    cached.size === fileStat.size
+  ) {
     return cached;
   }
 
@@ -211,7 +219,9 @@ async function resolveSessionFilePath(requestedFile: string): Promise<string> {
     );
   }
 
-  const resolvedSessionsDir = await fsp.realpath(SESSIONS_DIR).catch(() => SESSIONS_DIR);
+  const resolvedSessionsDir = await fsp
+    .realpath(SESSIONS_DIR)
+    .catch(() => SESSIONS_DIR);
   const resolvedCandidate = path.resolve(requestedFile);
   if (!isPathWithinDir(resolvedSessionsDir, resolvedCandidate)) {
     throw new Error("Session file must live under ~/.pi/agent/sessions");
@@ -221,7 +231,10 @@ async function resolveSessionFilePath(requestedFile: string): Promise<string> {
     throw new Error("Session file not found");
   });
 
-  if (!realCandidate.endsWith(".jsonl") || !isPathWithinDir(resolvedSessionsDir, realCandidate)) {
+  if (
+    !realCandidate.endsWith(".jsonl") ||
+    !isPathWithinDir(resolvedSessionsDir, realCandidate)
+  ) {
     throw new Error("Refusing to read files outside ~/.pi/agent/sessions");
   }
 
@@ -309,7 +322,10 @@ export default function sessionSearch(pi: ExtensionAPI): void {
           const ftsResults = ftsSearch(query, limit * 5);
           candidatePaths = ftsResults.map((r) => r.sessionPath);
         } catch (err) {
-          console.warn("[session-search] FTS search failed, falling back to full scan:", err);
+          console.warn(
+            "[session-search] FTS search failed, falling back to full scan:",
+            err,
+          );
           candidatePaths = await getAllSessionFiles();
         }
       } else {
@@ -340,7 +356,9 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       });
 
       if (hits.length === 0) {
-        const scopeText = params.cwd_filter ? ` within cwd matching "${params.cwd_filter}"` : "";
+        const scopeText = params.cwd_filter
+          ? ` within cwd matching "${params.cwd_filter}"`
+          : "";
         return {
           content: [
             {
@@ -392,19 +410,28 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       "Read the conversation from a past Pi session. Accepts an absolute .jsonl file path or a bare session UUID (8+ hex characters). Progressive disclosure: start with detail='outline' (default) to get the conversation skeleton with entry IDs, then drill into specific entries using entry_id + window.",
     parameters: Type.Object({
       file: Type.String({
-        description: "Absolute path to the session .jsonl file, or a bare session UUID (8+ hex characters)",
+        description:
+          "Absolute path to the session .jsonl file, or a bare session UUID (8+ hex characters)",
       }),
       entry_id: Type.Optional(
         Type.String({
-          description: "Optional entry ID from session_search. Reads the branch anchored at that matching entry.",
+          description:
+            "Optional entry ID from session_search. Reads the branch anchored at that matching entry.",
         }),
       ),
       detail: Type.Optional(
-        Type.Union([Type.Literal("outline"), Type.Literal("compact"), Type.Literal("full")], {
-          description:
-            "Detail level. 'outline' (default): conversation skeleton with entry IDs, user/assistant text truncated to ~150 chars, tool names only, no results — ideal for surveying a session. 'compact': ~500 chars per message, truncated tool args/results. 'full': untruncated. Use outline first, then drill into specific entry_ids with window.",
-          default: "outline",
-        }),
+        Type.Union(
+          [
+            Type.Literal("outline"),
+            Type.Literal("compact"),
+            Type.Literal("full"),
+          ],
+          {
+            description:
+              "Detail level. 'outline' (default): conversation skeleton with entry IDs, user/assistant text truncated to ~150 chars, tool names only, no results — ideal for surveying a session. 'compact': ~500 chars per message, truncated tool args/results. 'full': untruncated. Use outline first, then drill into specific entry_ids with window.",
+            default: "outline",
+          },
+        ),
       ),
       window: Type.Optional(
         Type.Number({
@@ -420,13 +447,15 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       ),
       include_tools: Type.Optional(
         Type.Boolean({
-          description: "Include tool calls and results (default false). Ignored in outline mode — tool names are always shown.",
+          description:
+            "Include tool calls and results (default false). Ignored in outline mode — tool names are always shown.",
           default: false,
         }),
       ),
       include_thinking: Type.Optional(
         Type.Boolean({
-          description: "Include thinking/reasoning blocks from assistant messages (default false). Only shown in detail: 'full'.",
+          description:
+            "Include thinking/reasoning blocks from assistant messages (default false). Only shown in detail: 'full'.",
           default: false,
         }),
       ),
@@ -436,9 +465,15 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       try {
         filePath = await resolveSessionFilePath(params.file);
       } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : "Unknown error";
+        const message =
+          error instanceof Error ? error.message : "Unknown error";
         return {
-          content: [{ type: "text", text: `Failed to resolve session file: ${message}` }],
+          content: [
+            {
+              type: "text",
+              text: `Failed to resolve session file: ${message}`,
+            },
+          ],
           isError: true,
           details: undefined,
         };
@@ -455,13 +490,22 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 
       if (params.entry_id && !hasEntryId(loaded.parsed, params.entry_id)) {
         return {
-          content: [{ type: "text", text: `Entry ID ${params.entry_id} was not found in that session.` }],
+          content: [
+            {
+              type: "text",
+              text: `Entry ID ${params.entry_id} was not found in that session.`,
+            },
+          ],
           isError: true,
           details: undefined,
         };
       }
 
-      const maxTurns = clampPositiveInteger(params.max_turns, 50, MAX_READ_TURNS);
+      const maxTurns = clampPositiveInteger(
+        params.max_turns,
+        50,
+        MAX_READ_TURNS,
+      );
       const conversation = formatConversation(loaded.parsed, {
         includeTools: params.include_tools ?? false,
         maxTurns,
@@ -475,20 +519,31 @@ export default function sessionSearch(pi: ExtensionAPI): void {
         `Session ${loaded.summary.id}`,
         `CWD: ${loaded.summary.cwd}`,
         `Created: ${formatSessionDate(loaded.summary.timestamp)}`,
-        conversation.leafEntryId ? `Branch leaf: ${conversation.leafEntryId}` : undefined,
+        conversation.leafEntryId
+          ? `Branch leaf: ${conversation.leafEntryId}`
+          : undefined,
       ]
-        .filter((part): part is string => typeof part === "string" && part.length > 0)
+        .filter(
+          (part): part is string => typeof part === "string" && part.length > 0,
+        )
         .join(" | ");
 
       if (!conversation.text.trim()) {
         return {
-          content: [{ type: "text", text: `${headerInfo}\n\n(No conversation messages found on that branch.)` }],
+          content: [
+            {
+              type: "text",
+              text: `${headerInfo}\n\n(No conversation messages found on that branch.)`,
+            },
+          ],
           details: undefined,
         };
       }
 
       return {
-        content: [{ type: "text", text: `${headerInfo}\n\n---\n${conversation.text}` }],
+        content: [
+          { type: "text", text: `${headerInfo}\n\n---\n${conversation.text}` },
+        ],
         details: undefined,
       };
     },
@@ -519,14 +574,19 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       if (indexReady) {
         try {
           const recent = ftsListRecent(limit * 2);
-          const loaded = await Promise.all(recent.map((r) => loadSession(r.sessionPath)));
+          const loaded = await Promise.all(
+            recent.map((r) => loadSession(r.sessionPath)),
+          );
           summaries = loaded
             .filter((c): c is CachedSession => c !== null)
             .map((c) => c.summary)
             .sort(compareTimestampDesc)
             .slice(0, limit);
         } catch (err) {
-          console.warn("[session-search] FTS list failed, falling back to full scan:", err);
+          console.warn(
+            "[session-search] FTS list failed, falling back to full scan:",
+            err,
+          );
           summaries = await loadSessionSummaries();
         }
       } else {
@@ -551,7 +611,8 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 
       const text = summaries
         .map((summary, index) => {
-          const label = summary.name || summary.firstUserMessage.slice(0, 80) || "(empty)";
+          const label =
+            summary.name || summary.firstUserMessage.slice(0, 80) || "(empty)";
           return [
             `${index + 1}. **${label}** — ${formatSessionDate(summary.timestamp)}`,
             `   CWD: ${summary.cwd}`,
@@ -581,14 +642,21 @@ export default function sessionSearch(pi: ExtensionAPI): void {
     setTimeout(() => ensureIndex(), 100);
 
     // Inject summary into newly created sessions that were queued via "New + Context".
-    if (!('reason' in (event as unknown as Record<string, unknown>) && (event as unknown as Record<string, unknown>).reason === "new")) return;
+    if (
+      !(
+        "reason" in (event as unknown as Record<string, unknown>) &&
+        (event as unknown as Record<string, unknown>).reason === "new"
+      )
+    )
+      return;
 
     try {
       const raw = await fsp.readFile(PENDING_FILE, "utf8");
       const pending = JSON.parse(raw);
 
       if (
-        typeof pending !== "object" || pending === null ||
+        typeof pending !== "object" ||
+        pending === null ||
         typeof pending.sessionPath !== "string" ||
         typeof pending.project !== "string" ||
         typeof pending.timestamp !== "string" ||
@@ -616,7 +684,11 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       ctx.ui.setStatus("session-search", `🔍 Summarizing ${project}...`);
 
       try {
-        const summary = await summarizeSession(session, ctx, pending.customPrompt);
+        const summary = await summarizeSession(
+          session,
+          ctx,
+          pending.customPrompt,
+        );
 
         pi.sendMessage(
           {
@@ -649,7 +721,10 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.warn("[session-search] Error reading pending context file:", err);
+        console.warn(
+          "[session-search] Error reading pending context file:",
+          err,
+        );
       }
     }
   });
@@ -667,7 +742,8 @@ export default function sessionSearch(pi: ExtensionAPI): void {
     }
 
     const action = await ctx.ui.custom<PaletteAction>(
-      (tui, theme, _kb, done) => new SessionSearchComponent(done, tui, theme, ctx.cwd),
+      (tui, theme, _kb, done) =>
+        new SessionSearchComponent(done, tui, theme, ctx.cwd),
       {
         overlay: true,
         overlayOptions: {
@@ -683,7 +759,8 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       const sessionPath = action.session.sessionPath;
       const project = shortenProject(action.session.project, 40);
 
-      const commandCtx = ctx as ExtensionContext & Partial<ExtensionCommandContext>;
+      const commandCtx = ctx as ExtensionContext &
+        Partial<ExtensionCommandContext>;
       if (typeof commandCtx.switchSession === "function") {
         try {
           const result = await commandCtx.switchSession(sessionPath);
@@ -708,7 +785,11 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       ctx.ui.notify(`Summarizing ${project}...`, "info");
 
       try {
-        const summary = await summarizeSession(action.session, ctx, action.customPrompt);
+        const summary = await summarizeSession(
+          action.session,
+          ctx,
+          action.customPrompt,
+        );
 
         pi.sendMessage(
           {
@@ -759,7 +840,10 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 
       // Pre-fill /new and tell the user to press Enter
       ctx.ui.setEditorText(`/new`);
-      ctx.ui.notify(`${project} — press Enter to start new session with context`, "info");
+      ctx.ui.notify(
+        `${project} — press Enter to start new session with context`,
+        "info",
+      );
       return;
     }
   }
@@ -823,7 +907,8 @@ export default function sessionSearch(pi: ExtensionAPI): void {
   // ── /handoff command ──────────────────────────────────────────────────
 
   pi.registerCommand("handoff", {
-    description: "Generate a goal-directed handoff from the current session to a new one",
+    description:
+      "Generate a goal-directed handoff from the current session to a new one",
     handler: async (args, ctx) => {
       const commandCtx = ctx as ExtensionCommandContext;
       const currentFile = ctx.sessionManager.getSessionFile();
@@ -839,7 +924,9 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       // instead of loading the full session through loadSession.
       let timestamp: string;
       try {
-        const headerLine = (await fsp.readFile(currentFile, "utf8")).split("\n")[0];
+        const headerLine = (await fsp.readFile(currentFile, "utf8")).split(
+          "\n",
+        )[0];
         const header = JSON.parse(headerLine);
         timestamp = header.timestamp ?? new Date().toISOString();
       } catch {
@@ -849,12 +936,18 @@ export default function sessionSearch(pi: ExtensionAPI): void {
       const goal = args?.trim() || undefined;
       const MAX_GOAL_LENGTH = 2000;
       if (goal && goal.length > MAX_GOAL_LENGTH) {
-        ctx.ui.notify(`Goal too long (${goal.length} chars, max ${MAX_GOAL_LENGTH})`, "warning");
+        ctx.ui.notify(
+          `Goal too long (${goal.length} chars, max ${MAX_GOAL_LENGTH})`,
+          "warning",
+        );
         return;
       }
       const project = shortenProject(cwd, 40);
 
-      ctx.ui.setStatus("session-search", `🔄 Generating handoff${goal ? ` for: ${goal.slice(0, 50)}` : ""}...`);
+      ctx.ui.setStatus(
+        "session-search",
+        `🔄 Generating handoff${goal ? ` for: ${goal.slice(0, 50)}` : ""}...`,
+      );
       ctx.ui.notify(`Generating handoff from ${project}...`, "info");
 
       try {
@@ -916,93 +1009,100 @@ export default function sessionSearch(pi: ExtensionAPI): void {
 
   // ── Custom message renderer ─────────────────────────────────────────
 
-  pi.registerMessageRenderer("session-search-context", (message, options, theme) => {
-    const rawContent =
-      typeof message.content === "string"
-        ? message.content
-        : Array.isArray(message.content)
-          ? extractText(message.content)
-          : "";
+  pi.registerMessageRenderer(
+    "session-search-context",
+    (message, options, theme) => {
+      const rawContent =
+        typeof message.content === "string"
+          ? message.content
+          : Array.isArray(message.content)
+            ? extractText(message.content)
+            : "";
 
-    // Parse from "## Session Summary: project" or "**Project:** project" format
-    const summaryMatch = rawContent.match(/Session Summary:\s*(.+)/);
-    const projectMatch = rawContent.match(/\*\*Project:\*\*\s*(.+)/);
-    const dateMatch = rawContent.match(/\*\*Date:\*\*\s*([^|*]+)/);
-    const project = summaryMatch?.[1]?.trim() || projectMatch?.[1]?.trim() || "session";
-    const date = dateMatch?.[1]?.trim() || "";
+      // Parse from "## Session Summary: project" or "**Project:** project" format
+      const summaryMatch = rawContent.match(/Session Summary:\s*(.+)/);
+      const projectMatch = rawContent.match(/\*\*Project:\*\*\s*(.+)/);
+      const dateMatch = rawContent.match(/\*\*Date:\*\*\s*([^|*]+)/);
+      const project =
+        summaryMatch?.[1]?.trim() || projectMatch?.[1]?.trim() || "session";
+      const date = dateMatch?.[1]?.trim() || "";
 
-    if (options.expanded) {
-      const lines: string[] = [];
-      lines.push(
+      if (options.expanded) {
+        const lines: string[] = [];
+        lines.push(
+          theme.fg("accent", "🔍 ") +
+            theme.fg("customMessageLabel", theme.bold("Session context: ")) +
+            theme.fg("accent", project) +
+            (date ? theme.fg("muted", ` (${date})`) : ""),
+        );
+
+        const bodyStart = rawContent.indexOf("\n\n");
+        if (bodyStart >= 0) {
+          const body = rawContent.slice(bodyStart + 2).trim();
+          if (body) {
+            lines.push("");
+            lines.push(theme.fg("muted", body));
+          }
+        }
+
+        return new Text(lines.join("\n"), 0, 0);
+      }
+
+      const header =
         theme.fg("accent", "🔍 ") +
-          theme.fg("customMessageLabel", theme.bold("Session context: ")) +
-          theme.fg("accent", project) +
-          (date ? theme.fg("muted", ` (${date})`) : ""),
-      );
+        theme.fg("customMessageLabel", theme.bold("Session context: ")) +
+        theme.fg("accent", project) +
+        (date ? theme.fg("muted", ` (${date})`) : "");
 
-      const bodyStart = rawContent.indexOf("\n\n");
-      if (bodyStart >= 0) {
-        const body = rawContent.slice(bodyStart + 2).trim();
-        if (body) {
-          lines.push("");
-          lines.push(theme.fg("muted", body));
+      return new Text(header, 0, 0);
+    },
+  );
+
+  pi.registerMessageRenderer(
+    "session-search-handoff",
+    (message, options, theme) => {
+      const rawContent =
+        typeof message.content === "string"
+          ? message.content
+          : Array.isArray(message.content)
+            ? extractText(message.content)
+            : "";
+
+      const summaryMatch = rawContent.match(/Handoff from\s+(.+)/);
+      const project = summaryMatch?.[1]?.trim() || "session";
+      const sessionMatch = rawContent.match(/\*\*Session:\*\*\s*([^|*]+)/);
+      const dateMatch = rawContent.match(/\*\*Date:\*\*\s*([^*\n]+)/);
+      const sessionId = sessionMatch?.[1]?.trim() || "";
+      const date = dateMatch?.[1]?.trim() || "";
+
+      if (options.expanded) {
+        const lines: string[] = [];
+        lines.push(
+          theme.fg("accent", "\u{1F504} ") +
+            theme.fg("customMessageLabel", theme.bold("Handoff: ")) +
+            theme.fg("accent", project) +
+            (date ? theme.fg("muted", ` (${date})`) : ""),
+        );
+
+        const bodyStart = rawContent.indexOf("\n\n");
+        if (bodyStart >= 0) {
+          const body = rawContent.slice(bodyStart + 2).trim();
+          if (body) {
+            lines.push("");
+            lines.push(theme.fg("muted", body));
+          }
         }
+
+        return new Text(lines.join("\n"), 0, 0);
       }
 
-      return new Text(lines.join("\n"), 0, 0);
-    }
-
-    const header =
-      theme.fg("accent", "🔍 ") +
-      theme.fg("customMessageLabel", theme.bold("Session context: ")) +
-      theme.fg("accent", project) +
-      (date ? theme.fg("muted", ` (${date})`) : "");
-
-    return new Text(header, 0, 0);
-  });
-
-  pi.registerMessageRenderer("session-search-handoff", (message, options, theme) => {
-    const rawContent =
-      typeof message.content === "string"
-        ? message.content
-        : Array.isArray(message.content)
-          ? extractText(message.content)
-          : "";
-
-    const summaryMatch = rawContent.match(/Handoff from\s+(.+)/);
-    const project = summaryMatch?.[1]?.trim() || "session";
-    const sessionMatch = rawContent.match(/\*\*Session:\*\*\s*([^|*]+)/);
-    const dateMatch = rawContent.match(/\*\*Date:\*\*\s*([^*\n]+)/);
-    const sessionId = sessionMatch?.[1]?.trim() || "";
-    const date = dateMatch?.[1]?.trim() || "";
-
-    if (options.expanded) {
-      const lines: string[] = [];
-      lines.push(
+      const header =
         theme.fg("accent", "\u{1F504} ") +
-          theme.fg("customMessageLabel", theme.bold("Handoff: ")) +
-          theme.fg("accent", project) +
-          (date ? theme.fg("muted", ` (${date})`) : ""),
-      );
+        theme.fg("customMessageLabel", theme.bold("Handoff: ")) +
+        theme.fg("accent", project) +
+        (date ? theme.fg("muted", ` (${date})`) : "");
 
-      const bodyStart = rawContent.indexOf("\n\n");
-      if (bodyStart >= 0) {
-        const body = rawContent.slice(bodyStart + 2).trim();
-        if (body) {
-          lines.push("");
-          lines.push(theme.fg("muted", body));
-        }
-      }
-
-      return new Text(lines.join("\n"), 0, 0);
-    }
-
-    const header =
-      theme.fg("accent", "\u{1F504} ") +
-      theme.fg("customMessageLabel", theme.bold("Handoff: ")) +
-      theme.fg("accent", project) +
-      (date ? theme.fg("muted", ` (${date})`) : "");
-
-    return new Text(header, 0, 0);
-  });
+      return new Text(header, 0, 0);
+    },
+  );
 }

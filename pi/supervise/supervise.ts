@@ -73,7 +73,9 @@ export interface ToolCallSummary {
 
 class AbortError extends Error {
   override name = "AbortError";
-  constructor() { super("Aborted"); }
+  constructor() {
+    super("Aborted");
+  }
 }
 
 // ── Session Store ─────────────────────────────────────────────────────────
@@ -92,7 +94,13 @@ function ensureCapacity(): void {
     const oldest = sessions.keys().next().value;
     if (oldest) {
       const state = sessions.get(oldest);
-      if (state) { try { state.agent.abort(); } catch { /* */ } }
+      if (state) {
+        try {
+          state.agent.abort();
+        } catch {
+          /* */
+        }
+      }
       sessions.delete(oldest);
     }
   }
@@ -135,7 +143,9 @@ function resolveConfig(
     const cfg = agents.get(params.agent);
     if (!cfg) {
       const available = [...agents.keys()].join(", ") || "(none found)";
-      throw new Error(`Agent "${params.agent}" not found. Available: ${available}`);
+      throw new Error(
+        `Agent "${params.agent}" not found. Available: ${available}`,
+      );
     }
     agentSystemPrompt = cfg.systemPrompt;
     agentModel = cfg.model;
@@ -156,15 +166,15 @@ function resolveConfig(
 
   // Tools: inline > agent file > default
   const toolNames = params.tools ?? agentTools ?? DEFAULT_TOOLS;
-  const unknownTools = toolNames.filter(name => !(name in TOOL_FACTORIES));
+  const unknownTools = toolNames.filter((name) => !(name in TOOL_FACTORIES));
   if (unknownTools.length) {
     warnings.push(
       `Unknown tool(s) ignored: ${unknownTools.join(", ")}. Available: ${Object.keys(TOOL_FACTORIES).join(", ")}`,
     );
   }
   const tools = toolNames
-    .filter(name => name in TOOL_FACTORIES)
-    .map(name => TOOL_FACTORIES[name]!(cwd));
+    .filter((name) => name in TOOL_FACTORIES)
+    .map((name) => TOOL_FACTORIES[name]!(cwd));
 
   // System prompt: inline > agent file
   let systemPrompt = params.systemPrompt ?? agentSystemPrompt ?? "";
@@ -173,7 +183,9 @@ function resolveConfig(
   }
 
   // Skills: merge agent file + inline (deduped)
-  const skillNames = [...new Set([...(agentSkills ?? []), ...(params.skills ?? [])])];
+  const skillNames = [
+    ...new Set([...(agentSkills ?? []), ...(params.skills ?? [])]),
+  ];
   for (const name of skillNames) {
     const content = loadSkill(name, cwd);
     if (content) {
@@ -196,7 +208,11 @@ interface TurnEndResult {
   tokens: number;
 }
 
-function waitForTurnEnd(agent: Agent, prevMessageCount: number, signal?: AbortSignal): Promise<TurnEndResult> {
+function waitForTurnEnd(
+  agent: Agent,
+  prevMessageCount: number,
+  signal?: AbortSignal,
+): Promise<TurnEndResult> {
   return new Promise((resolve, reject) => {
     // Track tool calls by ID — events carry toolCallId on both start and end.
     const toolCalls = new Map<string, ToolCallSummary>();
@@ -227,9 +243,10 @@ function waitForTurnEnd(agent: Agent, prevMessageCount: number, signal?: AbortSi
         case "tool_execution_end": {
           const tc = toolCalls.get(event.toolCallId);
           if (tc) {
-            const resultStr = typeof event.result === "string"
-              ? event.result
-              : JSON.stringify(event.result);
+            const resultStr =
+              typeof event.result === "string"
+                ? event.result
+                : JSON.stringify(event.result);
             tc.resultPreview = trunc(resultStr, 200);
             tc.isError = event.isError;
           }
@@ -254,7 +271,11 @@ function waitForTurnEnd(agent: Agent, prevMessageCount: number, signal?: AbortSi
     });
 
     if (signal) {
-      if (signal.aborted) { cleanup(); reject(new AbortError()); return; }
+      if (signal.aborted) {
+        cleanup();
+        reject(new AbortError());
+        return;
+      }
       signal.addEventListener("abort", onAbort, { once: true });
     }
   });
@@ -269,7 +290,10 @@ async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
     if (signal) {
-      const onAbort = () => { clearTimeout(timer); reject(new AbortError()); };
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new AbortError());
+      };
       signal.addEventListener("abort", onAbort, { once: true });
       // Close TOCTOU window: signal could have fired between our check and addEventListener.
       if (signal.aborted) {
@@ -293,7 +317,11 @@ function createAgent(config: ResolvedConfig, registry: ModelRegistry): Agent {
     streamFn: async (m, context, options) => {
       const auth = await registry.getApiKeyAndHeaders(m);
       if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-      return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+      return streamSimple(m, context, {
+        ...options,
+        apiKey: auth.apiKey,
+        headers: auth.headers ?? undefined,
+      });
     },
   });
 }
@@ -307,7 +335,8 @@ function extractAssistantText(messages: AgentMessage[]): string {
     if (msg.role !== "assistant") continue;
     if (!("content" in msg) || !Array.isArray(msg.content)) continue;
     for (const block of msg.content) {
-      if ("text" in block && typeof block.text === "string") parts.push(block.text);
+      if ("text" in block && typeof block.text === "string")
+        parts.push(block.text);
     }
   }
   return parts.join("\n\n");
@@ -332,7 +361,7 @@ function extractUsage(messages: AgentMessage[]) {
 // ── Message formatting for inspect ────────────────────────────────────────
 
 function formatMessagesForInspect(messages: AgentMessage[]) {
-  return messages.map(msg => {
+  return messages.map((msg) => {
     const entry: {
       role: string;
       content: string;
@@ -351,10 +380,11 @@ function formatMessagesForInspect(messages: AgentMessage[]) {
     } else if (Array.isArray(msg.content)) {
       entry.content = extractAssistantText([msg]);
       const toolUses = msg.content.filter(
-        (b): b is Extract<typeof b, { type: "toolCall" }> => "type" in b && b.type === "toolCall",
+        (b): b is Extract<typeof b, { type: "toolCall" }> =>
+          "type" in b && b.type === "toolCall",
       );
       if (toolUses.length) {
-        entry.toolCalls = toolUses.map(tc => ({
+        entry.toolCalls = toolUses.map((tc) => ({
           id: tc.id,
           name: tc.name,
           args: tc.arguments,
@@ -368,7 +398,11 @@ function formatMessagesForInspect(messages: AgentMessage[]) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const u = (msg as any).usage;
     if (u) {
-      entry.usage = { input: u.input ?? 0, output: u.output ?? 0, total: u.total ?? 0 };
+      entry.usage = {
+        input: u.input ?? 0,
+        output: u.output ?? 0,
+        total: u.total ?? 0,
+      };
     }
 
     return entry;
@@ -386,26 +420,36 @@ function formatTurnText(
   durationMs: number,
   warnings?: string[],
 ): string {
-  const status = result.error ? "error" : result.isFinished ? "finished" : "waiting";
+  const status = result.error
+    ? "error"
+    : result.isFinished
+      ? "finished"
+      : "waiting";
   const lines: string[] = [
     `## Session: ${sessionId} — Turn ${turn}`,
     `Status: ${status} | Duration: ${fmtDuration(durationMs)} | Tokens: ${fmtTokens(result.tokens)}`,
   ];
 
   if (result.toolCalls.length) {
-    lines.push(`Tools: ${result.toolCalls.map(tc => `${tc.name}${tc.isError ? " ✗" : " ✓"}`).join(", ")}`);
+    lines.push(
+      `Tools: ${result.toolCalls.map((tc) => `${tc.name}${tc.isError ? " ✗" : " ✓"}`).join(", ")}`,
+    );
   }
 
   // Truncate text to avoid blowing up parent agent's context
-  const text = result.text.length > MAX_TURN_TEXT_LENGTH
-    ? result.text.slice(0, MAX_TURN_TEXT_LENGTH) + `\n\n... (truncated ${result.text.length - MAX_TURN_TEXT_LENGTH} chars)`
-    : result.text;
+  const text =
+    result.text.length > MAX_TURN_TEXT_LENGTH
+      ? result.text.slice(0, MAX_TURN_TEXT_LENGTH) +
+        `\n\n... (truncated ${result.text.length - MAX_TURN_TEXT_LENGTH} chars)`
+      : result.text;
 
   lines.push("", text || "(no text output)");
 
   if (result.toolCalls.length) {
-    lines.push("", "### Tool Calls",
-      ...result.toolCalls.map(tc => `- \`${tc.name}\` — ${tc.resultPreview}`),
+    lines.push(
+      "",
+      "### Tool Calls",
+      ...result.toolCalls.map((tc) => `- \`${tc.name}\` — ${tc.resultPreview}`),
     );
   }
 
@@ -414,7 +458,7 @@ function formatTurnText(
   }
 
   if (warnings?.length) {
-    lines.push("", "### Warnings", ...warnings.map(w => `- ${w}`));
+    lines.push("", "### Warnings", ...warnings.map((w) => `- ${w}`));
   }
 
   return lines.join("\n");
@@ -426,7 +470,8 @@ export default function superviseExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "supervise",
     label: "Supervise",
-    promptSnippet: "Spawn and supervise a subagent session turn-by-turn. No polling — the tool returns when the agent hits turn_end.",
+    promptSnippet:
+      "Spawn and supervise a subagent session turn-by-turn. No polling — the tool returns when the agent hits turn_end.",
     promptGuidelines: [
       "Use supervise to spawn an agent and interact with it turn by turn. First call provides `task`. Subsequent calls provide `session` and `command` to steer the agent. Use `inspect: true` to see the full message tree.",
       "The tool returns after each agent_end event — no manual polling needed. You get the full text output plus structured tool call summaries.",
@@ -436,25 +481,84 @@ export default function superviseExtension(pi: ExtensionAPI): void {
       "Spawn and supervise a subagent turn-by-turn. Returns at each agent_end with full output and tool calls. Steer with `command`, inspect with `inspect: true`, dispose with `done: true`.",
     parameters: Type.Object({
       // ── Start mode ───────────────────────────────────────────────
-      task: Type.Optional(Type.String({ description: "Initial prompt. Required on first call. Omit when using command/inspect." })),
-      cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to parent session cwd." })),
-      agent: Type.Optional(Type.String({ description: "Named agent from .pi/agents/*.md or ~/.pi/agent/agents/*.md." })),
-      model: Type.Optional(Type.String({ description: "Model (e.g. 'deepseek/deepseek-v4-flash'). Falls back to agent file, then parent model." })),
-      skills: Type.Optional(Type.Array(Type.String(), { description: "Skill names to inject into the system prompt." })),
-      tools: Type.Optional(Type.Array(Type.String(), { description: "Tools: read, write, edit, bash, grep, find, ls. Default: all 7." })),
-      thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh." })),
-      systemPrompt: Type.Optional(Type.String({ description: "System prompt. Overrides agent file if both given." })),
+      task: Type.Optional(
+        Type.String({
+          description:
+            "Initial prompt. Required on first call. Omit when using command/inspect.",
+        }),
+      ),
+      cwd: Type.Optional(
+        Type.String({
+          description: "Working directory. Defaults to parent session cwd.",
+        }),
+      ),
+      agent: Type.Optional(
+        Type.String({
+          description:
+            "Named agent from .pi/agents/*.md or ~/.pi/agent/agents/*.md.",
+        }),
+      ),
+      model: Type.Optional(
+        Type.String({
+          description:
+            "Model (e.g. 'deepseek/deepseek-v4-flash'). Falls back to agent file, then parent model.",
+        }),
+      ),
+      skills: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "Skill names to inject into the system prompt.",
+        }),
+      ),
+      tools: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "Tools: read, write, edit, bash, grep, find, ls. Default: all 7.",
+        }),
+      ),
+      thinking: Type.Optional(
+        Type.String({
+          description:
+            "Thinking level: off, minimal, low, medium, high, xhigh.",
+        }),
+      ),
+      systemPrompt: Type.Optional(
+        Type.String({
+          description: "System prompt. Overrides agent file if both given.",
+        }),
+      ),
 
       // ── Continue mode ────────────────────────────────────────────
-      session: Type.Optional(Type.String({ description: "Session ID from a previous supervise call. Required for command/inspect/done." })),
-      command: Type.Optional(Type.String({ description: "Steer command to send to the supervised agent." })),
-      commandType: Type.Optional(Type.String({ enum: ["steer", "followUp"], description: "How to send the command. 'steer' (default) interrupts the current turn. 'followUp' queues it." })),
+      session: Type.Optional(
+        Type.String({
+          description:
+            "Session ID from a previous supervise call. Required for command/inspect/done.",
+        }),
+      ),
+      command: Type.Optional(
+        Type.String({
+          description: "Steer command to send to the supervised agent.",
+        }),
+      ),
+      commandType: Type.Optional(
+        Type.String({
+          enum: ["steer", "followUp"],
+          description:
+            "How to send the command. 'steer' (default) interrupts the current turn. 'followUp' queues it.",
+        }),
+      ),
 
       // ── Inspect mode ─────────────────────────────────────────────
-      inspect: Type.Optional(Type.Boolean({ description: "Return the full message tree instead of running a turn." })),
+      inspect: Type.Optional(
+        Type.Boolean({
+          description:
+            "Return the full message tree instead of running a turn.",
+        }),
+      ),
 
       // ── Done mode ────────────────────────────────────────────────
-      done: Type.Optional(Type.Boolean({ description: "Dispose the supervised session." })),
+      done: Type.Optional(
+        Type.Boolean({ description: "Dispose the supervised session." }),
+      ),
     }),
 
     async execute(_id, params, signal, onUpdate, ctx) {
@@ -465,16 +569,32 @@ export default function superviseExtension(pi: ExtensionAPI): void {
       if (params.done) {
         if (!sessionId) {
           return {
-            content: [{ type: "text" as const, text: "`done` requires a `session` ID." }],
+            content: [
+              {
+                type: "text" as const,
+                text: "`done` requires a `session` ID.",
+              },
+            ],
             details: { error: "Missing session" },
           };
         }
         if (state) {
-          try { state.agent.abort(); } catch { /* already stopped */ }
+          try {
+            state.agent.abort();
+          } catch {
+            /* already stopped */
+          }
           sessions.delete(sessionId);
         }
         return {
-          content: [{ type: "text" as const, text: state ? `Session ${sessionId} disposed.` : `Session ${sessionId} not found.` }],
+          content: [
+            {
+              type: "text" as const,
+              text: state
+                ? `Session ${sessionId} disposed.`
+                : `Session ${sessionId} not found.`,
+            },
+          ],
           details: { sessionId, disposed: !!state },
         };
       }
@@ -483,28 +603,41 @@ export default function superviseExtension(pi: ExtensionAPI): void {
       if (params.inspect) {
         if (!state) {
           return {
-            content: [{ type: "text" as const, text: sessionId
-              ? `Session ${sessionId} not found. It may have been disposed or expired.`
-              : "`inspect` requires a `session` ID.",
-            }],
+            content: [
+              {
+                type: "text" as const,
+                text: sessionId
+                  ? `Session ${sessionId} not found. It may have been disposed or expired.`
+                  : "`inspect` requires a `session` ID.",
+              },
+            ],
             details: { error: "Session not found" },
           };
         }
         const messages = state.agent.state.messages;
         return {
-          content: [{ type: "text" as const, text: [
-            `## Session: ${state.id}`,
-            `Turn: ${state.turn}`,
-            `Model: ${state.model.id}`,
-            `Started: ${new Date(state.startedAt).toISOString()}`,
-            `Messages: ${messages.length}`,
-            state.failed ? "Status: **failed** (session is dead)" : "",
-            "",
-            "```json",
-            JSON.stringify(formatMessagesForInspect(messages), null, 2),
-            "```",
-          ].join("\n") }],
-          details: { sessionId: state.id, messages: formatMessagesForInspect(messages), turn: state.turn },
+          content: [
+            {
+              type: "text" as const,
+              text: [
+                `## Session: ${state.id}`,
+                `Turn: ${state.turn}`,
+                `Model: ${state.model.id}`,
+                `Started: ${new Date(state.startedAt).toISOString()}`,
+                `Messages: ${messages.length}`,
+                state.failed ? "Status: **failed** (session is dead)" : "",
+                "",
+                "```json",
+                JSON.stringify(formatMessagesForInspect(messages), null, 2),
+                "```",
+              ].join("\n"),
+            },
+          ],
+          details: {
+            sessionId: state.id,
+            messages: formatMessagesForInspect(messages),
+            turn: state.turn,
+          },
         };
       }
 
@@ -512,7 +645,12 @@ export default function superviseExtension(pi: ExtensionAPI): void {
       if (!state) {
         if (!params.task) {
           return {
-            content: [{ type: "text" as const, text: "First call requires `task`. Use `supervise({ task: \"...\", cwd: \"/project\" })` to start a new session." }],
+            content: [
+              {
+                type: "text" as const,
+                text: 'First call requires `task`. Use `supervise({ task: "...", cwd: "/project" })` to start a new session.',
+              },
+            ],
             details: { error: "Missing task" },
           };
         }
@@ -527,8 +665,17 @@ export default function superviseExtension(pi: ExtensionAPI): void {
           configWarnings = config.warnings;
         } catch (err) {
           return {
-            content: [{ type: "text" as const, text: `Configuration error: ${err instanceof Error ? err.message : String(err)}` }],
-            details: { error: "Configuration failed", sessionId: id, warnings: configWarnings },
+            content: [
+              {
+                type: "text" as const,
+                text: `Configuration error: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            details: {
+              error: "Configuration failed",
+              sessionId: id,
+              warnings: configWarnings,
+            },
           };
         }
 
@@ -536,7 +683,12 @@ export default function superviseExtension(pi: ExtensionAPI): void {
         const startTime = Date.now();
 
         onUpdate?.({
-          content: [{ type: "text" as const, text: `Session ${id} started. Running turn 1...` }],
+          content: [
+            {
+              type: "text" as const,
+              text: `Session ${id} started. Running turn 1...`,
+            },
+          ],
           details: { sessionId: id, status: "running", turn: 1 },
         });
 
@@ -546,7 +698,12 @@ export default function superviseExtension(pi: ExtensionAPI): void {
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
           if (signal?.aborted) {
             return {
-              content: [{ type: "text" as const, text: `Session ${id} aborted before attempt ${attempt + 1}.` }],
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Session ${id} aborted before attempt ${attempt + 1}.`,
+                },
+              ],
               details: { sessionId: id, status: "aborted" },
             };
           }
@@ -556,12 +713,20 @@ export default function superviseExtension(pi: ExtensionAPI): void {
           // Register abort handler
           let abortHandler: (() => void) | undefined;
           if (signal) {
-            abortHandler = () => { try { agent.abort(); } catch { /* */ } };
+            abortHandler = () => {
+              try {
+                agent.abort();
+              } catch {
+                /* */
+              }
+            };
             signal.addEventListener("abort", abortHandler, { once: true });
           }
 
           try {
-            agent.prompt(params.task!).catch(() => { /* errors surface via waitForTurnEnd */ });
+            agent.prompt(params.task!).catch(() => {
+              /* errors surface via waitForTurnEnd */
+            });
             const result = await waitForTurnEnd(agent, 0, signal);
             lastResult = result;
             lastAgent = agent;
@@ -570,58 +735,124 @@ export default function superviseExtension(pi: ExtensionAPI): void {
               // Success — store session
               ensureCapacity();
               sessions.set(id, {
-                id, agent, cwd, model: config.model,
-                startedAt: Date.now(), turn: 1,
+                id,
+                agent,
+                cwd,
+                model: config.model,
+                startedAt: Date.now(),
+                turn: 1,
                 messageCount: agent.state.messages.length,
                 failed: false,
               });
 
               return {
-                content: [{ type: "text" as const, text: formatTurnText(id, 1, result, Date.now() - startTime, warnings.length ? warnings : undefined) }],
+                content: [
+                  {
+                    type: "text" as const,
+                    text: formatTurnText(
+                      id,
+                      1,
+                      result,
+                      Date.now() - startTime,
+                      warnings.length ? warnings : undefined,
+                    ),
+                  },
+                ],
                 details: {
-                  sessionId: id, turn: 1, text: result.text, toolCalls: result.toolCalls,
+                  sessionId: id,
+                  turn: 1,
+                  text: result.text,
+                  toolCalls: result.toolCalls,
                   status: "waiting",
-                  durationMs: Date.now() - startTime, tokens: result.tokens, warnings,
+                  durationMs: Date.now() - startTime,
+                  tokens: result.tokens,
+                  warnings,
                 },
               };
             }
 
             // Error — retry if transient
-            if (attempt < MAX_RETRIES - 1 && RETRYABLE_PATTERN.test(result.error)) {
-              const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * RETRY_BASE_DELAY_MS;
-              try { await sleepWithAbort(delay, signal); } catch { /* abort during sleep */ }
+            if (
+              attempt < MAX_RETRIES - 1 &&
+              RETRYABLE_PATTERN.test(result.error)
+            ) {
+              const delay =
+                RETRY_BASE_DELAY_MS * Math.pow(2, attempt) +
+                Math.random() * RETRY_BASE_DELAY_MS;
+              try {
+                await sleepWithAbort(delay, signal);
+              } catch {
+                /* abort during sleep */
+              }
               continue;
             }
 
             // Non-retryable or exhausted retries — do NOT store session
             return {
-              content: [{ type: "text" as const, text: formatTurnText(id, 1, result, Date.now() - startTime, warnings.length ? warnings : undefined) }],
+              content: [
+                {
+                  type: "text" as const,
+                  text: formatTurnText(
+                    id,
+                    1,
+                    result,
+                    Date.now() - startTime,
+                    warnings.length ? warnings : undefined,
+                  ),
+                },
+              ],
               details: {
-                sessionId: id, turn: 1, text: result.text, toolCalls: result.toolCalls,
-                status: "error", error: result.error,
-                durationMs: Date.now() - startTime, tokens: result.tokens, warnings,
+                sessionId: id,
+                turn: 1,
+                text: result.text,
+                toolCalls: result.toolCalls,
+                status: "error",
+                error: result.error,
+                durationMs: Date.now() - startTime,
+                tokens: result.tokens,
+                warnings,
               },
             };
           } catch (err) {
             if (err instanceof AbortError) {
               return {
-                content: [{ type: "text" as const, text: `Session ${id} aborted.` }],
+                content: [
+                  { type: "text" as const, text: `Session ${id} aborted.` },
+                ],
                 details: { sessionId: id, status: "aborted" },
               };
             }
             throw err;
           } finally {
-            if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
+            if (signal && abortHandler)
+              signal.removeEventListener("abort", abortHandler);
           }
         }
 
         // All retries exhausted with retryable errors — do NOT store session
         return {
-          content: [{ type: "text" as const, text: formatTurnText(id, 1, lastResult!, Date.now() - startTime, warnings) }],
+          content: [
+            {
+              type: "text" as const,
+              text: formatTurnText(
+                id,
+                1,
+                lastResult!,
+                Date.now() - startTime,
+                warnings,
+              ),
+            },
+          ],
           details: {
-            sessionId: id, turn: 1, text: lastResult!.text, toolCalls: lastResult!.toolCalls,
-            status: "error", error: lastResult!.error,
-            durationMs: Date.now() - startTime, tokens: lastResult!.tokens, warnings,
+            sessionId: id,
+            turn: 1,
+            text: lastResult!.text,
+            toolCalls: lastResult!.toolCalls,
+            status: "error",
+            error: lastResult!.error,
+            durationMs: Date.now() - startTime,
+            tokens: lastResult!.tokens,
+            warnings,
           },
         };
       }
@@ -631,26 +862,45 @@ export default function superviseExtension(pi: ExtensionAPI): void {
       // Guard: dead session can't be continued
       if (state.failed) {
         return {
-          content: [{ type: "text" as const, text: `Session ${state.id} has failed and cannot accept commands. Use \`done: true\` to dispose it.` }],
+          content: [
+            {
+              type: "text" as const,
+              text: `Session ${state.id} has failed and cannot accept commands. Use \`done: true\` to dispose it.`,
+            },
+          ],
           details: { sessionId: state.id, turn: state.turn, status: "error" },
         };
       }
 
       if (!params.command) {
         return {
-          content: [{ type: "text" as const, text: `Session ${state.id} is at turn ${state.turn}. Provide \`command\` to continue, \`inspect: true\` to view messages, or \`done: true\` to dispose.` }],
+          content: [
+            {
+              type: "text" as const,
+              text: `Session ${state.id} is at turn ${state.turn}. Provide \`command\` to continue, \`inspect: true\` to view messages, or \`done: true\` to dispose.`,
+            },
+          ],
           details: { sessionId: state.id, turn: state.turn, status: "waiting" },
         };
       }
 
       const nextTurn = state.turn + 1;
       onUpdate?.({
-        content: [{ type: "text" as const, text: `Session ${state.id}: sending command for turn ${nextTurn}...` }],
+        content: [
+          {
+            type: "text" as const,
+            text: `Session ${state.id}: sending command for turn ${nextTurn}...`,
+          },
+        ],
         details: { sessionId: state.id, status: "running", turn: nextTurn },
       });
 
       const commandType = params.commandType ?? "steer";
-      const userMessage = { role: "user" as const, content: params.command, timestamp: Date.now() };
+      const userMessage = {
+        role: "user" as const,
+        content: params.command,
+        timestamp: Date.now(),
+      };
 
       if (commandType === "followUp") {
         state.agent.followUp(userMessage);
@@ -661,7 +911,11 @@ export default function superviseExtension(pi: ExtensionAPI): void {
       const startTime = Date.now();
       const prevMessageCount = state.messageCount;
       try {
-        const result = await waitForTurnEnd(state.agent, prevMessageCount, signal);
+        const result = await waitForTurnEnd(
+          state.agent,
+          prevMessageCount,
+          signal,
+        );
         state.turn = nextTurn;
         state.messageCount = state.agent.state.messages.length;
 
@@ -670,18 +924,41 @@ export default function superviseExtension(pi: ExtensionAPI): void {
         }
 
         return {
-          content: [{ type: "text" as const, text: formatTurnText(state.id, nextTurn, result, Date.now() - startTime) }],
+          content: [
+            {
+              type: "text" as const,
+              text: formatTurnText(
+                state.id,
+                nextTurn,
+                result,
+                Date.now() - startTime,
+              ),
+            },
+          ],
           details: {
-            sessionId: state.id, turn: nextTurn, text: result.text, toolCalls: result.toolCalls,
-            status: result.isFinished ? "finished" : result.error ? "error" : "waiting",
+            sessionId: state.id,
+            turn: nextTurn,
+            text: result.text,
+            toolCalls: result.toolCalls,
+            status: result.isFinished
+              ? "finished"
+              : result.error
+                ? "error"
+                : "waiting",
             error: result.error,
-            durationMs: Date.now() - startTime, tokens: result.tokens,
+            durationMs: Date.now() - startTime,
+            tokens: result.tokens,
           },
         };
       } catch (err) {
         if (err instanceof AbortError) {
           return {
-            content: [{ type: "text" as const, text: `Session ${state.id} aborted during turn ${nextTurn}.` }],
+            content: [
+              {
+                type: "text" as const,
+                text: `Session ${state.id} aborted during turn ${nextTurn}.`,
+              },
+            ],
             details: { sessionId: state.id, turn: nextTurn, status: "aborted" },
           };
         }
@@ -694,30 +971,51 @@ export default function superviseExtension(pi: ExtensionAPI): void {
     renderCall(args, theme, ctx) {
       const renderState = ctx.state as { turnStartedAt?: number };
       if (ctx.executionStarted) renderState.turnStartedAt = Date.now();
-      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const p = args as Record<string, unknown>;
 
       if (p.inspect) {
-        text.setText(theme.fg("toolTitle", theme.bold(`supervise inspect ${p.session ?? ""}`)));
+        text.setText(
+          theme.fg(
+            "toolTitle",
+            theme.bold(`supervise inspect ${p.session ?? ""}`),
+          ),
+        );
       } else if (p.done) {
-        text.setText(theme.fg("toolTitle", theme.bold(`supervise done ${p.session ?? ""}`)));
+        text.setText(
+          theme.fg(
+            "toolTitle",
+            theme.bold(`supervise done ${p.session ?? ""}`),
+          ),
+        );
       } else if (p.command) {
-        text.setText(theme.fg("toolTitle", theme.bold(`supervise ${p.session ?? ""}`)) + " " + theme.fg("muted", trunc(String(p.command), 60)));
+        text.setText(
+          theme.fg("toolTitle", theme.bold(`supervise ${p.session ?? ""}`)) +
+            " " +
+            theme.fg("muted", trunc(String(p.command), 60)),
+        );
       } else {
-        text.setText(theme.fg("toolTitle", theme.bold("supervise")) + " " + theme.fg("muted", trunc(String(p.task ?? ""), 60)));
+        text.setText(
+          theme.fg("toolTitle", theme.bold("supervise")) +
+            " " +
+            theme.fg("muted", trunc(String(p.task ?? ""), 60)),
+        );
       }
       return text;
     },
 
     renderResult(result, options, theme, ctx) {
       const renderState = ctx.state as { turnStartedAt?: number };
-      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 
       const details = result.details as Record<string, unknown> | undefined;
-      const content = (result.content as Array<{ type: string; text: string }>)
-        ?.filter(c => c.type === "text")
-        .map(c => c.text)
-        .join("\n") ?? "";
+      const content =
+        (result.content as Array<{ type: string; text: string }>)
+          ?.filter((c) => c.type === "text")
+          .map((c) => c.text)
+          .join("\n") ?? "";
 
       if (!details?.sessionId) {
         text.setText(content ? `\n${content}` : "");
@@ -725,20 +1023,28 @@ export default function superviseExtension(pi: ExtensionAPI): void {
       }
 
       if (options.isPartial) {
-        const elapsed = renderState.turnStartedAt ? ` · ${fmtDuration(Date.now() - renderState.turnStartedAt)}` : "";
-        text.setText(`${theme.bold(`supervise ${details.sessionId}`)} turn ${details.turn}${elapsed}\n${theme.fg("muted", "running...")}`);
+        const elapsed = renderState.turnStartedAt
+          ? ` · ${fmtDuration(Date.now() - renderState.turnStartedAt)}`
+          : "";
+        text.setText(
+          `${theme.bold(`supervise ${details.sessionId}`)} turn ${details.turn}${elapsed}\n${theme.fg("muted", "running...")}`,
+        );
       } else {
-        const statusIcon = details.status === "error" ? theme.fg("error", "✗") :
-          details.status === "finished" ? theme.fg("success", "✓") :
-          details.status === "aborted" ? theme.fg("warning", "⏏") :
-          theme.fg("warning", "⏸");
+        const statusIcon =
+          details.status === "error"
+            ? theme.fg("error", "✗")
+            : details.status === "finished"
+              ? theme.fg("success", "✓")
+              : details.status === "aborted"
+                ? theme.fg("warning", "⏏")
+                : theme.fg("warning", "⏸");
         const elapsed = fmtDuration(Number(details.durationMs ?? 0));
         const tokens = fmtTokens(Number(details.tokens ?? 0));
         const line = `${statusIcon} ${theme.bold(`supervise ${details.sessionId}`)} turn ${details.turn} · ${elapsed} · ${tokens} tokens`;
 
         const toolCalls = details.toolCalls as ToolCallSummary[] | undefined;
         const toolLine = toolCalls?.length
-          ? `\n${theme.fg("muted", toolCalls.map(tc => `${tc.name}${tc.isError ? " ✗" : " ✓"}`).join(", "))}`
+          ? `\n${theme.fg("muted", toolCalls.map((tc) => `${tc.name}${tc.isError ? " ✗" : " ✓"}`).join(", "))}`
           : "";
 
         if (options.expanded) {

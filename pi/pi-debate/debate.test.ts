@@ -1,8 +1,18 @@
 import { describe, expect, test, afterEach } from "bun:test";
-import { createTestSession, type TestSession } from "@marcfargas/pi-test-harness";
+import {
+  createTestSession,
+  type TestSession,
+} from "@marcfargas/pi-test-harness";
 import { resolve } from "node:path";
 
-import { resolveModel, extractOutput, fmtDuration, fmtTokens, trunc, type DebateArgs } from "./debate.ts";
+import {
+  resolveModel,
+  extractOutput,
+  fmtDuration,
+  fmtTokens,
+  trunc,
+  type DebateArgs,
+} from "./debate.ts";
 
 const EXTENSION = resolve(import.meta.dirname, "./debate.ts");
 
@@ -14,10 +24,12 @@ function getToolDef(ts: TestSession, name: string) {
 
 // ── Mock render helpers ──────────────────────────────────────────────────
 
-function mockTheme(overrides: Partial<{
-  fg: (key: string, text: string) => string;
-  bold: (text: string) => string;
-}> = {}) {
+function mockTheme(
+  overrides: Partial<{
+    fg: (key: string, text: string) => string;
+    bold: (text: string) => string;
+  }> = {},
+) {
   return {
     fg: (_k: string, t: string) => t,
     bold: (t: string) => `**${t}**`,
@@ -28,7 +40,9 @@ function mockTheme(overrides: Partial<{
 function mockText() {
   let captured = "";
   return {
-    setText: (t: string) => { captured = t; },
+    setText: (t: string) => {
+      captured = t;
+    },
     getText: () => captured,
     invalidate: () => {},
   };
@@ -52,12 +66,15 @@ describe("resolveModel", () => {
   function makeRegistry(models: Array<{ provider: string; id: string }>) {
     return {
       getAvailable: () => models,
-      find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id) ?? null,
+      find: (provider: string, id: string) =>
+        models.find((m) => m.provider === provider && m.id === id) ?? null,
     } as any;
   }
 
   test("returns parent model when spec is undefined", () => {
-    expect(resolveModel(undefined, makeRegistry([]), parentModel)).toBe(parentModel);
+    expect(resolveModel(undefined, makeRegistry([]), parentModel)).toBe(
+      parentModel,
+    );
   });
 
   test("finds bare id in available models", () => {
@@ -81,8 +98,14 @@ describe("resolveModel", () => {
   });
 
   test("handles spec with multiple slashes", () => {
-    const registry = makeRegistry([{ provider: "openrouter", id: "qwen/qwen3-coder" }]);
-    const result = resolveModel("openrouter/qwen/qwen3-coder", registry, parentModel);
+    const registry = makeRegistry([
+      { provider: "openrouter", id: "qwen/qwen3-coder" },
+    ]);
+    const result = resolveModel(
+      "openrouter/qwen/qwen3-coder",
+      registry,
+      parentModel,
+    );
     expect(result).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder" });
   });
 });
@@ -91,7 +114,13 @@ describe("extractOutput", () => {
   test("extracts text from assistant messages", () => {
     const messages = [
       { role: "user", content: [{ type: "text", text: "hi" }] },
-      { role: "assistant", content: [{ type: "text", text: "hello" }, { type: "text", text: "world" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "hello" },
+          { type: "text", text: "world" },
+        ],
+      },
     ] as any;
     expect(extractOutput(messages)).toBe("hello\n\nworld");
   });
@@ -106,7 +135,13 @@ describe("extractOutput", () => {
 
   test("ignores non-text blocks", () => {
     const messages = [
-      { role: "assistant", content: [{ type: "tool_use", name: "bash" }, { type: "text", text: "result" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", name: "bash" },
+          { type: "text", text: "result" },
+        ],
+      },
     ] as any;
     expect(extractOutput(messages)).toBe("result");
   });
@@ -214,8 +249,19 @@ describe("debate extension", () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "debate");
     const props = (toolDef!.parameters as any).properties;
-    const optFields = ["rounds", "modelA", "modelB", "positionA", "positionB",
-      "systemPromptA", "systemPromptB", "judge", "cwd", "tools", "thinking"];
+    const optFields = [
+      "rounds",
+      "modelA",
+      "modelB",
+      "positionA",
+      "positionB",
+      "systemPromptA",
+      "systemPromptB",
+      "judge",
+      "cwd",
+      "tools",
+      "thinking",
+    ];
     for (const f of optFields) {
       expect(props[f]).toBeDefined();
     }
@@ -230,7 +276,13 @@ describe("debate extension", () => {
     const context = ts.session.extensionRunner as any;
 
     // It'll fail because no model is resolvable (no parent model)
-    const result = await toolDef!.execute("tc-1", params, undefined, undefined, context);
+    const result = await toolDef!.execute(
+      "tc-1",
+      params,
+      undefined,
+      undefined,
+      context,
+    );
     expect(result.content[0].text).toContain("Could not resolve model");
   });
 
@@ -240,7 +292,13 @@ describe("debate extension", () => {
     const params = { topic: "X", tools: ["read", "imaginary-tool"] };
     const context = ts.session.extensionRunner as any;
 
-    const result = await toolDef!.execute("tc-2", params, undefined, undefined, context);
+    const result = await toolDef!.execute(
+      "tc-2",
+      params,
+      undefined,
+      undefined,
+      context,
+    );
     const text = result.content[0].text;
     // Should still fail on model resolution (happens first)
     expect(text).toContain("Could not resolve model");
@@ -334,7 +392,10 @@ describe("debate renderResult", () => {
     const toolDef = getToolDef(ts, "debate");
     const theme = mockTheme();
     const mt = mockText();
-    const ctx = mockRenderCtx({ lastComponent: mt as any, executionStarted: true });
+    const ctx = mockRenderCtx({
+      lastComponent: mt as any,
+      executionStarted: true,
+    });
 
     const result = {
       content: [{ type: "text", text: "Running..." }],
@@ -343,12 +404,24 @@ describe("debate renderResult", () => {
         rounds: 2,
         transcript: [],
         progress: [
-          { phase: "round", round: 1, totalRounds: 2, speaker: "A", tokens: 100, durationMs: 500 },
+          {
+            phase: "round",
+            round: 1,
+            totalRounds: 2,
+            speaker: "A",
+            tokens: 100,
+            durationMs: 500,
+          },
         ],
       },
     };
 
-    toolDef!.renderResult(result, { isPartial: true, expanded: false }, theme, ctx);
+    toolDef!.renderResult(
+      result,
+      { isPartial: true, expanded: false },
+      theme,
+      ctx,
+    );
     const out = mt.getText();
     expect(out).toContain("Debating");
     expect(out).toContain("●");
@@ -360,7 +433,11 @@ describe("debate renderResult", () => {
     const toolDef = getToolDef(ts, "debate");
     const theme = mockTheme();
     const mt = mockText();
-    const ctx = mockRenderCtx({ lastComponent: mt as any, executionStarted: true, state: { startedAt: Date.now() - 5000 } });
+    const ctx = mockRenderCtx({
+      lastComponent: mt as any,
+      executionStarted: true,
+      state: { startedAt: Date.now() - 5000 },
+    });
 
     const result = {
       content: [{ type: "text", text: "Done" }],
@@ -368,16 +445,42 @@ describe("debate renderResult", () => {
         topic: "X vs Y",
         rounds: 1,
         transcript: [
-          { round: 1, speaker: "A" as const, model: "anthropic/claude-sonnet-4", output: "A says hello.", durationMs: 2000, tokens: 50 },
-          { round: 1, speaker: "B" as const, model: "openai/gpt-5", output: "B responds.", durationMs: 1500, tokens: 40 },
+          {
+            round: 1,
+            speaker: "A" as const,
+            model: "anthropic/claude-sonnet-4",
+            output: "A says hello.",
+            durationMs: 2000,
+            tokens: 50,
+          },
+          {
+            round: 1,
+            speaker: "B" as const,
+            model: "openai/gpt-5",
+            output: "B responds.",
+            durationMs: 1500,
+            tokens: 40,
+          },
         ],
         progress: [
-          { phase: "done" as const, round: 1, totalRounds: 1, speaker: "A" as const, tokens: 90, durationMs: 3500 },
+          {
+            phase: "done" as const,
+            round: 1,
+            totalRounds: 1,
+            speaker: "A" as const,
+            tokens: 90,
+            durationMs: 3500,
+          },
         ],
       },
     };
 
-    toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
+    toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: false },
+      theme,
+      ctx,
+    );
     const out = mt.getText();
     expect(out).toContain("✓");
     expect(out).toContain("Round 1 — A");
@@ -390,7 +493,11 @@ describe("debate renderResult", () => {
     const toolDef = getToolDef(ts, "debate");
     const theme = mockTheme();
     const mt = mockText();
-    const ctx = mockRenderCtx({ lastComponent: mt as any, executionStarted: true, state: { startedAt: Date.now() - 5000 } });
+    const ctx = mockRenderCtx({
+      lastComponent: mt as any,
+      executionStarted: true,
+      state: { startedAt: Date.now() - 5000 },
+    });
 
     const result = {
       content: [{ type: "text", text: "Done" }],
@@ -398,17 +505,44 @@ describe("debate renderResult", () => {
         topic: "X vs Y",
         rounds: 1,
         transcript: [
-          { round: 1, speaker: "A" as const, model: "a/a", output: "A.", durationMs: 1000, tokens: 10 },
-          { round: 1, speaker: "B" as const, model: "b/b", output: "B.", durationMs: 1000, tokens: 10 },
+          {
+            round: 1,
+            speaker: "A" as const,
+            model: "a/a",
+            output: "A.",
+            durationMs: 1000,
+            tokens: 10,
+          },
+          {
+            round: 1,
+            speaker: "B" as const,
+            model: "b/b",
+            output: "B.",
+            durationMs: 1000,
+            tokens: 10,
+          },
         ],
-        judgeVerdict: "**Winner: A**\nAnalysis: Good points.\nKey: Decisive rebuttal.",
+        judgeVerdict:
+          "**Winner: A**\nAnalysis: Good points.\nKey: Decisive rebuttal.",
         progress: [
-          { phase: "done" as const, round: 1, totalRounds: 1, speaker: "A" as const, tokens: 20, durationMs: 2000 },
+          {
+            phase: "done" as const,
+            round: 1,
+            totalRounds: 1,
+            speaker: "A" as const,
+            tokens: 20,
+            durationMs: 2000,
+          },
         ],
       },
     };
 
-    toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
+    toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: false },
+      theme,
+      ctx,
+    );
     const out = mt.getText();
     expect(out).toContain("**Winner: A**");
     expect(out).toContain("Judge:");
@@ -417,9 +551,15 @@ describe("debate renderResult", () => {
   test("shows error icon for failed turns", async () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "debate");
-    const theme = mockTheme({ fg: (k, t) => k === "error" ? `[ERR]${t}` : t });
+    const theme = mockTheme({
+      fg: (k, t) => (k === "error" ? `[ERR]${t}` : t),
+    });
     const mt = mockText();
-    const ctx = mockRenderCtx({ lastComponent: mt as any, executionStarted: true, state: { startedAt: Date.now() - 5000 } });
+    const ctx = mockRenderCtx({
+      lastComponent: mt as any,
+      executionStarted: true,
+      state: { startedAt: Date.now() - 5000 },
+    });
 
     const result = {
       content: [{ type: "text", text: "Done" }],
@@ -427,16 +567,43 @@ describe("debate renderResult", () => {
         topic: "X",
         rounds: 1,
         transcript: [
-          { round: 1, speaker: "A" as const, model: "a/a", output: "ok", durationMs: 1000, tokens: 10 },
-          { round: 1, speaker: "B" as const, model: "b/b", output: "", durationMs: 500, tokens: 0, error: "API timeout" },
+          {
+            round: 1,
+            speaker: "A" as const,
+            model: "a/a",
+            output: "ok",
+            durationMs: 1000,
+            tokens: 10,
+          },
+          {
+            round: 1,
+            speaker: "B" as const,
+            model: "b/b",
+            output: "",
+            durationMs: 500,
+            tokens: 0,
+            error: "API timeout",
+          },
         ],
         progress: [
-          { phase: "done" as const, round: 1, totalRounds: 1, speaker: "A" as const, tokens: 10, durationMs: 1500 },
+          {
+            phase: "done" as const,
+            round: 1,
+            totalRounds: 1,
+            speaker: "A" as const,
+            tokens: 10,
+            durationMs: 1500,
+          },
         ],
       },
     };
 
-    toolDef!.renderResult(result, { isPartial: false, expanded: false }, theme, ctx);
+    toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: false },
+      theme,
+      ctx,
+    );
     const out = mt.getText();
     expect(out).toContain("[ERR]✗");
     expect(out).toContain("Round 1 — B");
@@ -446,7 +613,10 @@ describe("debate renderResult", () => {
     ts = await createTestSession({ extensions: [EXTENSION] });
     const toolDef = getToolDef(ts, "debate");
     const theme = mockTheme();
-    const ctx = mockRenderCtx({ executionStarted: true, state: { startedAt: Date.now() - 5000 } });
+    const ctx = mockRenderCtx({
+      executionStarted: true,
+      state: { startedAt: Date.now() - 5000 },
+    });
 
     const result = {
       content: [{ type: "text", text: "Done" }],
@@ -454,17 +624,43 @@ describe("debate renderResult", () => {
         topic: "Rust vs Go",
         rounds: 1,
         transcript: [
-          { round: 1, speaker: "A" as const, model: "anthropic/claude", output: "Rust is faster.", durationMs: 2000, tokens: 50 },
-          { round: 1, speaker: "B" as const, model: "openai/gpt", output: "Go is simpler.", durationMs: 1800, tokens: 45 },
+          {
+            round: 1,
+            speaker: "A" as const,
+            model: "anthropic/claude",
+            output: "Rust is faster.",
+            durationMs: 2000,
+            tokens: 50,
+          },
+          {
+            round: 1,
+            speaker: "B" as const,
+            model: "openai/gpt",
+            output: "Go is simpler.",
+            durationMs: 1800,
+            tokens: 45,
+          },
         ],
         judgeVerdict: "**Winner: Draw**\nBoth made good points.",
         progress: [
-          { phase: "done" as const, round: 1, totalRounds: 1, speaker: "A" as const, tokens: 95, durationMs: 3800 },
+          {
+            phase: "done" as const,
+            round: 1,
+            totalRounds: 1,
+            speaker: "A" as const,
+            tokens: 95,
+            durationMs: 3800,
+          },
         ],
       },
     };
 
-    const component = toolDef!.renderResult(result, { isPartial: false, expanded: true }, theme, ctx);
+    const component = toolDef!.renderResult(
+      result,
+      { isPartial: false, expanded: true },
+      theme,
+      ctx,
+    );
     // Expanded returns a Container, not a Text
     expect(component.constructor.name).toBe("Container");
   });

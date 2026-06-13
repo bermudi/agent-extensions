@@ -127,11 +127,18 @@ function timestampValue(timestamp: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-export function compareTimestampDesc(left: { timestamp: string }, right: { timestamp: string }): number {
+export function compareTimestampDesc(
+  left: { timestamp: string },
+  right: { timestamp: string },
+): number {
   return timestampValue(right.timestamp) - timestampValue(left.timestamp);
 }
 
-export function clampPositiveInteger(value: number | undefined, fallback: number, max: number): number {
+export function clampPositiveInteger(
+  value: number | undefined,
+  fallback: number,
+  max: number,
+): number {
   if (!Number.isFinite(value)) return fallback;
   const normalized = Math.trunc(value ?? fallback);
   if (normalized < 1) return fallback;
@@ -168,7 +175,9 @@ export function extractText(content: unknown): string {
   return texts.join("\n");
 }
 
-export function extractToolCalls(content: unknown): Array<{ name: string; arguments: string }> {
+export function extractToolCalls(
+  content: unknown,
+): Array<{ name: string; arguments: string }> {
   if (!Array.isArray(content)) return [];
 
   const toolCalls: Array<{ name: string; arguments: string }> = [];
@@ -288,13 +297,18 @@ function getLeafCandidates(entries: readonly GenericEntry[]): GenericEntry[] {
   const parentIds = new Set(
     entries
       .map((entry) => entry.parentId)
-      .filter((parentId): parentId is string => typeof parentId === "string" && parentId.length > 0),
+      .filter(
+        (parentId): parentId is string =>
+          typeof parentId === "string" && parentId.length > 0,
+      ),
   );
 
   return entries.filter((entry) => !parentIds.has(entry.id));
 }
 
-function sortEntriesByTimestampDesc(entries: readonly GenericEntry[]): GenericEntry[] {
+function sortEntriesByTimestampDesc(
+  entries: readonly GenericEntry[],
+): GenericEntry[] {
   return [...entries].sort((left, right) => {
     const timestampCompare = compareTimestampDesc(left, right);
     if (timestampCompare !== 0) return timestampCompare;
@@ -302,7 +316,9 @@ function sortEntriesByTimestampDesc(entries: readonly GenericEntry[]): GenericEn
   });
 }
 
-function buildChildrenMap(entries: readonly GenericEntry[]): Map<string, GenericEntry[]> {
+function buildChildrenMap(
+  entries: readonly GenericEntry[],
+): Map<string, GenericEntry[]> {
   const children = new Map<string, GenericEntry[]>();
   for (const entry of entries) {
     if (entry.parentId === null) continue;
@@ -313,7 +329,10 @@ function buildChildrenMap(entries: readonly GenericEntry[]): Map<string, Generic
   return children;
 }
 
-function collectDescendantLeaves(startId: string, children: ReadonlyMap<string, GenericEntry[]>): GenericEntry[] {
+function collectDescendantLeaves(
+  startId: string,
+  children: ReadonlyMap<string, GenericEntry[]>,
+): GenericEntry[] {
   const leaves: GenericEntry[] = [];
   const stack = [startId];
   const visited = new Set<string>();
@@ -354,7 +373,10 @@ export function hasEntryId(session: ParsedSession, entryId: string): boolean {
   return getTreeEntries(session.entries).some((entry) => entry.id === entryId);
 }
 
-export function selectLeafEntryId(session: ParsedSession, preferredEntryId?: string): string | null {
+export function selectLeafEntryId(
+  session: ParsedSession,
+  preferredEntryId?: string,
+): string | null {
   const treeEntries = getTreeEntries(session.entries);
   if (treeEntries.length === 0) return null;
 
@@ -371,11 +393,15 @@ export function selectLeafEntryId(session: ParsedSession, preferredEntryId?: str
   }
 
   const leafCandidates = getLeafCandidates(treeEntries);
-  if (leafCandidates.length > 0) return sortEntriesByTimestampDesc(leafCandidates)[0].id;
+  if (leafCandidates.length > 0)
+    return sortEntriesByTimestampDesc(leafCandidates)[0].id;
   return sortEntriesByTimestampDesc(treeEntries)[0].id;
 }
 
-export function selectBranchMessages(session: ParsedSession, preferredEntryId?: string): MessageEntry[] {
+export function selectBranchMessages(
+  session: ParsedSession,
+  preferredEntryId?: string,
+): MessageEntry[] {
   const leafEntryId = selectLeafEntryId(session, preferredEntryId);
   if (!leafEntryId) return [];
 
@@ -392,7 +418,10 @@ export function selectBranchMessages(session: ParsedSession, preferredEntryId?: 
     currentId = currentEntry?.parentId ?? null;
   }
 
-  return session.entries.filter((entry): entry is MessageEntry => entry.type === "message" && branchIds.has(entry.id));
+  return session.entries.filter(
+    (entry): entry is MessageEntry =>
+      entry.type === "message" && branchIds.has(entry.id),
+  );
 }
 
 function snippetForMatch(text: string, query: string): string {
@@ -414,7 +443,10 @@ function snippetForMatch(text: string, query: string): string {
   if (index < 0) return limitText(normalizedText, MAX_SNIPPET_CHARS);
 
   const start = Math.max(0, index - 40);
-  const end = Math.min(normalizedText.length, index + Math.max(lowerQuery.length, 40) + 80);
+  const end = Math.min(
+    normalizedText.length,
+    index + Math.max(lowerQuery.length, 40) + 80,
+  );
   const snippet = normalizedText.slice(start, end);
   return `${start > 0 ? "…" : ""}${snippet}${end < normalizedText.length ? "…" : ""}`;
 }
@@ -428,7 +460,8 @@ function searchScore(field: SearchField, text: string, query: string): number {
   const prefix = normalizedText.startsWith(normalizedQuery);
   const substring = normalizedText.includes(normalizedQuery);
   const terms = normalizedQuery.split(" ").filter(Boolean);
-  const allTerms = terms.length > 1 && terms.every((term) => normalizedText.includes(term));
+  const allTerms =
+    terms.length > 1 && terms.every((term) => normalizedText.includes(term));
 
   if (!substring && !allTerms) return 0;
 
@@ -493,7 +526,10 @@ export function findSessionMatch(
   return best;
 }
 
-export function buildSessionSummary(file: string, session: ParsedSession): SessionSummary {
+export function buildSessionSummary(
+  file: string,
+  session: ParsedSession,
+): SessionSummary {
   const firstUserMessageEntry = session.entries.find(
     (entry): entry is MessageEntry => {
       if (entry.type !== "message") return false;
@@ -502,7 +538,10 @@ export function buildSessionSummary(file: string, session: ParsedSession): Sessi
     },
   );
   const firstUserMessage = firstUserMessageEntry
-    ? limitText(extractText(firstUserMessageEntry.message.content), MAX_FIRST_USER_MESSAGE_CHARS)
+    ? limitText(
+        extractText(firstUserMessageEntry.message.content),
+        MAX_FIRST_USER_MESSAGE_CHARS,
+      )
     : "";
 
   const segments: SearchSegment[] = [
@@ -516,7 +555,11 @@ export function buildSessionSummary(file: string, session: ParsedSession): Sessi
     segments.push({ field: "name", text: session.name });
   }
   if (firstUserMessage) {
-    segments.push({ field: "first_user_message", text: firstUserMessage, entryId: firstUserMessageEntry?.id });
+    segments.push({
+      field: "first_user_message",
+      text: firstUserMessage,
+      entryId: firstUserMessageEntry?.id,
+    });
   }
 
   for (const rawEntry of session.entries) {
@@ -528,15 +571,27 @@ export function buildSessionSummary(file: string, session: ParsedSession): Sessi
     if (!text) continue;
 
     if (msg.role === "user") {
-      segments.push({ field: "user_message", text: limitText(text, MAX_SEARCH_TEXT_CHARS), entryId: entry.id });
+      segments.push({
+        field: "user_message",
+        text: limitText(text, MAX_SEARCH_TEXT_CHARS),
+        entryId: entry.id,
+      });
       continue;
     }
     if (msg.role === "assistant") {
-      segments.push({ field: "assistant_message", text: limitText(text, MAX_SEARCH_TEXT_CHARS), entryId: entry.id });
+      segments.push({
+        field: "assistant_message",
+        text: limitText(text, MAX_SEARCH_TEXT_CHARS),
+        entryId: entry.id,
+      });
       continue;
     }
     if (msg.role === "toolResult") {
-      segments.push({ field: "tool_result", text: limitText(text, MAX_SEARCH_TEXT_CHARS), entryId: entry.id });
+      segments.push({
+        field: "tool_result",
+        text: limitText(text, MAX_SEARCH_TEXT_CHARS),
+        entryId: entry.id,
+      });
     }
   }
 
@@ -552,7 +607,10 @@ export function buildSessionSummary(file: string, session: ParsedSession): Sessi
   };
 }
 
-export function formatConversation(session: ParsedSession, options: FormatConversationOptions = {}): FormattedConversation {
+export function formatConversation(
+  session: ParsedSession,
+  options: FormatConversationOptions = {},
+): FormattedConversation {
   const maxTurns = options.maxTurns ?? 50;
   const branchMessages = selectBranchMessages(session, options.entryId);
   const leafEntryId = selectLeafEntryId(session, options.entryId);
@@ -574,7 +632,9 @@ export function formatConversation(session: ParsedSession, options: FormatConver
       if (text) out.push(`\n### Assistant\n${text}`);
       if (options.includeTools) {
         for (const toolCall of extractToolCalls(msg.content)) {
-          out.push(`\n[Tool: ${toolCall.name}(${toolCall.arguments.slice(0, 300)})]`);
+          out.push(
+            `\n[Tool: ${toolCall.name}(${toolCall.arguments.slice(0, 300)})]`,
+          );
         }
       }
       continue;
@@ -583,7 +643,9 @@ export function formatConversation(session: ParsedSession, options: FormatConver
     if (msg.role === "toolResult" && options.includeTools) {
       const text = extractText(msg.content);
       if (text) {
-        out.push(`\n[Result (${msg.toolName ?? "tool"}): ${limitText(text, 500)}]`);
+        out.push(
+          `\n[Result (${msg.toolName ?? "tool"}): ${limitText(text, 500)}]`,
+        );
       }
     }
   }

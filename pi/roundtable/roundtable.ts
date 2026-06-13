@@ -15,7 +15,12 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { Agent, type AgentMessage, type AgentTool, type ThinkingLevel } from "@mariozechner/pi-agent-core";
+import {
+  Agent,
+  type AgentMessage,
+  type AgentTool,
+  type ThinkingLevel,
+} from "@mariozechner/pi-agent-core";
 import { type Api, type Model, streamSimple } from "@mariozechner/pi-ai";
 import {
   convertToLlm,
@@ -106,7 +111,14 @@ const TOOL_FACTORIES: Record<string, (cwd: string) => AgentTool<any>> = {
   ls: createLsTool,
 };
 
-const VALID_THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const VALID_THINKING = new Set([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -156,7 +168,11 @@ export function fmtDuration(ms: number): string {
 }
 
 export function fmtTokens(n: number): string {
-  return n < 1000 ? `${n}` : n < 10000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`;
+  return n < 1000
+    ? `${n}`
+    : n < 10000
+      ? `${(n / 1000).toFixed(1)}k`
+      : `${Math.round(n / 1000)}k`;
 }
 
 export function trunc(s: string, n: number): string {
@@ -196,7 +212,9 @@ function buildParticipantSystemPrompt(args: {
   if (args.participant.systemPrompt) return args.participant.systemPrompt;
 
   const { participant, topic, totalRounds, agentsMd } = args;
-  const role = participant.role ?? `Domain expert and guardian of the ${participant.name} project`;
+  const role =
+    participant.role ??
+    `Domain expert and guardian of the ${participant.name} project`;
   const otherNames = args.participants
     .filter((p) => p.name !== participant.name)
     .map((p) => p.name)
@@ -217,7 +235,8 @@ function buildParticipantSystemPrompt(args: {
     otherNames,
     "",
     `## Your Project's Guidelines (AGENTS.md)`,
-    agentsMd || "(no AGENTS.md found — use your general expertise about this project)",
+    agentsMd ||
+      "(no AGENTS.md found — use your general expertise about this project)",
     "",
     `## Instructions`,
     `- The roundtable has ${totalRounds} rounds. You speak once per round.`,
@@ -290,12 +309,22 @@ function createParticipantAgent(args: {
     streamFn: async (m, context, options) => {
       const auth = await args.modelRegistry.getApiKeyAndHeaders(m);
       if (!auth.ok) throw new Error(`Auth failed: ${auth.error}`);
-      return streamSimple(m, context, { ...options, apiKey: auth.apiKey, headers: auth.headers ?? undefined });
+      return streamSimple(m, context, {
+        ...options,
+        apiKey: auth.apiKey,
+        headers: auth.headers ?? undefined,
+      });
     },
   });
 
   if (args.signal) {
-    const onAbort = () => { try { agent.abort(); } catch { /* */ } };
+    const onAbort = () => {
+      try {
+        agent.abort();
+      } catch {
+        /* */
+      }
+    };
     args.signal.addEventListener("abort", onAbort, { once: true });
   }
 
@@ -304,11 +333,19 @@ function createParticipantAgent(args: {
 
 // ── Core Roundtable Runner ───────────────────────────────────────────────
 
-type RoundtableState = { transcript: RoundtableEntry[]; progress: RoundtableProgress[] };
+type RoundtableState = {
+  transcript: RoundtableEntry[];
+  progress: RoundtableProgress[];
+};
 
 async function runRoundtable(
   params: RoundtableArgs,
-  ctx: { modelRegistry: ModelRegistry; model?: Model<Api>; cwd: string; signal?: AbortSignal },
+  ctx: {
+    modelRegistry: ModelRegistry;
+    model?: Model<Api>;
+    cwd: string;
+    signal?: AbortSignal;
+  },
   onProgress?: (state: RoundtableState) => void,
 ) {
   const startedAt = Date.now();
@@ -317,8 +354,19 @@ async function runRoundtable(
 
   if (participants.length < 2) {
     return {
-      content: [{ type: "text" as const, text: "❌ Need at least 2 participants for a roundtable." }],
-      details: { topic: params.topic, rounds, participantCount: participants.length, transcript: [] as RoundtableEntry[], progress: [] as RoundtableProgress[] },
+      content: [
+        {
+          type: "text" as const,
+          text: "❌ Need at least 2 participants for a roundtable.",
+        },
+      ],
+      details: {
+        topic: params.topic,
+        rounds,
+        participantCount: participants.length,
+        transcript: [] as RoundtableEntry[],
+        progress: [] as RoundtableProgress[],
+      },
     };
   }
 
@@ -331,27 +379,40 @@ async function runRoundtable(
   const firstMissing = participantModels.findIndex((m) => !m);
   if (firstMissing >= 0) {
     return {
-      content: [{
-        type: "text" as const,
-        text: `❌ Could not resolve model for participant "${participants[firstMissing].name}".`,
-      }],
-      details: { topic: params.topic, rounds, participantCount: participants.length, transcript: [] as RoundtableEntry[], progress: [] as RoundtableProgress[] },
+      content: [
+        {
+          type: "text" as const,
+          text: `❌ Could not resolve model for participant "${participants[firstMissing].name}".`,
+        },
+      ],
+      details: {
+        topic: params.topic,
+        rounds,
+        participantCount: participants.length,
+        transcript: [] as RoundtableEntry[],
+        progress: [] as RoundtableProgress[],
+      },
     };
   }
 
   const resolvedModels = participantModels as Model<Api>[];
   const moderatorModel = params.moderator?.model
-    ? (resolveModel(params.moderator.model, ctx.modelRegistry, parentModel) ?? parentModel)
+    ? (resolveModel(params.moderator.model, ctx.modelRegistry, parentModel) ??
+      parentModel)
     : parentModel;
 
   // ── Resolve tools & thinking ─────────────────────────────────────
   const tools = params.tools ?? DEFAULT_TOOLS;
   const unknownTools = tools.filter((name) => !(name in TOOL_FACTORIES));
   const thinkingRaw = params.thinking ?? "off";
-  const thinking: ThinkingLevel = VALID_THINKING.has(thinkingRaw) ? (thinkingRaw as ThinkingLevel) : "off";
+  const thinking: ThinkingLevel = VALID_THINKING.has(thinkingRaw)
+    ? (thinkingRaw as ThinkingLevel)
+    : "off";
 
   // ── Read AGENTS.md for each participant ──────────────────────────
-  const agentsMds = await Promise.all(participants.map((p) => readAgentsMd(p.cwd)));
+  const agentsMds = await Promise.all(
+    participants.map((p) => readAgentsMd(p.cwd)),
+  );
 
   // ── Progress tracking ────────────────────────────────────────────
   const transcript: RoundtableEntry[] = [];
@@ -363,7 +424,14 @@ async function runRoundtable(
   };
 
   if (unknownTools.length) {
-    fire({ phase: "setup", round: 0, totalRounds: rounds, speaker: "", tokens: 0, durationMs: 0 });
+    fire({
+      phase: "setup",
+      round: 0,
+      totalRounds: rounds,
+      speaker: "",
+      tokens: 0,
+      durationMs: 0,
+    });
   }
 
   // ── Create cached agents ─────────────────────────────────────────
@@ -371,27 +439,29 @@ async function runRoundtable(
   // The system prompt is fixed (includes AGENTS.md), and we only send
   // the delta each turn — the conversation prefix stays warm in the
   // provider's prompt cache.
-  const liveParticipants: LiveParticipant[] = participants.map((participant, i) => {
-    const systemPrompt = buildParticipantSystemPrompt({
-      participant,
-      topic: params.topic,
-      participants,
-      totalRounds: rounds,
-      agentsMd: agentsMds[i],
-    });
+  const liveParticipants: LiveParticipant[] = participants.map(
+    (participant, i) => {
+      const systemPrompt = buildParticipantSystemPrompt({
+        participant,
+        topic: params.topic,
+        participants,
+        totalRounds: rounds,
+        agentsMd: agentsMds[i],
+      });
 
-    const agent = createParticipantAgent({
-      systemPrompt,
-      model: resolvedModels[i],
-      thinking,
-      tools,
-      cwd: participant.cwd,
-      modelRegistry: ctx.modelRegistry,
-      signal: ctx.signal,
-    });
+      const agent = createParticipantAgent({
+        systemPrompt,
+        model: resolvedModels[i],
+        thinking,
+        tools,
+        cwd: participant.cwd,
+        modelRegistry: ctx.modelRegistry,
+        signal: ctx.signal,
+      });
 
-    return { agent, lastSeenIndex: 0, model: resolvedModels[i] };
-  });
+      return { agent, lastSeenIndex: 0, model: resolvedModels[i] };
+    },
+  );
 
   // ── Roundtable rounds ────────────────────────────────────────────
   for (let round = 1; round <= rounds; round++) {
@@ -413,11 +483,19 @@ async function runRoundtable(
         }
       }
 
-      const prompt = round === 1 && delta.length === 0
-        ? "The roundtable is starting. Make your opening statement."
-        : `${deltaText}---\n\nRound ${round} of ${rounds}. Your turn, ${participant.name}. Respond with your contribution.`;
+      const prompt =
+        round === 1 && delta.length === 0
+          ? "The roundtable is starting. Make your opening statement."
+          : `${deltaText}---\n\nRound ${round} of ${rounds}. Your turn, ${participant.name}. Respond with your contribution.`;
 
-      fire({ phase: "turn", round, totalRounds: rounds, speaker: participant.name, tokens: 0, durationMs: 0 });
+      fire({
+        phase: "turn",
+        round,
+        totalRounds: rounds,
+        speaker: participant.name,
+        tokens: 0,
+        durationMs: 0,
+      });
 
       try {
         await live.agent.prompt(prompt);
@@ -425,8 +503,10 @@ async function runRoundtable(
 
         const tokensAfter = extractTokensFromAgent(live.agent);
         const turnTokens = tokensAfter - tokensBefore;
-        const output = extractOutput(live.agent.state.messages) || "(no output)";
-        const errorMsg = (live.agent.state as { errorMessage?: string }).errorMessage;
+        const output =
+          extractOutput(live.agent.state.messages) || "(no output)";
+        const errorMsg = (live.agent.state as { errorMessage?: string })
+          .errorMessage;
 
         const entry: RoundtableEntry = {
           round,
@@ -469,11 +549,21 @@ async function runRoundtable(
   // ── Optional moderator ──────────────────────────────────────────
   let moderatorSummary: string | undefined;
   if (params.moderator && moderatorModel && !ctx.signal?.aborted) {
-    fire({ phase: "moderator", round: rounds, totalRounds: rounds, speaker: "moderator", tokens: 0, durationMs: 0 });
+    fire({
+      phase: "moderator",
+      round: rounds,
+      totalRounds: rounds,
+      speaker: "moderator",
+      tokens: 0,
+      durationMs: 0,
+    });
 
     // Moderator is one-shot, no caching needed
     const fullTranscript = transcript
-      .map((e) => `### Round ${e.round} — ${e.speaker} (${e.model})\n\n${e.output}`)
+      .map(
+        (e) =>
+          `### Round ${e.round} — ${e.speaker} (${e.model})\n\n${e.output}`,
+      )
       .join("\n\n");
 
     const modAgent = createParticipantAgent({
@@ -498,9 +588,12 @@ async function runRoundtable(
 
       const modTokens = extractTokensFromAgent(modAgent);
       const modOutput = extractOutput(modAgent.state.messages);
-      const modError = (modAgent.state as { errorMessage?: string }).errorMessage;
+      const modError = (modAgent.state as { errorMessage?: string })
+        .errorMessage;
 
-      moderatorSummary = modError ? `[MODERATOR ERROR: ${modError}]` : modOutput;
+      moderatorSummary = modError
+        ? `[MODERATOR ERROR: ${modError}]`
+        : modOutput;
 
       const lastP = progress[progress.length - 1]!;
       lastP.durationMs = Date.now() - modStart;
@@ -515,7 +608,14 @@ async function runRoundtable(
       fire();
     }
   } else {
-    fire({ phase: "done", round: rounds, totalRounds: rounds, speaker: "", tokens: 0, durationMs: 0 });
+    fire({
+      phase: "done",
+      round: rounds,
+      totalRounds: rounds,
+      speaker: "",
+      tokens: 0,
+      durationMs: 0,
+    });
   }
 
   // ── Format output ────────────────────────────────────────────────
@@ -524,15 +624,18 @@ async function runRoundtable(
   const parts: string[] = [];
 
   parts.push(`# Roundtable: ${params.topic}`);
-  parts.push(`Participants: ${participants.map((p) => p.name).join(", ")} · Rounds: ${rounds} · Wall time: ${fmtDuration(elapsedTotal)} · Total tokens: ${fmtTokens(totalTokens)}`);
-  if (unknownTools.length) parts.push(`⚠ Unknown tools ignored: ${unknownTools.join(", ")}`);
+  parts.push(
+    `Participants: ${participants.map((p) => p.name).join(", ")} · Rounds: ${rounds} · Wall time: ${fmtDuration(elapsedTotal)} · Total tokens: ${fmtTokens(totalTokens)}`,
+  );
+  if (unknownTools.length)
+    parts.push(`⚠ Unknown tools ignored: ${unknownTools.join(", ")}`);
   parts.push("");
 
   for (const entry of transcript) {
     const label = entry.error ? "⚠ FAILED" : "OK";
     parts.push(
       `## Round ${entry.round} — ${entry.speaker} (${entry.model})\n` +
-      `[${label} | ${fmtDuration(entry.durationMs)} | ${fmtTokens(entry.tokens)} tokens]\n\n${entry.output}\n`,
+        `[${label} | ${fmtDuration(entry.durationMs)} | ${fmtTokens(entry.tokens)} tokens]\n\n${entry.output}\n`,
     );
   }
 
@@ -544,7 +647,14 @@ async function runRoundtable(
 
   return {
     content: [{ type: "text" as const, text: parts.join("\n") }],
-    details: { topic: params.topic, rounds, participantCount: participants.length, transcript, moderatorSummary, progress },
+    details: {
+      topic: params.topic,
+      rounds,
+      participantCount: participants.length,
+      transcript,
+      moderatorSummary,
+      progress,
+    },
   };
 }
 
@@ -571,15 +681,19 @@ const DEFAULT_PARTICIPANTS: Participant[] = [
 // ── Extension ─────────────────────────────────────────────────────────────
 
 export default function roundtableExtension(pi: ExtensionAPI): void {
-
   // ── /roundtable command ──────────────────────────────────────────
 
   pi.registerCommand("roundtable", {
-    description: "Run a multi-project roundtable discussion with agents rooted in their own codebases",
+    description:
+      "Run a multi-project roundtable discussion with agents rooted in their own codebases",
     handler: async (args, ctx) => {
       let topic = args?.trim() || undefined;
       if (!topic) {
-        topic = (await ctx.ui.input("Roundtable topic:", "e.g. How should agents handle long-lived state?")) || undefined;
+        topic =
+          (await ctx.ui.input(
+            "Roundtable topic:",
+            "e.g. How should agents handle long-lived state?",
+          )) || undefined;
         if (!topic) return;
       }
 
@@ -603,7 +717,10 @@ export default function roundtableExtension(pi: ExtensionAPI): void {
       const details = result.details as RoundtableDetails;
       const turnCount = details.transcript.length;
       if (turnCount > 0) {
-        ctx.ui.notify(`Roundtable complete — ${turnCount} turns across ${details.participantCount} participants`, "info");
+        ctx.ui.notify(
+          `Roundtable complete — ${turnCount} turns across ${details.participantCount} participants`,
+          "info",
+        );
       } else {
         ctx.ui.notify(result.content[0]!.text, "error");
       }
@@ -629,56 +746,113 @@ export default function roundtableExtension(pi: ExtensionAPI): void {
       "synthesizes the discussion at the end.",
     parameters: Type.Object({
       topic: Type.String({ description: "The discussion topic or question." }),
-      rounds: Type.Optional(Type.Number({
-        minimum: 1,
-        maximum: MAX_ROUNDS,
-        default: DEFAULT_ROUNDS,
-        description: `Number of rounds (1-${MAX_ROUNDS}, default ${DEFAULT_ROUNDS}). Each participant speaks once per round.`,
-      })),
-      participants: Type.Array(Type.Object({
-        name: Type.String({ description: "Participant name (used in transcript)." }),
-        cwd: Type.String({ description: "Project root directory. Participant's AGENTS.md is loaded from here. Tools are scoped to this cwd." }),
-        role: Type.Optional(Type.String({ description: "Role description. Default: domain expert of the project." })),
-        model: Type.Optional(Type.String({ description: "Model override for this participant. Falls back to parent model." })),
-        systemPrompt: Type.Optional(Type.String({ description: "Custom system prompt. Overrides the default roundtable framing + AGENTS.md injection." })),
-      }), {
-        minItems: 2,
-        maxItems: MAX_PARTICIPANTS,
-        description: "Participants in the roundtable. Each must have a name and cwd. AGENTS.md is loaded from cwd.",
-      }),
-      moderator: Type.Optional(Type.Object({
-        model: Type.Optional(Type.String({ description: "Model for the moderator. Defaults to parent model." })),
-        prompt: Type.Optional(Type.String({ description: "Custom moderator prompt. Overrides default synthesis format." })),
-      })),
-      tools: Type.Optional(Type.Array(Type.String(), {
-        description: "Tools participants may use: read, write, edit, bash, grep, find, ls. Default: read, grep, find, ls, bash.",
-      })),
-      thinking: Type.Optional(Type.String({
-        description: "Thinking level for all participants: off, minimal, low, medium, high, xhigh. Defaults to off.",
-      })),
+      rounds: Type.Optional(
+        Type.Number({
+          minimum: 1,
+          maximum: MAX_ROUNDS,
+          default: DEFAULT_ROUNDS,
+          description: `Number of rounds (1-${MAX_ROUNDS}, default ${DEFAULT_ROUNDS}). Each participant speaks once per round.`,
+        }),
+      ),
+      participants: Type.Array(
+        Type.Object({
+          name: Type.String({
+            description: "Participant name (used in transcript).",
+          }),
+          cwd: Type.String({
+            description:
+              "Project root directory. Participant's AGENTS.md is loaded from here. Tools are scoped to this cwd.",
+          }),
+          role: Type.Optional(
+            Type.String({
+              description:
+                "Role description. Default: domain expert of the project.",
+            }),
+          ),
+          model: Type.Optional(
+            Type.String({
+              description:
+                "Model override for this participant. Falls back to parent model.",
+            }),
+          ),
+          systemPrompt: Type.Optional(
+            Type.String({
+              description:
+                "Custom system prompt. Overrides the default roundtable framing + AGENTS.md injection.",
+            }),
+          ),
+        }),
+        {
+          minItems: 2,
+          maxItems: MAX_PARTICIPANTS,
+          description:
+            "Participants in the roundtable. Each must have a name and cwd. AGENTS.md is loaded from cwd.",
+        },
+      ),
+      moderator: Type.Optional(
+        Type.Object({
+          model: Type.Optional(
+            Type.String({
+              description: "Model for the moderator. Defaults to parent model.",
+            }),
+          ),
+          prompt: Type.Optional(
+            Type.String({
+              description:
+                "Custom moderator prompt. Overrides default synthesis format.",
+            }),
+          ),
+        }),
+      ),
+      tools: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "Tools participants may use: read, write, edit, bash, grep, find, ls. Default: read, grep, find, ls, bash.",
+        }),
+      ),
+      thinking: Type.Optional(
+        Type.String({
+          description:
+            "Thinking level for all participants: off, minimal, low, medium, high, xhigh. Defaults to off.",
+        }),
+      ),
     }),
 
     async execute(_id, params: RoundtableArgs, signal, onUpdate, ctx) {
-      return runRoundtable(params, {
-        modelRegistry: ctx.modelRegistry,
-        model: ctx.model,
-        cwd: ctx.cwd,
-        signal,
-      }, ({ transcript, progress }) => {
-        onUpdate?.({
-          content: [{ type: "text", text: `Roundtable: ${trunc(params.topic, 60)}` }],
-          details: { topic: params.topic, rounds: params.rounds ?? DEFAULT_ROUNDS, participantCount: params.participants.length, transcript, progress },
-        });
-      });
+      return runRoundtable(
+        params,
+        {
+          modelRegistry: ctx.modelRegistry,
+          model: ctx.model,
+          cwd: ctx.cwd,
+          signal,
+        },
+        ({ transcript, progress }) => {
+          onUpdate?.({
+            content: [
+              { type: "text", text: `Roundtable: ${trunc(params.topic, 60)}` },
+            ],
+            details: {
+              topic: params.topic,
+              rounds: params.rounds ?? DEFAULT_ROUNDS,
+              participantCount: params.participants.length,
+              transcript,
+              progress,
+            },
+          });
+        },
+      );
     },
 
     // ── TUI Renderers ────────────────────────────────────────────────
 
     renderCall(args, theme, ctx) {
       const state = (ctx.state ?? {}) as { startedAt?: number };
-      if (ctx.executionStarted && state.startedAt === undefined) state.startedAt = Date.now();
+      if (ctx.executionStarted && state.startedAt === undefined)
+        state.startedAt = Date.now();
       const a = args as RoundtableArgs;
-      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const rd = a.rounds ?? DEFAULT_ROUNDS;
       const names = a.participants.map((p) => p.name).join(", ");
       const hasMod = !!a.moderator;
@@ -697,33 +871,48 @@ export default function roundtableExtension(pi: ExtensionAPI): void {
       const details = result.details as RoundtableDetails | undefined;
 
       if (!details?.progress?.length) {
-        const content = (result.content as Array<{ type: string; text: string }>)
-          ?.filter((c) => c.type === "text")
-          .map((c) => c.text)
-          .join("\n") ?? "";
-        const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+        const content =
+          (result.content as Array<{ type: string; text: string }>)
+            ?.filter((c) => c.type === "text")
+            .map((c) => c.text)
+            .join("\n") ?? "";
+        const text =
+          (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
         text.setText(content ? `\n${content}` : "");
         return text;
       }
 
       const { progress, transcript } = details;
-      const elapsed = state.startedAt ? ` · ${fmtDuration(Date.now() - state.startedAt)}` : "";
+      const elapsed = state.startedAt
+        ? ` · ${fmtDuration(Date.now() - state.startedAt)}`
+        : "";
 
       // ── Partial (still running) ────────────────────────────────
       if (options.isPartial) {
-        const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-        const lines: string[] = ["", theme.fg("muted", `Discussing${elapsed}`), ""];
+        const text =
+          (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+        const lines: string[] = [
+          "",
+          theme.fg("muted", `Discussing${elapsed}`),
+          "",
+        ];
 
         for (const p of progress) {
           switch (p.phase) {
             case "setup":
-              lines.push(`  ${theme.fg("warning", "⚠")} ${theme.fg("muted", "validating…")}`);
+              lines.push(
+                `  ${theme.fg("warning", "⚠")} ${theme.fg("muted", "validating…")}`,
+              );
               break;
             case "turn":
-              lines.push(`  ${theme.fg("warning", "●")} Round ${p.round}/${p.totalRounds} — ${theme.bold(p.speaker)}${p.tokens > 0 ? theme.fg("muted", ` · ${fmtTokens(p.tokens)} tokens`) : ""}`);
+              lines.push(
+                `  ${theme.fg("warning", "●")} Round ${p.round}/${p.totalRounds} — ${theme.bold(p.speaker)}${p.tokens > 0 ? theme.fg("muted", ` · ${fmtTokens(p.tokens)} tokens`) : ""}`,
+              );
               break;
             case "moderator":
-              lines.push(`  ${theme.fg("warning", "●")} ${theme.bold("Moderator")} synthesizing…`);
+              lines.push(
+                `  ${theme.fg("warning", "●")} ${theme.bold("Moderator")} synthesizing…`,
+              );
               break;
             case "done":
               break;
@@ -742,31 +931,48 @@ export default function roundtableExtension(pi: ExtensionAPI): void {
       // ── Complete — expanded (Ctrl+O) ──────────────────────────
       const totalTokens = transcript.reduce((sum, e) => sum + e.tokens, 0);
       const totalMs = transcript.reduce((sum, e) => sum + e.durationMs, 0);
-      const wallTime = state.startedAt ? fmtDuration(Date.now() - state.startedAt) : fmtDuration(totalMs);
+      const wallTime = state.startedAt
+        ? fmtDuration(Date.now() - state.startedAt)
+        : fmtDuration(totalMs);
 
       if (options.expanded) {
         const mdTheme = getMarkdownTheme();
         const container = new Container();
 
-        container.addChild(new Text(
-          theme.fg("muted", `${transcript.length}/${details.rounds * details.participantCount} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`),
-          0, 0,
-        ));
+        container.addChild(
+          new Text(
+            theme.fg(
+              "muted",
+              `${transcript.length}/${details.rounds * details.participantCount} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`,
+            ),
+            0,
+            0,
+          ),
+        );
         container.addChild(new Spacer(1));
 
         for (const entry of transcript) {
-          const icon = entry.error ? theme.fg("error", "✗") : theme.fg("success", "✓");
-          container.addChild(new Text(
-            `${icon} ${theme.bold(entry.speaker)} ${theme.fg("muted", `(R${entry.round} · ${entry.model})`)}${theme.fg("muted", ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`)}`,
-            0, 0,
-          ));
+          const icon = entry.error
+            ? theme.fg("error", "✗")
+            : theme.fg("success", "✓");
+          container.addChild(
+            new Text(
+              `${icon} ${theme.bold(entry.speaker)} ${theme.fg("muted", `(R${entry.round} · ${entry.model})`)}${theme.fg("muted", ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`)}`,
+              0,
+              0,
+            ),
+          );
           container.addChild(new Markdown(entry.output, 1, 0, mdTheme));
           container.addChild(new Spacer(1));
         }
 
         if (details.moderatorSummary) {
-          container.addChild(new Text(theme.bold("Moderator Synthesis:"), 0, 0));
-          container.addChild(new Markdown(details.moderatorSummary, 1, 0, mdTheme));
+          container.addChild(
+            new Text(theme.bold("Moderator Synthesis:"), 0, 0),
+          );
+          container.addChild(
+            new Markdown(details.moderatorSummary, 1, 0, mdTheme),
+          );
         }
 
         return container;
@@ -774,18 +980,28 @@ export default function roundtableExtension(pi: ExtensionAPI): void {
 
       // ── Complete — collapsed (default) ────────────────────────
       const last = ctx.lastComponent as Record<string, unknown> | undefined;
-      const text = (last && "setText" in last ? ctx.lastComponent as Text : undefined) ?? new Text("", 0, 0);
+      const text =
+        (last && "setText" in last ? (ctx.lastComponent as Text) : undefined) ??
+        new Text("", 0, 0);
       const lines: string[] = [
         "",
-        theme.fg("muted", `${transcript.length}/${details.rounds * details.participantCount} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`),
+        theme.fg(
+          "muted",
+          `${transcript.length}/${details.rounds * details.participantCount} turns · ${wallTime} wall · ${fmtTokens(totalTokens)} tokens`,
+        ),
         "",
       ];
 
       for (const entry of transcript) {
-        const icon = entry.error ? theme.fg("error", "✗") : theme.fg("success", "✓");
+        const icon = entry.error
+          ? theme.fg("error", "✗")
+          : theme.fg("success", "✓");
         lines.push(
           `${icon} ${theme.bold(entry.speaker)} ${theme.fg("muted", `(R${entry.round})`)}` +
-          theme.fg("muted", ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`),
+            theme.fg(
+              "muted",
+              ` · ${fmtDuration(entry.durationMs)} · ${fmtTokens(entry.tokens)} tokens`,
+            ),
         );
       }
 
@@ -798,12 +1014,17 @@ export default function roundtableExtension(pi: ExtensionAPI): void {
           lines.push(`  ${theme.fg("toolOutput", line)}`);
         }
         if (summaryLines.length > maxLines) {
-          lines.push(`  ${theme.fg("muted", `… ${summaryLines.length - maxLines} more lines`)}`);
+          lines.push(
+            `  ${theme.fg("muted", `… ${summaryLines.length - maxLines} more lines`)}`,
+          );
         }
       }
 
       try {
-        lines.push("", theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`));
+        lines.push(
+          "",
+          theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`),
+        );
       } catch {
         lines.push("", theme.fg("muted", "(Ctrl+O to expand)"));
       }

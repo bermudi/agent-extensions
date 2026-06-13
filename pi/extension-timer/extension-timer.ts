@@ -22,7 +22,7 @@ const TIMER_KEY = "__pi_ext_timer_v3" as const;
 function extractExtName(filename: string): string | null {
   const normalized = filename.replace(/\\/g, "/");
   const match = normalized.match(
-    /(?:^|\/)(\.pi(?:\/agent)?\/extensions)\/(.+)$/
+    /(?:^|\/)(\.pi(?:\/agent)?\/extensions)\/(.+)$/,
   );
   if (!match) return null;
 
@@ -52,7 +52,7 @@ if (!(globalThis as any)[TIMER_KEY]) {
   const originalReadFileSync = fs.readFileSync;
   fs.readFileSync = function (
     filepath: fs.PathOrFileDescriptor,
-    options?: any
+    options?: any,
   ): any {
     const filename = String(filepath);
     if (isExtensionFile(filename) && !loadStarts.has(filename)) {
@@ -68,7 +68,11 @@ if (!(globalThis as any)[TIMER_KEY]) {
   const originalRunInThisContext = vm.runInThisContext;
   vm.runInThisContext = function (
     code: string,
-    options?: { filename?: string; lineOffset?: number; displayErrors?: boolean }
+    options?: {
+      filename?: string;
+      lineOffset?: number;
+      displayErrors?: boolean;
+    },
   ) {
     const result = originalRunInThisContext.call(vm, code, options);
     const filename = options?.filename || "";
@@ -134,8 +138,13 @@ export default function (pi: ExtensionAPI) {
       timings.set(extName, { ...current, totalMs });
     }
 
-    process.stderr.write(`[extension-timer] ${timings.size} entries, fileOrder=${fileOrder.length}, totalStartup=${totalStartup.toFixed(0)}ms\n`);
-    for (const [n, v] of timings) process.stderr.write(`  ${n}: eval=${v.evalMs.toFixed(1)}ms, total=${v.totalMs.toFixed(1)}ms\n`);
+    process.stderr.write(
+      `[extension-timer] ${timings.size} entries, fileOrder=${fileOrder.length}, totalStartup=${totalStartup.toFixed(0)}ms\n`,
+    );
+    for (const [n, v] of timings)
+      process.stderr.write(
+        `  ${n}: eval=${v.evalMs.toFixed(1)}ms, total=${v.totalMs.toFixed(1)}ms\n`,
+      );
 
     const entries = [...timings.entries()]
       .filter(([, v]) => v.totalMs > 0)
@@ -158,7 +167,7 @@ export default function (pi: ExtensionAPI) {
       `  ${"─".repeat(maxNameLen)}  ${"─".repeat(5)}  ${"─".repeat(6)}`,
       `  ${"compile".padEnd(maxNameLen)}  ${measuredEval.toFixed(0).padStart(3)}ms`,
       `  ${"measured".padEnd(maxNameLen)}  ${"".padStart(3)}  ${measuredTotal.toFixed(0).padStart(4)}ms`,
-      `  ${"startup".padEnd(maxNameLen)}  ${"".padStart(3)}  ${totalStartup.toFixed(0).padStart(4)}ms`
+      `  ${"startup".padEnd(maxNameLen)}  ${"".padStart(3)}  ${totalStartup.toFixed(0).padStart(4)}ms`,
     );
 
     ctx.ui.notify(`⏱  Extension load times\n${lines.join("\n")}`, "info");

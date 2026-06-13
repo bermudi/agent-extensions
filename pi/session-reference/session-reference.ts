@@ -120,7 +120,11 @@ async function loadSession(filePath: string): Promise<CachedSession | null> {
   if (!fileStat.isFile()) return null;
 
   const cached = sessionCache.get(filePath);
-  if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
+  if (
+    cached &&
+    cached.mtimeMs === fileStat.mtimeMs &&
+    cached.size === fileStat.size
+  ) {
     return cached;
   }
 
@@ -162,7 +166,9 @@ async function resolveSessionFilePath(requestedFile: string): Promise<string> {
     throw new Error("Session files must end in .jsonl");
   }
 
-  const resolvedSessionsDir = await realpath(SESSIONS_DIR).catch(() => SESSIONS_DIR);
+  const resolvedSessionsDir = await realpath(SESSIONS_DIR).catch(
+    () => SESSIONS_DIR,
+  );
   const resolvedCandidate = resolve(requestedFile);
   if (!isPathWithinDir(resolvedSessionsDir, resolvedCandidate)) {
     throw new Error("Session file must live under ~/.pi/agent/sessions");
@@ -172,17 +178,25 @@ async function resolveSessionFilePath(requestedFile: string): Promise<string> {
     throw new Error("Session file not found");
   });
 
-  if (!realCandidate.endsWith(".jsonl") || !isPathWithinDir(resolvedSessionsDir, realCandidate)) {
+  if (
+    !realCandidate.endsWith(".jsonl") ||
+    !isPathWithinDir(resolvedSessionsDir, realCandidate)
+  ) {
     throw new Error("Refusing to read files outside ~/.pi/agent/sessions");
   }
 
   return realCandidate;
 }
 
-function filterByCwd(summaries: readonly SessionSummary[], cwdFilter?: string): SessionSummary[] {
+function filterByCwd(
+  summaries: readonly SessionSummary[],
+  cwdFilter?: string,
+): SessionSummary[] {
   const normalizedFilter = cwdFilter?.trim().toLowerCase();
   if (!normalizedFilter) return [...summaries];
-  return summaries.filter((summary) => summary.cwd.toLowerCase().includes(normalizedFilter));
+  return summaries.filter((summary) =>
+    summary.cwd.toLowerCase().includes(normalizedFilter),
+  );
 }
 
 function searchSessions(
@@ -194,13 +208,16 @@ function searchSessions(
   const hits: SearchHit[] = [];
 
   for (const summary of candidates) {
-    const match = findSessionMatch(summary, query, { searchTools: options.searchTools });
+    const match = findSessionMatch(summary, query, {
+      searchTools: options.searchTools,
+    });
     if (!match) continue;
     hits.push({ summary, match });
   }
 
   hits.sort((left, right) => {
-    if (right.match.score !== left.match.score) return right.match.score - left.match.score;
+    if (right.match.score !== left.match.score)
+      return right.match.score - left.match.score;
     return compareTimestampDesc(left.summary, right.summary);
   });
 
@@ -217,9 +234,18 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const limit = clampPositiveInteger(args ? Number.parseInt(args, 10) : undefined, 20, MAX_LIST_RESULTS);
-      const sameProject = summaries.filter((summary) => isSameProjectPath(summary.cwd, ctx.cwd));
-      const hits = (sameProject.length > 0 ? sameProject : summaries).slice(0, limit);
+      const limit = clampPositiveInteger(
+        args ? Number.parseInt(args, 10) : undefined,
+        20,
+        MAX_LIST_RESULTS,
+      );
+      const sameProject = summaries.filter((summary) =>
+        isSameProjectPath(summary.cwd, ctx.cwd),
+      );
+      const hits = (sameProject.length > 0 ? sameProject : summaries).slice(
+        0,
+        limit,
+      );
 
       if (hits.length === 0) {
         ctx.ui.notify("No sessions found for this project.", "info");
@@ -246,7 +272,8 @@ export default function (pi: ExtensionAPI) {
     label: "Search Sessions",
     description:
       "Search past Pi sessions by keyword, partial UUID, cwd path, date, or transcript content. Returns ranked matches with snippets and file paths. Use session_read to read a matching session branch.",
-    promptSnippet: "Search past Pi sessions by keyword or UUID with session_search",
+    promptSnippet:
+      "Search past Pi sessions by keyword or UUID with session_search",
     promptGuidelines: [
       "When the user mentions a past session, conversation, or topic they discussed before, use session_search to find it.",
       "Search now includes transcript content, not just the first user message.",
@@ -254,7 +281,8 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       query: Type.String({
-        description: "Search query: keyword, partial UUID, date, cwd path substring, or transcript text.",
+        description:
+          "Search query: keyword, partial UUID, date, cwd path substring, or transcript text.",
       }),
       limit: Type.Optional(
         Type.Number({
@@ -264,12 +292,14 @@ export default function (pi: ExtensionAPI) {
       ),
       cwd_filter: Type.Optional(
         Type.String({
-          description: "Optional cwd path substring filter (e.g. 'agent-extensions' or '/home/daniel/build/zeroclaw').",
+          description:
+            "Optional cwd path substring filter (e.g. 'agent-extensions' or '/home/daniel/build/zeroclaw').",
         }),
       ),
       search_tools: Type.Optional(
         Type.Boolean({
-          description: "Also search tool-result text (default false to avoid noisy path-only matches).",
+          description:
+            "Also search tool-result text (default false to avoid noisy path-only matches).",
           default: false,
         }),
       ),
@@ -293,7 +323,9 @@ export default function (pi: ExtensionAPI) {
       });
 
       if (hits.length === 0) {
-        const scopeText = params.cwd_filter ? ` within cwd matching "${params.cwd_filter}"` : "";
+        const scopeText = params.cwd_filter
+          ? ` within cwd matching "${params.cwd_filter}"`
+          : "";
         return {
           content: [
             {
@@ -351,11 +383,13 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       file: Type.String({
-        description: "Absolute path to the session .jsonl file (from session_search results)",
+        description:
+          "Absolute path to the session .jsonl file (from session_search results)",
       }),
       entry_id: Type.Optional(
         Type.String({
-          description: "Optional entry ID from session_search. Reads the branch anchored at that matching entry.",
+          description:
+            "Optional entry ID from session_search. Reads the branch anchored at that matching entry.",
         }),
       ),
       max_turns: Type.Optional(
@@ -366,7 +400,8 @@ export default function (pi: ExtensionAPI) {
       ),
       include_tools: Type.Optional(
         Type.Boolean({
-          description: "Include tool calls and results in the output (default false for cleaner reading)",
+          description:
+            "Include tool calls and results in the output (default false for cleaner reading)",
           default: false,
         }),
       ),
@@ -376,9 +411,15 @@ export default function (pi: ExtensionAPI) {
       try {
         filePath = await resolveSessionFilePath(params.file);
       } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : "Unknown error";
+        const message =
+          error instanceof Error ? error.message : "Unknown error";
         return {
-          content: [{ type: "text", text: `Failed to resolve session file: ${message}` }],
+          content: [
+            {
+              type: "text",
+              text: `Failed to resolve session file: ${message}`,
+            },
+          ],
           details: undefined,
           isError: true,
         };
@@ -395,13 +436,22 @@ export default function (pi: ExtensionAPI) {
 
       if (params.entry_id && !hasEntryId(loaded.parsed, params.entry_id)) {
         return {
-          content: [{ type: "text", text: `Entry ID ${params.entry_id} was not found in that session.` }],
+          content: [
+            {
+              type: "text",
+              text: `Entry ID ${params.entry_id} was not found in that session.`,
+            },
+          ],
           details: undefined,
           isError: true,
         };
       }
 
-      const maxTurns = clampPositiveInteger(params.max_turns, 50, MAX_READ_TURNS);
+      const maxTurns = clampPositiveInteger(
+        params.max_turns,
+        50,
+        MAX_READ_TURNS,
+      );
       const conversation = formatConversation(loaded.parsed, {
         includeTools: params.include_tools ?? false,
         maxTurns,
@@ -412,20 +462,31 @@ export default function (pi: ExtensionAPI) {
         `Session ${loaded.summary.id}`,
         `CWD: ${loaded.summary.cwd}`,
         `Created: ${formatSessionDate(loaded.summary.timestamp)}`,
-        conversation.leafEntryId ? `Branch leaf: ${conversation.leafEntryId}` : undefined,
+        conversation.leafEntryId
+          ? `Branch leaf: ${conversation.leafEntryId}`
+          : undefined,
       ]
-        .filter((part): part is string => typeof part === "string" && part.length > 0)
+        .filter(
+          (part): part is string => typeof part === "string" && part.length > 0,
+        )
         .join(" | ");
 
       if (!conversation.text.trim()) {
         return {
-          content: [{ type: "text", text: `${headerInfo}\n\n(No conversation messages found on that branch.)` }],
+          content: [
+            {
+              type: "text",
+              text: `${headerInfo}\n\n(No conversation messages found on that branch.)`,
+            },
+          ],
           details: undefined,
         };
       }
 
       return {
-        content: [{ type: "text", text: `${headerInfo}\n\n---\n${conversation.text}` }],
+        content: [
+          { type: "text", text: `${headerInfo}\n\n---\n${conversation.text}` },
+        ],
         details: undefined,
       };
     },
@@ -444,7 +505,8 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       cwd_filter: Type.Optional(
         Type.String({
-          description: "Filter by project path substring (e.g. 'agent-extensions' or '/home/daniel/build/zeroclaw')",
+          description:
+            "Filter by project path substring (e.g. 'agent-extensions' or '/home/daniel/build/zeroclaw')",
         }),
       ),
       limit: Type.Optional(
@@ -456,7 +518,10 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const limit = clampPositiveInteger(params.limit, 20, MAX_LIST_RESULTS);
-      const summaries = filterByCwd(await loadSessionSummaries(), params.cwd_filter).slice(0, limit);
+      const summaries = filterByCwd(
+        await loadSessionSummaries(),
+        params.cwd_filter,
+      ).slice(0, limit);
 
       if (summaries.length === 0) {
         return {
@@ -474,7 +539,8 @@ export default function (pi: ExtensionAPI) {
 
       const text = summaries
         .map((summary, index) => {
-          const label = summary.name || summary.firstUserMessage.slice(0, 80) || "(empty)";
+          const label =
+            summary.name || summary.firstUserMessage.slice(0, 80) || "(empty)";
           return [
             `${index + 1}. **${label}** — ${formatSessionDate(summary.timestamp)}`,
             `   CWD: ${summary.cwd}`,

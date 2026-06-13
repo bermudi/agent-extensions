@@ -47,7 +47,8 @@ export function groupIntoTurns(messages: AnyMessage[]): Turn[] {
     }
 
     if (role === "branchSummary" || role === "compactionSummary") {
-      const summary = typeof message.summary === "string" ? message.summary : "";
+      const summary =
+        typeof message.summary === "string" ? message.summary : "";
       if (summary) current.responses.push(summary);
       continue;
     }
@@ -76,7 +77,12 @@ export function finalizeTurn(turn: Turn, index: number): Turn {
 }
 
 export function hasUsefulTurnContent(turn: Turn) {
-  return Boolean(turn.request || turn.reasoning.length || turn.responses.length || turn.evidence.length);
+  return Boolean(
+    turn.request ||
+    turn.reasoning.length ||
+    turn.responses.length ||
+    turn.evidence.length,
+  );
 }
 
 export function isTurnStartRole(role: string) {
@@ -107,7 +113,10 @@ export function describeTurnRequest(message: AnyMessage) {
   }
 
   if (message.role === "custom") {
-    return extractText(message.content) || `Custom input: ${message.customType || "unknown"}`;
+    return (
+      extractText(message.content) ||
+      `Custom input: ${message.customType || "unknown"}`
+    );
   }
 
   return "(implicit continuation)";
@@ -119,7 +128,10 @@ export function ingestAssistantMessage(turn: Turn, message: AnyMessage) {
   const blocks = Array.isArray(message?.content) ? message.content : [];
 
   const thinking = blocks
-    .filter((block: AnyRecord) => block?.type === "thinking" && typeof block.thinking === "string")
+    .filter(
+      (block: AnyRecord) =>
+        block?.type === "thinking" && typeof block.thinking === "string",
+    )
     .map((block: AnyRecord) => block.thinking)
     .join("\n\n")
     .trim();
@@ -129,7 +141,10 @@ export function ingestAssistantMessage(turn: Turn, message: AnyMessage) {
   }
 
   const text = blocks
-    .filter((block: AnyRecord) => block?.type === "text" && typeof block.text === "string")
+    .filter(
+      (block: AnyRecord) =>
+        block?.type === "text" && typeof block.text === "string",
+    )
     .map((block: AnyRecord) => block.text)
     .join("\n\n")
     .trim();
@@ -149,7 +164,8 @@ export function ingestAssistantMessage(turn: Turn, message: AnyMessage) {
 }
 
 export function ingestToolResult(turn: Turn, message: AnyMessage) {
-  const toolName = typeof message?.toolName === "string" ? message.toolName : "unknown";
+  const toolName =
+    typeof message?.toolName === "string" ? message.toolName : "unknown";
   const text = extractText(message?.content).trim();
   const toolCall = turn.toolCalls.get(message?.toolCallId);
 
@@ -158,7 +174,11 @@ export function ingestToolResult(turn: Turn, message: AnyMessage) {
   }
 
   if (toolName === "bash") {
-    const evidence = summarizeBashEvidence(toolCall?.args?.command, text, Boolean(message?.isError));
+    const evidence = summarizeBashEvidence(
+      toolCall?.args?.command,
+      text,
+      Boolean(message?.isError),
+    );
     if (evidence) turn.evidence.push(evidence);
     return;
   }
@@ -170,7 +190,8 @@ export function ingestToolResult(turn: Turn, message: AnyMessage) {
   }
 
   if (toolName === "edit" || toolName === "write") {
-    const path = typeof toolCall?.args?.path === "string" ? toolCall.args.path : undefined;
+    const path =
+      typeof toolCall?.args?.path === "string" ? toolCall.args.path : undefined;
     if (path) {
       turn.evidence.push(`${toolName} succeeded on ${path}`);
     }
@@ -186,27 +207,56 @@ export function ingestToolResult(turn: Turn, message: AnyMessage) {
 
 // ── Bash evidence summarization ───────────────────────────────────────
 
-export function summarizeBashEvidence(command: string | undefined, output: string, isError: boolean) {
+export function summarizeBashEvidence(
+  command: string | undefined,
+  output: string,
+  isError: boolean,
+) {
   const cmd = oneLine(command || "bash");
   const cleaned = output.trim();
   const lowerCommand = cmd.toLowerCase();
-  const commandLooksImportant = /(go test|npm test|pnpm test|yarn test|pytest|cargo test|vitest|jest|go build|tsc\b|eslint|golangci-lint|make test|make lint|git diff|git status|gh\b)/i.test(cmd);
-  const outputLooksImportant = /(\bpass\b|\bfail\b|error|panic:|traceback|exception|undefined|not found|timed out|permission denied|lgtm|rejected|critical|warning)/i.test(cleaned);
+  const commandLooksImportant =
+    /(go test|npm test|pnpm test|yarn test|pytest|cargo test|vitest|jest|go build|tsc\b|eslint|golangci-lint|make test|make lint|git diff|git status|gh\b)/i.test(
+      cmd,
+    );
+  const outputLooksImportant =
+    /(\bpass\b|\bfail\b|error|panic:|traceback|exception|undefined|not found|timed out|permission denied|lgtm|rejected|critical|warning)/i.test(
+      cleaned,
+    );
 
   if (!isError && !commandLooksImportant && !outputLooksImportant) {
     return undefined;
   }
 
   const interestingLines = pickInterestingLines(cleaned, 8);
-  const detail = interestingLines.length > 0 ? interestingLines.join(" | ") : cleaned || "(no output)";
+  const detail =
+    interestingLines.length > 0
+      ? interestingLines.join(" | ")
+      : cleaned || "(no output)";
 
-  if (/go test|npm test|pnpm test|yarn test|pytest|cargo test|vitest|jest/i.test(lowerCommand)) {
-    const status = /(\bFAIL\b|failed|panic:|error)/i.test(cleaned) || isError ? "failed" : /(\bPASS\b|\bok\b|passed)/i.test(cleaned) ? "passed" : "ran";
+  if (
+    /go test|npm test|pnpm test|yarn test|pytest|cargo test|vitest|jest/i.test(
+      lowerCommand,
+    )
+  ) {
+    const status =
+      /(\bFAIL\b|failed|panic:|error)/i.test(cleaned) || isError
+        ? "failed"
+        : /(\bPASS\b|\bok\b|passed)/i.test(cleaned)
+          ? "passed"
+          : "ran";
     return `Test \`${cmd}\` ${status}: ${detail}`;
   }
 
-  if (/go build|tsc\b|eslint|golangci-lint|make test|make lint/i.test(lowerCommand)) {
-    const status = isError || /(error|fail)/i.test(cleaned) ? "reported problems" : "completed";
+  if (
+    /go build|tsc\b|eslint|golangci-lint|make test|make lint/i.test(
+      lowerCommand,
+    )
+  ) {
+    const status =
+      isError || /(error|fail)/i.test(cleaned)
+        ? "reported problems"
+        : "completed";
     return `Check \`${cmd}\` ${status}: ${detail}`;
   }
 
@@ -234,7 +284,10 @@ export function pickInterestingLines(text: string, maxLines: number) {
   }
 
   if (lines.length <= maxLines) return lines;
-  return [...lines.slice(0, Math.ceil(maxLines / 2)), ...lines.slice(-(Math.floor(maxLines / 2)))];
+  return [
+    ...lines.slice(0, Math.ceil(maxLines / 2)),
+    ...lines.slice(-Math.floor(maxLines / 2)),
+  ];
 }
 
 // ── Filler detection ──────────────────────────────────────────────────
@@ -243,7 +296,9 @@ export function looksLikeFiller(text: string) {
   if (text.length > 180) return false;
 
   const firstLine = text.split("\n")[0].trim().toLowerCase();
-  const match = firstLine.match(/^(let me|i'll|i will|first,? let me|now let me|i'm going to|i am going to|i should|i need to)\s+(?:check|look|see|inspect|examine|investigate|review|read|try|find|search|explore|start|begin)\b/i);
+  const match = firstLine.match(
+    /^(let me|i'll|i will|first,? let me|now let me|i'm going to|i am going to|i should|i need to)\s+(?:check|look|see|inspect|examine|investigate|review|read|try|find|search|explore|start|begin)\b/i,
+  );
   return Boolean(match);
 }
 
@@ -254,7 +309,10 @@ function extractText(content: unknown) {
   if (!Array.isArray(content)) return "";
 
   return content
-    .filter((part: AnyRecord) => part?.type === "text" && typeof part.text === "string")
+    .filter(
+      (part: AnyRecord) =>
+        part?.type === "text" && typeof part.text === "string",
+    )
     .map((part: AnyRecord) => part.text)
     .join("\n")
     .trim();

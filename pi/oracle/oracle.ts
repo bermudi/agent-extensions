@@ -38,12 +38,20 @@ function ensureLogDir(): void {
       const fullPath = path.join(LOG_DIR, f);
       try {
         if (fs.statSync(fullPath).mtimeMs < cutoff) fs.unlinkSync(fullPath);
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
-  } catch { /* best effort */ }
+  } catch {
+    /* best effort */
+  }
 }
 
-function log(level: "info" | "warn" | "error", msg: string, data?: Record<string, unknown>): void {
+function log(
+  level: "info" | "warn" | "error",
+  msg: string,
+  data?: Record<string, unknown>,
+): void {
   try {
     ensureLogDir();
     const now = new Date();
@@ -55,7 +63,9 @@ function log(level: "info" | "warn" | "error", msg: string, data?: Record<string
       ...data,
     });
     fs.appendFileSync(path.join(LOG_DIR, `${date}.log`), entry + "\n");
-  } catch { /* never crash on logging */ }
+  } catch {
+    /* never crash on logging */
+  }
 }
 
 function newRequestId(): string {
@@ -75,14 +85,19 @@ async function probeBaseUrl(): Promise<string> {
   }
   // Prefer local proxy if available; fall back to public serverless endpoint.
   try {
-    const resp = await fetch(`${LOCAL_PROXY}/`, { method: "GET", signal: AbortSignal.timeout(1500) });
+    const resp = await fetch(`${LOCAL_PROXY}/`, {
+      method: "GET",
+      signal: AbortSignal.timeout(1500),
+    });
     if (resp.ok) {
       log("info", "base_url", { source: "local_probe", url: LOCAL_PROXY });
       return LOCAL_PROXY;
     }
     log("info", "local_probe_failed", { status: resp.status });
   } catch (err) {
-    log("info", "local_probe_unreachable", { error: err instanceof Error ? err.message : String(err) });
+    log("info", "local_probe_unreachable", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
   log("info", "base_url", { source: "fallback", url: PUBLIC_FALLBACK });
   return PUBLIC_FALLBACK;
@@ -116,14 +131,22 @@ interface StreamDelta {
 
 interface StreamChunk {
   choices?: Array<{ delta?: StreamDelta; finish_reason?: string | null }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
 }
 
 interface OracleDetails {
   model: string;
   reasoningChars: number;
   contentChars: number;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
   attachedFiles: string[];
   wallMs: number;
   truncated: boolean;
@@ -162,12 +185,19 @@ function buildContentParts(
   cwd: string,
   reqId: string,
 ): Array<Record<string, unknown>> {
-  const parts: Array<Record<string, unknown>> = [{ type: "text", text: question }];
+  const parts: Array<Record<string, unknown>> = [
+    { type: "text", text: question },
+  ];
   let totalBytes = 0;
 
   for (const raw of files) {
     const resolved = path.isAbsolute(raw) ? raw : path.resolve(cwd, raw);
-    log("info", "attachment_start", { reqId, raw, resolved, exists: fs.existsSync(resolved) });
+    log("info", "attachment_start", {
+      reqId,
+      raw,
+      resolved,
+      exists: fs.existsSync(resolved),
+    });
 
     if (!fs.existsSync(resolved)) {
       log("warn", "attachment_not_found", { reqId, raw, resolved });
@@ -179,20 +209,39 @@ function buildContentParts(
     try {
       stat = fs.statSync(resolved);
     } catch (err) {
-      log("error", "attachment_stat_failed", { reqId, resolved, error: err instanceof Error ? err.message : String(err) });
+      log("error", "attachment_stat_failed", {
+        reqId,
+        resolved,
+        error: err instanceof Error ? err.message : String(err),
+      });
       parts.push({ type: "text", text: `[File stat failed: ${raw}]` });
       continue;
     }
 
     if (stat.size > MAX_ATTACHMENT_BYTES) {
-      log("warn", "attachment_too_large", { reqId, raw, sizeBytes: stat.size, maxSize: MAX_ATTACHMENT_BYTES });
-      parts.push({ type: "text", text: `[File too large: ${raw} (${(stat.size / 1024 / 1024).toFixed(1)} MB)]` });
+      log("warn", "attachment_too_large", {
+        reqId,
+        raw,
+        sizeBytes: stat.size,
+        maxSize: MAX_ATTACHMENT_BYTES,
+      });
+      parts.push({
+        type: "text",
+        text: `[File too large: ${raw} (${(stat.size / 1024 / 1024).toFixed(1)} MB)]`,
+      });
       continue;
     }
     totalBytes += stat.size;
     if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-      log("warn", "attachment_total_limit", { reqId, totalBytes, limit: MAX_TOTAL_ATTACHMENT_BYTES });
-      parts.push({ type: "text", text: `[Remaining attachments skipped: total size limit exceeded]` });
+      log("warn", "attachment_total_limit", {
+        reqId,
+        totalBytes,
+        limit: MAX_TOTAL_ATTACHMENT_BYTES,
+      });
+      parts.push({
+        type: "text",
+        text: `[Remaining attachments skipped: total size limit exceeded]`,
+      });
       break;
     }
 
@@ -201,29 +250,94 @@ function buildContentParts(
     let readStart = Date.now();
     try {
       // Text-ish files → inline as text. Binary → file attachment.
-      const textExts = new Set([".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".md", ".txt", ".py", ".rs", ".go", ".zig", ".toml", ".css", ".html", ".sh", ".bash", ".zsh", ".env", ".ini", ".cfg", ".conf", ".sql", ".graphql", ".proto", ".tf", ".dockerfile"]);
+      const textExts = new Set([
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".md",
+        ".txt",
+        ".py",
+        ".rs",
+        ".go",
+        ".zig",
+        ".toml",
+        ".css",
+        ".html",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".env",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".sql",
+        ".graphql",
+        ".proto",
+        ".tf",
+        ".dockerfile",
+      ]);
       if (textExts.has(ext) || ext === "") {
         const content = fs.readFileSync(resolved, "utf-8");
-        log("info", "attachment_read", { reqId, resolved, type: "text", bytes: Buffer.byteLength(content, "utf-8"), ms: Date.now() - readStart });
-        parts.push({ type: "text", text: `--- ${shortenPath(resolved)} ---\n${content}\n--- end ${shortenPath(resolved)} ---` });
+        log("info", "attachment_read", {
+          reqId,
+          resolved,
+          type: "text",
+          bytes: Buffer.byteLength(content, "utf-8"),
+          ms: Date.now() - readStart,
+        });
+        parts.push({
+          type: "text",
+          text: `--- ${shortenPath(resolved)} ---\n${content}\n--- end ${shortenPath(resolved)} ---`,
+        });
       } else {
         const b64 = fs.readFileSync(resolved).toString("base64");
-        const mime = ext === ".pdf" ? "application/pdf"
-          : ext === ".png" ? "image/png"
-          : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg"
-          : ext === ".gif" ? "image/gif"
-          : ext === ".webp" ? "image/webp"
-          : "application/octet-stream";
-        log("info", "attachment_read", { reqId, resolved, type: "binary", mime, bytes: stat.size, ms: Date.now() - readStart });
-        parts.push({ type: "file", file_data: `data:${mime};base64,${b64}`, filename: path.basename(resolved) });
+        const mime =
+          ext === ".pdf"
+            ? "application/pdf"
+            : ext === ".png"
+              ? "image/png"
+              : ext === ".jpg" || ext === ".jpeg"
+                ? "image/jpeg"
+                : ext === ".gif"
+                  ? "image/gif"
+                  : ext === ".webp"
+                    ? "image/webp"
+                    : "application/octet-stream";
+        log("info", "attachment_read", {
+          reqId,
+          resolved,
+          type: "binary",
+          mime,
+          bytes: stat.size,
+          ms: Date.now() - readStart,
+        });
+        parts.push({
+          type: "file",
+          file_data: `data:${mime};base64,${b64}`,
+          filename: path.basename(resolved),
+        });
       }
     } catch (err) {
-      log("error", "attachment_read_failed", { reqId, resolved, ms: Date.now() - readStart, error: err instanceof Error ? err.message : String(err) });
+      log("error", "attachment_read_failed", {
+        reqId,
+        resolved,
+        ms: Date.now() - readStart,
+        error: err instanceof Error ? err.message : String(err),
+      });
       parts.push({ type: "text", text: `[File read error: ${raw}]` });
     }
   }
 
-  log("info", "attachments_done", { reqId, fileCount: files.length, partCount: parts.length, totalBytes });
+  log("info", "attachments_done", {
+    reqId,
+    fileCount: files.length,
+    partCount: parts.length,
+    totalBytes,
+  });
   return parts;
 }
 
@@ -244,7 +358,9 @@ async function streamOracle(
   onChunk: (reasoning: string, content: string) => void,
   reqId: string,
 ): Promise<StreamResult> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
   if (API_TOKEN) headers["Authorization"] = `Bearer ${API_TOKEN}`;
 
   const url = `${BASE_URL}/v1/chat/completions`;
@@ -299,8 +415,14 @@ async function streamOracle(
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      log("error", "stream_api_error", { reqId, status: response.status, body: text.slice(0, 500) });
-      throw new Error(`Oracle API error ${response.status}: ${text.slice(0, 500)}`);
+      log("error", "stream_api_error", {
+        reqId,
+        status: response.status,
+        body: text.slice(0, 500),
+      });
+      throw new Error(
+        `Oracle API error ${response.status}: ${text.slice(0, 500)}`,
+      );
     }
 
     const reader = response.body?.getReader();
@@ -317,7 +439,11 @@ async function streamOracle(
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          log("info", "stream_done", { reqId, chunkCount, totalMs: Date.now() - streamStart });
+          log("info", "stream_done", {
+            reqId,
+            chunkCount,
+            totalMs: Date.now() - streamStart,
+          });
           break;
         }
 
@@ -332,8 +458,14 @@ async function streamOracle(
           if (payload === "[DONE]") continue;
 
           let chunk: StreamChunk;
-          try { chunk = JSON.parse(payload); } catch (parseErr) {
-            log("warn", "stream_parse_error", { reqId, payload: payload.slice(0, 200), error: String(parseErr) });
+          try {
+            chunk = JSON.parse(payload);
+          } catch (parseErr) {
+            log("warn", "stream_parse_error", {
+              reqId,
+              payload: payload.slice(0, 200),
+              error: String(parseErr),
+            });
             continue;
           }
 
@@ -352,7 +484,8 @@ async function streamOracle(
           if (delta.reasoning_content) reasoning += delta.reasoning_content;
           if (delta.content) content += delta.content;
 
-          if (delta.reasoning_content || delta.content) onChunk(reasoning, content);
+          if (delta.reasoning_content || delta.content)
+            onChunk(reasoning, content);
 
           // Log progress every 5s
           if (Date.now() - lastChunkLog > 5000) {
@@ -368,7 +501,8 @@ async function streamOracle(
         }
       }
     } catch (readErr) {
-      const errMsg = readErr instanceof Error ? readErr.message : String(readErr);
+      const errMsg =
+        readErr instanceof Error ? readErr.message : String(readErr);
       log("error", "stream_read_error", {
         reqId,
         chunkCount,
@@ -425,16 +559,21 @@ export default function oracleExtension(pi: ExtensionAPI): void {
       "The oracle has no tools and cannot execute code — it only reasons about what you give it.",
     ],
     parameters: Type.Object({
-      question: Type.String({ description: "The question or problem to analyze" }),
+      question: Type.String({
+        description: "The question or problem to analyze",
+      }),
       files: Type.Optional(
         Type.Array(Type.String(), {
-          description: "File paths to attach for the oracle to reason over (relative to cwd or absolute). Text files are inlined, binary files sent as base64.",
+          description:
+            "File paths to attach for the oracle to reason over (relative to cwd or absolute). Text files are inlined, binary files sent as base64.",
         }),
       ),
-      model: Type.Optional(Type.String({
-        description: `Qwen model id. Default: ${DEFAULT_MODEL}. Options: qwen3.7-max, qwen3.6-plus, qwen3.6-max-preview, qwen3.5-turbo.`,
-        default: DEFAULT_MODEL,
-      })),
+      model: Type.Optional(
+        Type.String({
+          description: `Qwen model id. Default: ${DEFAULT_MODEL}. Options: qwen3.7-max, qwen3.6-plus, qwen3.6-max-preview, qwen3.5-turbo.`,
+          default: DEFAULT_MODEL,
+        }),
+      ),
     }),
 
     async execute(_id, params, signal, onUpdate, ctx) {
@@ -448,7 +587,9 @@ export default function oracleExtension(pi: ExtensionAPI): void {
         model,
         questionLen: params.question?.length ?? 0,
         fileCount: files.length,
-        files: files.map(f => shortenPath(path.isAbsolute(f) ? f : path.resolve(ctx.cwd, f))),
+        files: files.map((f) =>
+          shortenPath(path.isAbsolute(f) ? f : path.resolve(ctx.cwd, f)),
+        ),
         cwd: ctx.cwd,
         signalAborted: signal?.aborted ?? false,
       });
@@ -456,9 +597,18 @@ export default function oracleExtension(pi: ExtensionAPI): void {
       // Build messages with file attachments
       let contentParts: Array<Record<string, unknown>>;
       try {
-        contentParts = buildContentParts(params.question, files, ctx.cwd, reqId);
+        contentParts = buildContentParts(
+          params.question,
+          files,
+          ctx.cwd,
+          reqId,
+        );
       } catch (err) {
-        log("error", "execute_build_parts_failed", { reqId, error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
+        log("error", "execute_build_parts_failed", {
+          reqId,
+          error: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+        });
         throw err;
       }
 
@@ -474,33 +624,49 @@ export default function oracleExtension(pi: ExtensionAPI): void {
         { role: "user", content: contentParts },
       ];
 
-      const attachedNames = files.map((f) => shortenPath(path.isAbsolute(f) ? f : path.resolve(ctx.cwd, f)));
+      const attachedNames = files.map((f) =>
+        shortenPath(path.isAbsolute(f) ? f : path.resolve(ctx.cwd, f)),
+      );
 
       // Track streaming state for progress updates
       let lastReasoningLen = 0;
       let lastContentLen = 0;
 
       try {
-        const result = await streamOracle(messages, model, signal, (reasoning, content) => {
-          const newReasoning = reasoning.length - lastReasoningLen;
-          const newContent = content.length - lastContentLen;
-          if (newReasoning > 200 || newContent > 200) {
-            lastReasoningLen = reasoning.length;
-            lastContentLen = content.length;
-            const phase = reasoning.length > 0 && content.length === 0 ? "thinking" : "responding";
-            onUpdate?.({
-              content: [{ type: "text", text: `Oracle is ${phase}… (${fmtMs(Date.now() - start)} elapsed)` }],
-              details: {
-                model,
-                reasoningChars: reasoning.length,
-                contentChars: content.length,
-                attachedFiles: attachedNames,
-                wallMs: Date.now() - start,
-                truncated: false,
-              } satisfies OracleDetails,
-            });
-          }
-        }, reqId);
+        const result = await streamOracle(
+          messages,
+          model,
+          signal,
+          (reasoning, content) => {
+            const newReasoning = reasoning.length - lastReasoningLen;
+            const newContent = content.length - lastContentLen;
+            if (newReasoning > 200 || newContent > 200) {
+              lastReasoningLen = reasoning.length;
+              lastContentLen = content.length;
+              const phase =
+                reasoning.length > 0 && content.length === 0
+                  ? "thinking"
+                  : "responding";
+              onUpdate?.({
+                content: [
+                  {
+                    type: "text",
+                    text: `Oracle is ${phase}… (${fmtMs(Date.now() - start)} elapsed)`,
+                  },
+                ],
+                details: {
+                  model,
+                  reasoningChars: reasoning.length,
+                  contentChars: content.length,
+                  attachedFiles: attachedNames,
+                  wallMs: Date.now() - start,
+                  truncated: false,
+                } satisfies OracleDetails,
+              });
+            }
+          },
+          reqId,
+        );
 
         const wallMs = Date.now() - start;
         const details: OracleDetails = {
@@ -517,19 +683,25 @@ export default function oracleExtension(pi: ExtensionAPI): void {
         const parts: string[] = [];
 
         if (result.reasoning.trim()) {
-          parts.push(`<oracle-reasoning>\n${truncate(result.reasoning.trim(), 30 * 1024)}\n</oracle-reasoning>`);
+          parts.push(
+            `<oracle-reasoning>\n${truncate(result.reasoning.trim(), 30 * 1024)}\n</oracle-reasoning>`,
+          );
         }
         if (result.content.trim()) {
           parts.push(truncate(result.content.trim(), MAX_RESPONSE_BYTES));
         }
 
         if (parts.length === 0) {
-          parts.push("(Oracle returned no output — the endpoint may have timed out before generating a response. Try a shorter question or a different model.)");
+          parts.push(
+            "(Oracle returned no output — the endpoint may have timed out before generating a response. Try a shorter question or a different model.)",
+          );
         }
 
         // Truncation notice goes AFTER content so the LLM can parse reasoning/answer cleanly.
         if (result.truncated) {
-          parts.push(`[Note: Oracle response was cut short after ${fmtMs(wallMs)} due to endpoint timeout. The reasoning above is partial.]`);
+          parts.push(
+            `[Note: Oracle response was cut short after ${fmtMs(wallMs)} due to endpoint timeout. The reasoning above is partial.]`,
+          );
         }
 
         log("info", "execute_success", {
@@ -559,33 +731,59 @@ export default function oracleExtension(pi: ExtensionAPI): void {
         if (msg.includes("aborted") || signal?.aborted) {
           return {
             content: [{ type: "text" as const, text: "Oracle query aborted." }],
-            details: { model, reasoningChars: 0, contentChars: 0, attachedFiles: attachedNames, wallMs: Date.now() - start, truncated: false },
+            details: {
+              model,
+              reasoningChars: 0,
+              contentChars: 0,
+              attachedFiles: attachedNames,
+              wallMs: Date.now() - start,
+              truncated: false,
+            },
           };
         }
         return {
           content: [{ type: "text" as const, text: `Oracle error: ${msg}` }],
-          details: { model, reasoningChars: 0, contentChars: 0, attachedFiles: attachedNames, wallMs: Date.now() - start, truncated: false },
+          details: {
+            model,
+            reasoningChars: 0,
+            contentChars: 0,
+            attachedFiles: attachedNames,
+            wallMs: Date.now() - start,
+            truncated: false,
+          },
           isError: true,
         };
       }
     },
 
     renderCall(args, theme, ctx) {
-      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const model = (args as { model?: string }).model || DEFAULT_MODEL;
       const files = (args as { files?: string[] }).files ?? [];
       const question = (args as { question?: string }).question || "";
-      const preview = question.length > 60 ? `${question.slice(0, 60)}…` : question;
+      const preview =
+        question.length > 60 ? `${question.slice(0, 60)}…` : question;
 
-      let label = theme.fg("toolTitle", theme.bold("oracle ")) + theme.fg("accent", model);
-      if (files.length > 0) label += theme.fg("muted", ` +${files.length} file${files.length > 1 ? "s" : ""}`);
+      let label =
+        theme.fg("toolTitle", theme.bold("oracle ")) +
+        theme.fg("accent", model);
+      if (files.length > 0)
+        label += theme.fg(
+          "muted",
+          ` +${files.length} file${files.length > 1 ? "s" : ""}`,
+        );
       label += `\n  ${theme.fg("dim", preview)}`;
       text.setText(label);
       return text;
     },
 
     renderResult(result, options, theme, ctx) {
-      const state = ctx.state as { startedAt?: number; interval?: ReturnType<typeof setInterval>; spinnerIdx?: number };
+      const state = ctx.state as {
+        startedAt?: number;
+        interval?: ReturnType<typeof setInterval>;
+        spinnerIdx?: number;
+      };
       const tickMs = 120;
       if (options.isPartial && !state.interval) {
         state.startedAt = state.startedAt ?? Date.now();
@@ -597,22 +795,33 @@ export default function oracleExtension(pi: ExtensionAPI): void {
         state.interval = undefined;
       }
 
-      const text = (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const details = result.details as OracleDetails | undefined;
 
       if (options.isPartial && details) {
         state.spinnerIdx = (state.spinnerIdx ?? 0) + 1;
         const elapsed = fmtMs(Date.now() - (state.startedAt ?? Date.now()));
-        const phase = details.contentChars === 0 && details.reasoningChars > 0
-          ? theme.fg("warning", "thinking")
-          : theme.fg("success", "responding");
-        const glyph = theme.fg("warning", SPINNER_FRAMES[state.spinnerIdx % SPINNER_FRAMES.length]!);
+        const phase =
+          details.contentChars === 0 && details.reasoningChars > 0
+            ? theme.fg("warning", "thinking")
+            : theme.fg("success", "responding");
+        const glyph = theme.fg(
+          "warning",
+          SPINNER_FRAMES[state.spinnerIdx % SPINNER_FRAMES.length]!,
+        );
         let label = `${glyph} ${theme.fg("toolTitle", theme.bold("oracle "))}${theme.fg("accent", details.model)} · ${phase}${theme.fg("muted", ` · ${elapsed}`)}`;
         if (details.attachedFiles.length) {
-          label += theme.fg("muted", ` · ${details.attachedFiles.length} file${details.attachedFiles.length > 1 ? "s" : ""}`);
+          label += theme.fg(
+            "muted",
+            ` · ${details.attachedFiles.length} file${details.attachedFiles.length > 1 ? "s" : ""}`,
+          );
         }
         if (details.reasoningChars > 0) {
-          label += theme.fg("muted", ` · ${fmtK(details.reasoningChars)} chars reasoning`);
+          label += theme.fg(
+            "muted",
+            ` · ${fmtK(details.reasoningChars)} chars reasoning`,
+          );
         }
         text.setText(label);
         return text;
@@ -621,12 +830,23 @@ export default function oracleExtension(pi: ExtensionAPI): void {
       // Final result
       const lines: string[] = [""];
       if (details) {
-        const isError = result.content?.[0]?.type === "text" && result.content[0].text.startsWith("Oracle error:");
-        const icon = isError ? theme.fg("error", "✗") : details.truncated ? theme.fg("warning", "⚠") : theme.fg("success", "✓");
+        const isError =
+          result.content?.[0]?.type === "text" &&
+          result.content[0].text.startsWith("Oracle error:");
+        const icon = isError
+          ? theme.fg("error", "✗")
+          : details.truncated
+            ? theme.fg("warning", "⚠")
+            : theme.fg("success", "✓");
         const meta: string[] = [fmtMs(details.wallMs)];
-        if (details.usage) meta.push(`${fmtK(details.usage.total_tokens)} tokens`);
-        if (details.reasoningChars > 0) meta.push(`${fmtK(details.reasoningChars)} chars thought`);
-        if (details.attachedFiles.length) meta.push(`${details.attachedFiles.length} file${details.attachedFiles.length > 1 ? "s" : ""}`);
+        if (details.usage)
+          meta.push(`${fmtK(details.usage.total_tokens)} tokens`);
+        if (details.reasoningChars > 0)
+          meta.push(`${fmtK(details.reasoningChars)} chars thought`);
+        if (details.attachedFiles.length)
+          meta.push(
+            `${details.attachedFiles.length} file${details.attachedFiles.length > 1 ? "s" : ""}`,
+          );
         if (details.truncated) meta.push("cut short");
 
         let header = `${icon} ${theme.fg("toolTitle", theme.bold("oracle "))}${theme.fg("accent", details.model)}`;
@@ -634,7 +854,12 @@ export default function oracleExtension(pi: ExtensionAPI): void {
         lines.push(header);
 
         if (details.attachedFiles.length > 0 && options.expanded) {
-          lines.push(theme.fg("muted", `  attached: ${details.attachedFiles.join(", ")}`));
+          lines.push(
+            theme.fg(
+              "muted",
+              `  attached: ${details.attachedFiles.join(", ")}`,
+            ),
+          );
         }
         lines.push("");
       }
@@ -643,33 +868,59 @@ export default function oracleExtension(pi: ExtensionAPI): void {
       const content = result.content?.[0];
       if (content?.type === "text" && content.text) {
         // Split reasoning from answer for nicer rendering
-        const reasoningMatch = content.text.match(/^<oracle-reasoning>\n([\s\S]*?)\n<\/oracle-reasoning>(?:\n\n([\s\S]*))?$/);
+        const reasoningMatch = content.text.match(
+          /^<oracle-reasoning>\n([\s\S]*?)\n<\/oracle-reasoning>(?:\n\n([\s\S]*))?$/,
+        );
 
         if (reasoningMatch) {
           const [, reasoning, answer] = reasoningMatch;
           if (reasoning && options.expanded) {
             lines.push(theme.fg("muted", "─── Reasoning ───"));
             const rLines = reasoning!.split("\n");
-            const shown = rLines.length > 30 ? [...rLines.slice(0, 15), theme.fg("muted", `  ... ${rLines.length - 30} lines omitted ...`), ...rLines.slice(-15)] : rLines;
+            const shown =
+              rLines.length > 30
+                ? [
+                    ...rLines.slice(0, 15),
+                    theme.fg(
+                      "muted",
+                      `  ... ${rLines.length - 30} lines omitted ...`,
+                    ),
+                    ...rLines.slice(-15),
+                  ]
+                : rLines;
             for (const l of shown!) lines.push(`  ${theme.fg("dim", l)}`);
             lines.push("");
           }
           if (answer?.trim()) {
             lines.push(theme.fg("muted", "─── Answer ───"));
             const aLines = answer.trim().split("\n");
-            const limit = options.expanded ? aLines.length : Math.min(aLines.length, 20);
+            const limit = options.expanded
+              ? aLines.length
+              : Math.min(aLines.length, 20);
             for (const l of aLines.slice(0, limit)) lines.push(`  ${l}`);
             if (!options.expanded && aLines.length > 20) {
-              lines.push(theme.fg("muted", `  ... ${aLines.length - 20} more lines (Ctrl+O to expand)`));
+              lines.push(
+                theme.fg(
+                  "muted",
+                  `  ... ${aLines.length - 20} more lines (Ctrl+O to expand)`,
+                ),
+              );
             }
           }
         } else {
           // No reasoning block — just render the text
           const tLines = content.text.split("\n");
-          const limit = options.expanded ? tLines.length : Math.min(tLines.length, 20);
+          const limit = options.expanded
+            ? tLines.length
+            : Math.min(tLines.length, 20);
           for (const l of tLines.slice(0, limit)) lines.push(`  ${l}`);
           if (!options.expanded && tLines.length > 20) {
-            lines.push(theme.fg("muted", `  ... ${tLines.length - 20} more lines (Ctrl+O to expand)`));
+            lines.push(
+              theme.fg(
+                "muted",
+                `  ... ${tLines.length - 20} more lines (Ctrl+O to expand)`,
+              ),
+            );
           }
         }
       }

@@ -11,7 +11,11 @@ import { createTurn, finalizeTurn } from "../turn-grouper";
 
 // ── helpers ───────────────────────────────────────────────────────────
 
-function makeTurn(label: string, request: string, extras?: Partial<Turn>): Turn {
+function makeTurn(
+  label: string,
+  request: string,
+  extras?: Partial<Turn>,
+): Turn {
   const base = createTurn(label, request);
   if (extras?.reasoning) base.reasoning = extras.reasoning;
   if (extras?.responses) base.responses = extras.responses;
@@ -69,9 +73,13 @@ describe("buildTranscript", () => {
   it("drops middle turns when transcript exceeds budget", () => {
     const turns: Turn[] = [];
     for (let i = 1; i <= 10; i++) {
-      turns.push(makeTurn(`Turn ${i}`, `Request ${i}`, {
-        responses: [`Response ${i} with enough text to make this turn a decent size.`],
-      }));
+      turns.push(
+        makeTurn(`Turn ${i}`, `Request ${i}`, {
+          responses: [
+            `Response ${i} with enough text to make this turn a decent size.`,
+          ],
+        }),
+      );
     }
 
     // Format all turns and find a budget that's tight enough to drop some

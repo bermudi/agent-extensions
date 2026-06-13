@@ -55,7 +55,14 @@ type SummaryTool =
 export default function (pi: ExtensionAPI) {
   pi.on("session_before_compact", async (event, ctx) => {
     const { preparation, customInstructions, signal } = event;
-    const { messagesToSummarize, turnPrefixMessages, previousSummary, firstKeptEntryId, tokensBefore, fileOps } = preparation;
+    const {
+      messagesToSummarize,
+      turnPrefixMessages,
+      previousSummary,
+      firstKeptEntryId,
+      tokensBefore,
+      fileOps,
+    } = preparation;
 
     const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
     if (allMessages.length === 0) return;
@@ -70,11 +77,18 @@ export default function (pi: ExtensionAPI) {
     const transformed = applyTransformers(rawBlocks, cwd);
 
     // 3. Render template
-    const templateOutput = renderTemplate(transformed, previousSummary, customInstructions);
+    const templateOutput = renderTemplate(
+      transformed,
+      previousSummary,
+      customInstructions,
+    );
 
     // 4. Compute file lists from pi's tracked file ops
     const readFiles = fileOps?.read ? [...fileOps.read] : [];
-    const modifiedFiles = [...(fileOps?.written || []), ...(fileOps?.edited || [])];
+    const modifiedFiles = [
+      ...(fileOps?.written || []),
+      ...(fileOps?.edited || []),
+    ];
     const fileTags = formatFileTags(readFiles, modifiedFiles);
 
     const summary = `${templateOutput}${fileTags}`;
@@ -114,7 +128,8 @@ function extractSummaryBlocks(messages: AgentMessage[]): SummaryBlock[] {
   for (const msg of messages) {
     if (msg.role === "toolResult") {
       const tr = msg as unknown as AnyRecord;
-      const callId = typeof tr.toolCallId === "string" ? tr.toolCallId : undefined;
+      const callId =
+        typeof tr.toolCallId === "string" ? tr.toolCallId : undefined;
       if (callId) {
         toolResults.set(callId, {
           isError: Boolean(tr.isError),
@@ -192,7 +207,10 @@ function extractText(msg: AgentMessage): string {
   if (!Array.isArray(content)) return "";
 
   return content
-    .filter((part: AnyRecord) => part?.type === "text" && typeof part.text === "string")
+    .filter(
+      (part: AnyRecord) =>
+        part?.type === "text" && typeof part.text === "string",
+    )
     .map((part: AnyRecord) => part.text)
     .join("\n")
     .trim();
@@ -220,13 +238,19 @@ function classifyTool(name: string, args: AnyRecord): SummaryTool {
     case "edit":
     case "patch":
     case "multi_patch":
-      return { kind: "update", path: String(args.path ?? args.file_path ?? "") };
+      return {
+        kind: "update",
+        path: String(args.path ?? args.file_path ?? ""),
+      };
     case "remove":
       return { kind: "delete", path: String(args.path ?? "") };
     case "bash":
       return { kind: "shell", command: String(args.command ?? "") };
     case "grep":
-      return { kind: "grep", pattern: String(args.pattern ?? args.query ?? "") };
+      return {
+        kind: "grep",
+        pattern: String(args.pattern ?? args.query ?? ""),
+      };
     case "find":
       return { kind: "find", pattern: String(args.pattern ?? args.name ?? "") };
     case "ls":
@@ -236,7 +260,12 @@ function classifyTool(name: string, args: AnyRecord): SummaryTool {
     default:
       // Catch search-like tools (fs_search, session_search, codebase_search, etc.)
       if (name.includes("search")) {
-        return { kind: "search", pattern: String(args.pattern ?? args.query ?? args.glob ?? args.file_type ?? "") };
+        return {
+          kind: "search",
+          pattern: String(
+            args.pattern ?? args.query ?? args.glob ?? args.file_type ?? "",
+          ),
+        };
       }
       // Treat unrecognised tools as MCP
       return { kind: "mcp", name };
@@ -249,7 +278,10 @@ function classifyTool(name: string, args: AnyRecord): SummaryTool {
 //   DropRole(System) → DedupeRole(User) → TrimContextSummary → StripWorkingDir
 // Plus DedupeRole(Assistant) which ForgeCode does in DedupeRole.
 
-function applyTransformers(blocks: SummaryBlock[], cwd: string): SummaryBlock[] {
+function applyTransformers(
+  blocks: SummaryBlock[],
+  cwd: string,
+): SummaryBlock[] {
   let result = blocks;
 
   // 1. Drop system messages
@@ -278,7 +310,10 @@ function applyTransformers(blocks: SummaryBlock[], cwd: string): SummaryBlock[] 
  * FIRST and discard the rest. This is different from merging — it drops
  * content, not accumulates it.
  */
-function dedupeConsecutiveRole(blocks: SummaryBlock[], role: "user" | "assistant"): SummaryBlock[] {
+function dedupeConsecutiveRole(
+  blocks: SummaryBlock[],
+  role: "user" | "assistant",
+): SummaryBlock[] {
   const result: SummaryBlock[] = [];
   let lastRole: string | null = null;
 
@@ -340,7 +375,10 @@ function stripWorkingDir(blocks: SummaryBlock[], cwd: string): SummaryBlock[] {
       if (c.type === "tool") {
         const path = toolPath(c.tool);
         if (path && path.startsWith(prefix)) {
-          return { ...c, tool: withStrippedPath(c.tool, path.slice(prefix.length)) };
+          return {
+            ...c,
+            tool: withStrippedPath(c.tool, path.slice(prefix.length)),
+          };
         }
       }
       return c;
@@ -386,17 +424,25 @@ function truncateText(blocks: SummaryBlock[], maxLen: number): SummaryBlock[] {
 
 // ── Template rendering ────────────────────────────────────────────────
 
-function renderTemplate(blocks: SummaryBlock[], previousSummary?: string, customInstructions?: string): string {
+function renderTemplate(
+  blocks: SummaryBlock[],
+  previousSummary?: string,
+  customInstructions?: string,
+): string {
   const parts: string[] = [];
 
-  parts.push("Use the following summary as the authoritative reference for all coding suggestions and decisions. Do not re-explain or revisit it unless I ask.\n");
+  parts.push(
+    "Use the following summary as the authoritative reference for all coding suggestions and decisions. Do not re-explain or revisit it unless I ask.\n",
+  );
 
   if (customInstructions?.trim()) {
     parts.push(`<focus>\n${customInstructions.trim()}\n</focus>\n`);
   }
 
   if (previousSummary?.trim()) {
-    parts.push(`<previous-summary>\n${previousSummary.trim()}\n</previous-summary>\n`);
+    parts.push(
+      `<previous-summary>\n${previousSummary.trim()}\n</previous-summary>\n`,
+    );
   }
 
   parts.push("## Summary\n");
@@ -461,7 +507,9 @@ function formatFileTags(readFiles: string[], modifiedFiles: string[]): string {
   }
 
   if (modifiedFiles.length > 0) {
-    parts.push(`<modified-files>\n${modifiedFiles.join("\n")}\n</modified-files>`);
+    parts.push(
+      `<modified-files>\n${modifiedFiles.join("\n")}\n</modified-files>`,
+    );
   }
 
   return parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";

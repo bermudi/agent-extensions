@@ -11,7 +11,12 @@ import { resolve } from "node:path";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createTestSession, when, calls, says } from "@marcfargas/pi-test-harness";
+import {
+  createTestSession,
+  when,
+  calls,
+  says,
+} from "@marcfargas/pi-test-harness";
 import { Type, Static } from "@sinclair/typebox";
 
 const EXTENSION = resolve(import.meta.dirname, "..", "session-search.ts");
@@ -41,9 +46,7 @@ function getExtensionCommands(ts: TestSession) {
 function getExtension(ts: TestSession) {
   const runner = ts.session.extensionRunner;
   if (!runner) throw new Error("No extensionRunner on session");
-  return runner.extensions.find((e: any) =>
-    e.path.includes("session-search")
-  );
+  return runner.extensions.find((e: any) => e.path.includes("session-search"));
 }
 
 function getHandlers(ts: TestSession) {
@@ -80,33 +83,45 @@ async function createFakeSession(
   ];
 
   if (opts.name) {
-    lines.push(JSON.stringify({
-      type: "session_info",
-      id: "info-1",
-      parentId: null,
-      timestamp,
-      name: opts.name,
-    }));
+    lines.push(
+      JSON.stringify({
+        type: "session_info",
+        id: "info-1",
+        parentId: null,
+        timestamp,
+        name: opts.name,
+      }),
+    );
   }
 
   if (opts.userMessage) {
-    lines.push(JSON.stringify({
-      type: "message",
-      id: "msg-1",
-      parentId: null,
-      timestamp,
-      message: { role: "user", content: [{ type: "text", text: opts.userMessage }] },
-    }));
+    lines.push(
+      JSON.stringify({
+        type: "message",
+        id: "msg-1",
+        parentId: null,
+        timestamp,
+        message: {
+          role: "user",
+          content: [{ type: "text", text: opts.userMessage }],
+        },
+      }),
+    );
   }
 
   if (opts.assistantMessage) {
-    lines.push(JSON.stringify({
-      type: "message",
-      id: "msg-2",
-      parentId: "msg-1",
-      timestamp,
-      message: { role: "assistant", content: [{ type: "text", text: opts.assistantMessage }] },
-    }));
+    lines.push(
+      JSON.stringify({
+        type: "message",
+        id: "msg-2",
+        parentId: "msg-1",
+        timestamp,
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: opts.assistantMessage }],
+        },
+      }),
+    );
   }
 
   await writeFile(filePath, lines.join("\n") + "\n");
@@ -192,7 +207,9 @@ describe("session-search extension", () => {
           session_search: (params: any) => {
             // Proxy to real execute behavior by not mocking — let it run
             // We don't mock so the real tool handles validation
-            throw new Error("should not be reached — use propagateErrors:false");
+            throw new Error(
+              "should not be reached — use propagateErrors:false",
+            );
           },
         },
       });
@@ -205,7 +222,13 @@ describe("session-search extension", () => {
       const toolDef = getToolDef(ts, "session_search");
       expect(toolDef).toBeDefined();
 
-      const result = await toolDef!.execute("tc-test-1", { query: "" }, undefined, undefined, ts.session.extensionRunner as any);
+      const result = await toolDef!.execute(
+        "tc-test-1",
+        { query: "" },
+        undefined,
+        undefined,
+        ts.session.extensionRunner as any,
+      );
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain("Query cannot be empty");
     });
@@ -248,7 +271,9 @@ describe("session-search extension", () => {
       );
 
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain(".jsonl file path or a session UUID");
+      expect(result.content[0].text).toContain(
+        ".jsonl file path or a session UUID",
+      );
     });
 
     it("accepts UUID-like input and attempts resolution", async () => {
@@ -287,7 +312,9 @@ describe("session-search extension", () => {
       );
 
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Failed to resolve session file");
+      expect(result.content[0].text).toContain(
+        "Failed to resolve session file",
+      );
     });
   });
 
@@ -559,7 +586,9 @@ describe("session-search extension", () => {
       };
 
       // Should complete without error
-      await expect(startHandlers[0]({ type: "session_start" }, ctx as any)).resolves.toBeUndefined();
+      await expect(
+        startHandlers[0]({ type: "session_start" }, ctx as any),
+      ).resolves.toBeUndefined();
     });
   });
 
@@ -596,7 +625,9 @@ describe("session-search extension", () => {
       };
 
       // closeDb() is idempotent — should not throw
-      await expect(shutdownHandlers[0]({ type: "session_shutdown" }, ctx as any)).resolves.toBeUndefined();
+      await expect(
+        shutdownHandlers[0]({ type: "session_shutdown" }, ctx as any),
+      ).resolves.toBeUndefined();
     });
   });
 

@@ -200,7 +200,8 @@ export default function mcpExtension(pi: ExtensionAPI) {
       "Call any configured MCP server tool via mcporter. " +
       "Pass tool arguments as a JSON object in the 'args' parameter. " +
       "Use mcp_list to discover available servers and their tools, or check the MCP Tools section in the system prompt.",
-    promptSnippet: "Call external MCP tools (web search, code search, vision, research, docs)",
+    promptSnippet:
+      "Call external MCP tools (web search, code search, vision, research, docs)",
     promptGuidelines: [
       "Use mcp for web search (tavily), code search (grep), image analysis (zai-vision), " +
         "research (poe-research), library docs (context7), repo understanding (deepwiki).",
@@ -214,10 +215,16 @@ export default function mcpExtension(pi: ExtensionAPI) {
       "If a call times out, increase the timeout parameter or simplify the query.",
     ],
     parameters: Type.Object({
-      server: Type.String({ description: "MCP server name (e.g. 'tavily', 'grep', 'zai-vision')" }),
-      tool: Type.String({ description: "Tool name on the server (e.g. 'tavily_search', 'searchGitHub')" }),
+      server: Type.String({
+        description: "MCP server name (e.g. 'tavily', 'grep', 'zai-vision')",
+      }),
+      tool: Type.String({
+        description:
+          "Tool name on the server (e.g. 'tavily_search', 'searchGitHub')",
+      }),
       args: Type.Record(Type.String(), Type.Any(), {
-        description: "Tool arguments as a JSON object. Key names must match the tool's expected parameters.",
+        description:
+          "Tool arguments as a JSON object. Key names must match the tool's expected parameters.",
       }),
       timeout: Type.Optional(
         Type.Number({
@@ -246,7 +253,8 @@ export default function mcpExtension(pi: ExtensionAPI) {
         };
       }
 
-      const innerTimeout = params.timeout ?? SERVER_TIMEOUTS[params.server] ?? DEFAULT_TIMEOUT;
+      const innerTimeout =
+        params.timeout ?? SERVER_TIMEOUTS[params.server] ?? DEFAULT_TIMEOUT;
       const outerTimeout = innerTimeout + TIMEOUT_BUFFER;
 
       const args = [
@@ -297,7 +305,9 @@ export default function mcpExtension(pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: parts.join("\n") || `mcporter exited with code ${result.exitCode}`,
+              text:
+                parts.join("\n") ||
+                `mcporter exited with code ${result.exitCode}`,
             },
           ],
           isError: true,
@@ -320,7 +330,8 @@ export default function mcpExtension(pi: ExtensionAPI) {
     // ── TUI rendering ──────────────────────────────────────────────
 
     renderCall(args, theme, ctx) {
-      const text = (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const selector = `${args.server}.${args.tool}`;
       const argKeys = args.args ? Object.keys(args.args).join(", ") : "";
       let label = theme.bold(theme.fg("toolTitle", "mcp "));
@@ -331,7 +342,8 @@ export default function mcpExtension(pi: ExtensionAPI) {
     },
 
     renderResult(result, { expanded }, theme, ctx) {
-      const text = (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const details = result.details as {
         server?: string;
         tool?: string;
@@ -398,7 +410,8 @@ export default function mcpExtension(pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: result.stderr || result.stdout || "Failed to list MCP servers.",
+              text:
+                result.stderr || result.stdout || "Failed to list MCP servers.",
             },
           ],
           isError: true,
@@ -412,14 +425,19 @@ export default function mcpExtension(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme, ctx) {
-      const text = (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const target = args.server ?? "all";
-      text.setText(theme.bold(theme.fg("toolTitle", "mcp_list ")) + theme.fg("accent", target));
+      text.setText(
+        theme.bold(theme.fg("toolTitle", "mcp_list ")) +
+          theme.fg("accent", target),
+      );
       return text;
     },
 
     renderResult(result, _opts, theme, ctx) {
-      const text = (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text =
+        (ctx?.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       if (result.isError) {
         text.setText(theme.fg("error", "✗ error"));
       } else {

@@ -20,7 +20,11 @@ function makeTempDir(prefix = "supervise-test-"): string {
 }
 
 function cleanup(dir: string) {
-  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
 }
 
 function mockTheme() {
@@ -33,7 +37,9 @@ function mockTheme() {
 function createMockText() {
   let captured = "";
   return {
-    setText: (text: string) => { captured = text; },
+    setText: (text: string) => {
+      captured = text;
+    },
     getText: () => captured,
     invalidate: () => {},
   };
@@ -116,8 +122,10 @@ describe("supervise execute — error cases", () => {
     const toolDef = getToolDef(ts, "supervise");
 
     const result = await toolDef!.execute(
-      "tc-1", {},
-      undefined, undefined,
+      "tc-1",
+      {},
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -130,8 +138,10 @@ describe("supervise execute — error cases", () => {
     const toolDef = getToolDef(ts, "supervise");
 
     const result = await toolDef!.execute(
-      "tc-inspect-no-session", { inspect: true },
-      undefined, undefined,
+      "tc-inspect-no-session",
+      { inspect: true },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -143,8 +153,10 @@ describe("supervise execute — error cases", () => {
     const toolDef = getToolDef(ts, "supervise");
 
     const result = await toolDef!.execute(
-      "tc-2", { session: "nonexistent", inspect: true },
-      undefined, undefined,
+      "tc-2",
+      { session: "nonexistent", inspect: true },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -156,8 +168,10 @@ describe("supervise execute — error cases", () => {
     const toolDef = getToolDef(ts, "supervise");
 
     const result = await toolDef!.execute(
-      "tc-done-no-session", { done: true },
-      undefined, undefined,
+      "tc-done-no-session",
+      { done: true },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -169,8 +183,10 @@ describe("supervise execute — error cases", () => {
     const toolDef = getToolDef(ts, "supervise");
 
     const result = await toolDef!.execute(
-      "tc-3", { session: "nonexistent", done: true },
-      undefined, undefined,
+      "tc-3",
+      { session: "nonexistent", done: true },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -182,8 +198,10 @@ describe("supervise execute — error cases", () => {
     const toolDef = getToolDef(ts, "supervise");
 
     const result = await toolDef!.execute(
-      "tc-4", { command: "do something" },
-      undefined, undefined,
+      "tc-4",
+      { command: "do something" },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -195,8 +213,10 @@ describe("supervise execute — error cases", () => {
     const toolDef = getToolDef(ts, "supervise");
 
     const result = await toolDef!.execute(
-      "tc-5", { task: "do something" },
-      undefined, undefined,
+      "tc-5",
+      { task: "do something" },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -210,8 +230,10 @@ describe("supervise execute — error cases", () => {
 
     // Start fails because no model
     const startResult = await toolDef!.execute(
-      "tc-fail-start", { task: "hello", systemPrompt: "test" },
-      undefined, undefined,
+      "tc-fail-start",
+      { task: "hello", systemPrompt: "test" },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -221,13 +243,17 @@ describe("supervise execute — error cases", () => {
 
     // Try to continue the failed session
     const continueResult = await toolDef!.execute(
-      "tc-fail-continue", { session: sid, command: "try again" },
-      undefined, undefined,
+      "tc-fail-continue",
+      { session: sid, command: "try again" },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
     // Session was never stored, so it looks like "not found" / "first call"
-    expect(continueResult.content[0].text).toMatch(/not found|First call requires/);
+    expect(continueResult.content[0].text).toMatch(
+      /not found|First call requires/,
+    );
   });
 });
 
@@ -247,7 +273,11 @@ describe("supervise renderers", () => {
     const theme = mockTheme();
     const ctx = mockRenderCtx();
 
-    const text = toolDef!.renderCall({ task: "ingest this source file" }, theme, ctx);
+    const text = toolDef!.renderCall(
+      { task: "ingest this source file" },
+      theme,
+      ctx,
+    );
     expect((text as any).getText()).toContain("supervise");
     expect((text as any).getText()).toContain("ingest this source file");
   });
@@ -260,7 +290,8 @@ describe("supervise renderers", () => {
 
     const text = toolDef!.renderCall(
       { session: "abc-123", command: "go to Phase 2" },
-      theme, ctx,
+      theme,
+      ctx,
     );
     expect((text as any).getText()).toContain("abc-123");
     expect((text as any).getText()).toContain("go to Phase 2");
@@ -274,7 +305,8 @@ describe("supervise renderers", () => {
 
     const text = toolDef!.renderCall(
       { session: "abc-123", inspect: true },
-      theme, ctx,
+      theme,
+      ctx,
     );
     expect((text as any).getText()).toContain("inspect");
     expect((text as any).getText()).toContain("abc-123");
@@ -288,7 +320,8 @@ describe("supervise renderers", () => {
 
     const text = toolDef!.renderCall(
       { session: "abc-123", done: true },
-      theme, ctx,
+      theme,
+      ctx,
     );
     expect((text as any).getText()).toContain("done");
   });
@@ -312,7 +345,8 @@ describe("supervise renderers", () => {
         },
       },
       { isPartial: false, expanded: false },
-      theme, ctx,
+      theme,
+      ctx,
     );
     const rendered = (text as any).getText();
     expect(rendered).toContain("supervise-1");
@@ -338,7 +372,8 @@ describe("supervise renderers", () => {
         },
       },
       { isPartial: false, expanded: false },
-      theme, ctx,
+      theme,
+      ctx,
     );
     expect((text as any).getText()).toContain("✗");
   });
@@ -359,7 +394,8 @@ describe("supervise renderers", () => {
         },
       },
       { isPartial: true, expanded: false },
-      theme, ctx,
+      theme,
+      ctx,
     );
     const rendered = (text as any).getText();
     expect(rendered).toContain("running");
@@ -382,11 +418,19 @@ describe("supervise renderers", () => {
           durationMs: 2000,
           tokens: 800,
           text: "I read the file and found 3 issues.",
-          toolCalls: [{ id: "tc-1", name: "read", resultPreview: "file contents...", isError: false }],
+          toolCalls: [
+            {
+              id: "tc-1",
+              name: "read",
+              resultPreview: "file contents...",
+              isError: false,
+            },
+          ],
         },
       },
       { isPartial: false, expanded: true },
-      theme, ctx,
+      theme,
+      ctx,
     );
     const rendered = (text as any).getText();
     expect(rendered).toContain("I read the file and found 3 issues.");
@@ -412,8 +456,13 @@ describe("supervise config resolution", () => {
 
     const result = await toolDef!.execute(
       "tc-6",
-      { task: "do work", agent: "nonexistent-agent-xyz", systemPrompt: "fallback" },
-      undefined, undefined,
+      {
+        task: "do work",
+        agent: "nonexistent-agent-xyz",
+        systemPrompt: "fallback",
+      },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -443,7 +492,8 @@ You are a test agent. Be concise.`,
     const result = await toolDef!.execute(
       "tc-7",
       { task: "hello", agent: "tester" },
-      undefined, undefined,
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -458,8 +508,13 @@ You are a test agent. Be concise.`,
 
     const result = await toolDef!.execute(
       "tc-8",
-      { task: "do work", systemPrompt: "you are a helper", tools: ["read", "imaginary-tool"] },
-      undefined, undefined,
+      {
+        task: "do work",
+        systemPrompt: "you are a helper",
+        tools: ["read", "imaginary-tool"],
+      },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -474,8 +529,13 @@ You are a test agent. Be concise.`,
 
     const result = await toolDef!.execute(
       "tc-9",
-      { task: "do work", systemPrompt: "you are a helper", skills: ["nonexistent-skill"] },
-      undefined, undefined,
+      {
+        task: "do work",
+        systemPrompt: "you are a helper",
+        skills: ["nonexistent-skill"],
+      },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 
@@ -501,8 +561,13 @@ You are a test agent. Be concise.`,
 
     const result = await toolDef!.execute(
       "tc-10",
-      { task: "hello", systemPrompt: "You are a helper.", skills: ["test-skill"] },
-      undefined, undefined,
+      {
+        task: "hello",
+        systemPrompt: "You are a helper.",
+        skills: ["test-skill"],
+      },
+      undefined,
+      undefined,
       ts.session.extensionRunner as any,
     );
 

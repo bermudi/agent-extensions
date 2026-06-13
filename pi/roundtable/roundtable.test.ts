@@ -30,7 +30,9 @@ describe("roundtable extension", () => {
     });
 
     const tools = t.session.getAllTools();
-    const roundtableTool = tools.find((tool: { name: string }) => tool.name === "roundtable");
+    const roundtableTool = tools.find(
+      (tool: { name: string }) => tool.name === "roundtable",
+    );
     expect(roundtableTool).toBeDefined();
     expect(roundtableTool.description).toContain("multi-project roundtable");
   });
@@ -52,14 +54,21 @@ describe("fmtTokens", () => {
 
 describe("trunc", () => {
   it("keeps short strings", () => expect(trunc("hi", 10)).toBe("hi"));
-  it("truncates long strings", () => expect(trunc("hello world", 6)).toBe("hello…"));
+  it("truncates long strings", () =>
+    expect(trunc("hello world", 6)).toBe("hello…"));
 });
 
 describe("extractOutput", () => {
   it("extracts text from assistant messages", () => {
     const msgs = [
-      { role: "assistant" as const, content: [{ type: "text" as const, text: "Hello" }] },
-      { role: "assistant" as const, content: [{ type: "text" as const, text: "World" }] },
+      {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: "Hello" }],
+      },
+      {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: "World" }],
+      },
     ];
     expect(extractOutput(msgs)).toBe("Hello\n\nWorld");
   });
@@ -67,7 +76,10 @@ describe("extractOutput", () => {
   it("skips non-assistant messages", () => {
     const msgs = [
       { role: "user" as const, content: "hi" },
-      { role: "assistant" as const, content: [{ type: "text" as const, text: "response" }] },
+      {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: "response" }],
+      },
     ];
     expect(extractOutput(msgs)).toBe("response");
   });
@@ -80,12 +92,20 @@ describe("extractOutput", () => {
 describe("resolveModel", () => {
   it("returns parent model when no spec", () => {
     const mockModel = { provider: "test", id: "model-1" } as any;
-    const mockRegistry = { getAvailable: () => [], find: () => undefined } as any;
+    const mockRegistry = {
+      getAvailable: () => [],
+      find: () => undefined,
+    } as any;
     expect(resolveModel(undefined, mockRegistry, mockModel)).toBe(mockModel);
   });
 
   it("returns undefined when no parent and no spec match", () => {
-    const mockRegistry = { getAvailable: () => [], find: () => undefined } as any;
-    expect(resolveModel("nonexistent/model", mockRegistry, undefined)).toBeUndefined();
+    const mockRegistry = {
+      getAvailable: () => [],
+      find: () => undefined,
+    } as any;
+    expect(
+      resolveModel("nonexistent/model", mockRegistry, undefined),
+    ).toBeUndefined();
   });
 });

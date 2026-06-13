@@ -4,17 +4,22 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 const commandName = "diff";
 
 function getStringPath(input: unknown) {
-  if (!input || typeof input !== "object" || !("path" in input)) return undefined;
+  if (!input || typeof input !== "object" || !("path" in input))
+    return undefined;
   return typeof input.path === "string" ? input.path : undefined;
 }
 
 function toAbsolute(cwd: string, filePath: string) {
-  return path.isAbsolute(filePath) ? path.normalize(filePath) : path.resolve(cwd, filePath);
+  return path.isAbsolute(filePath)
+    ? path.normalize(filePath)
+    : path.resolve(cwd, filePath);
 }
 
 function toRelative(cwd: string, filePath: string) {
   const relative = path.relative(cwd, filePath);
-  return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : filePath;
+  return relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+    ? relative
+    : filePath;
 }
 
 function parseGitStatus(output: string, cwd: string) {
@@ -26,7 +31,9 @@ function parseGitStatus(output: string, cwd: string) {
     const rawPath = line.slice(3).trim();
     if (!rawPath) continue;
 
-    const targetPath = rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1) : rawPath;
+    const targetPath = rawPath.includes(" -> ")
+      ? rawPath.split(" -> ").at(-1)
+      : rawPath;
     if (!targetPath) continue;
 
     files.add(toAbsolute(cwd, targetPath.replace(/^"|"$/g, "")));
@@ -36,7 +43,11 @@ function parseGitStatus(output: string, cwd: string) {
 }
 
 async function getGitChangedFiles(pi: ExtensionAPI, cwd: string) {
-  const result = await pi.exec("git", ["status", "--porcelain", "--untracked-files=all"], { cwd, timeout: 5000 });
+  const result = await pi.exec(
+    "git",
+    ["status", "--porcelain", "--untracked-files=all"],
+    { cwd, timeout: 5000 },
+  );
   if (result.code !== 0) return new Set<string>();
   return parseGitStatus(result.stdout, cwd);
 }
@@ -67,7 +78,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_end", async (_event, ctx) => {
     const gitChanged = await getGitChangedFiles(pi, ctx.cwd);
-    changedFiles = new Set([...difference(gitChanged, gitBaseline), ...toolTouchedFiles]);
+    changedFiles = new Set([
+      ...difference(gitChanged, gitBaseline),
+      ...toolTouchedFiles,
+    ]);
 
     if (changedFiles.size > 0) {
       ctx.ui.notify(
@@ -95,7 +109,10 @@ export default function (pi: ExtensionAPI) {
         toRelative(ctx.cwd, a).localeCompare(toRelative(ctx.cwd, b)),
       );
       if (files.length === 0) {
-        ctx.ui.notify("No changed files tracked from the last agent run", "info");
+        ctx.ui.notify(
+          "No changed files tracked from the last agent run",
+          "info",
+        );
         return;
       }
 
@@ -116,7 +133,10 @@ export default function (pi: ExtensionAPI) {
       }
 
       const labels = files.map((f) => toRelative(ctx.cwd, f));
-      const selected = await ctx.ui.select("Changed files from last agent run", labels);
+      const selected = await ctx.ui.select(
+        "Changed files from last agent run",
+        labels,
+      );
       if (!selected) return;
 
       const selectedIndex = labels.indexOf(selected);
@@ -124,12 +144,18 @@ export default function (pi: ExtensionAPI) {
       if (!file) return;
 
       // Show actual git diff for the selected file
-      const result = await pi.exec("git", ["diff", file], { cwd: ctx.cwd, timeout: 5000 });
+      const result = await pi.exec("git", ["diff", file], {
+        cwd: ctx.cwd,
+        timeout: 5000,
+      });
       if (result.code === 0 && result.stdout.trim()) {
         ctx.ui.notify(`diff for ${selected}:\n${result.stdout}`, "info");
       } else {
         // File might be untracked — show a note
-        ctx.ui.notify(`${selected} (untracked/new file — no diff available)`, "info");
+        ctx.ui.notify(
+          `${selected} (untracked/new file — no diff available)`,
+          "info",
+        );
       }
     },
   });

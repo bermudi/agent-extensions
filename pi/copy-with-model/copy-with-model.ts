@@ -27,7 +27,9 @@ function copyToClipboard(text: string): void {
     }
     // Linux — Wayland
     if (process.env.WAYLAND_DISPLAY) {
-      const proc = spawn("wl-copy", [], { stdio: ["pipe", "ignore", "ignore"] });
+      const proc = spawn("wl-copy", [], {
+        stdio: ["pipe", "ignore", "ignore"],
+      });
       proc.stdin.on("error", () => {});
       proc.stdin.write(text);
       proc.stdin.end();
@@ -64,7 +66,11 @@ function getLastAssistantText(entries: any[]): string | undefined {
     const msg = entry.message;
     if (!msg || msg.role !== "assistant") continue;
     // Skip aborted messages with no content
-    if (msg.stopReason === "aborted" && (!msg.content || msg.content.length === 0)) continue;
+    if (
+      msg.stopReason === "aborted" &&
+      (!msg.content || msg.content.length === 0)
+    )
+      continue;
     let text = "";
     for (const block of msg.content ?? []) {
       if (block.type === "text") text += block.text;
@@ -115,7 +121,8 @@ function wrapInCodeBlock(tag: string, text: string): string {
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("copy-with-model", {
-    description: "Copy last assistant message to clipboard in a code block tagged with the model name",
+    description:
+      "Copy last assistant message to clipboard in a code block tagged with the model name",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
 
