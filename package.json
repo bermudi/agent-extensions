@@ -6,6 +6,7 @@
     "test": "bun test pi/bermundis-pi-goodies pi/cc-cwd pi/diff pi/session-summarizer pi/experiments",
     "test:active": "bun test pi/bermundis-pi-goodies pi/cc-cwd pi/diff pi/session-summarizer",
     "test:experiments": "bun test pi/experiments",
+    "build:goodies": "esbuild pi/bermundis-pi-goodies/index.ts --bundle --platform=neutral --packages=external --format=esm --outfile=pi/bermundis-pi-goodies/bermundis-pi-goodies.bundle.ts",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"pi/**/*.ts\""
   },
@@ -16,6 +17,7 @@
     "@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@^0.75.3",
     "@mariozechner/pi-tui": "npm:@earendil-works/pi-tui@^0.75.3",
     "@sinclair/typebox": "^0.34.0",
+    "esbuild": "^0.27.0",
     "prettier": "^3.8.4"
   }
 }

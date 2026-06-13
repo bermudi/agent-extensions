@@ -24,6 +24,7 @@ Develop those in their own repos — each has its own package.json/tests/typeche
 - `reference/` — third-party extensions kept for study. **Read-only.** Not imported, not tested, not edited. Excluded from typecheck + tests.
 - `pi/experiments/` — archive of unused/exploratory extensions. Excluded from typecheck; tests run via `bun run test` / `bun run test:experiments` but the dir is not gated as maintained code.
 - Active extensions live at `pi/<name>/`. New keepers go there; experiments go in `pi/experiments/`.
+- Multi-file extensions symlinked globally must ship a **bundle** (esbuild, `--packages=external`) — pi's Node loader resolves relative imports against the symlink path, breaking unbundled multi-file exts. Single-file extensions can be symlinked directly. See `build:goodies` for the pattern.
 - Test your work: `bun run typecheck` and `bun run test`. `.agents/skills/pi-test-harness` has the harness docs.
 - **Do not** symlink/install globally until bermudi says it's ready.
 - Extensions load at session start. Use `/reload` to pick up changes mid-session.
