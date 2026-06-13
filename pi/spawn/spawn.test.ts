@@ -47,8 +47,6 @@ import {
 	computeRetryDelay,
 	runAgent,
 	runAgentOnce,
-	taskImpliesEdits,
-	hasMutationActivity,
 	readDelegateSettingsFile,
 	loadDelegateSettings,
 	setModelOverride,
@@ -90,6 +88,20 @@ function getToolDef(ts: TestSession, name: string) {
 	const runner = ts.session.extensionRunner;
 	if (!runner) throw new Error("No extensionRunner on session");
 	return runner.getToolDefinition(name);
+}
+
+function collectSchemaDescriptions(schema: unknown): string[] {
+	const descriptions: string[] = [];
+	const visit = (value: unknown) => {
+		if (!value || typeof value !== "object") return;
+		const record = value as Record<string, unknown>;
+		if (typeof record.description === "string") {
+			descriptions.push(record.description);
+		}
+		for (const child of Object.values(record)) visit(child);
+	};
+	visit(schema);
+	return descriptions;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1683,78 +1695,6 @@ describe("runAgent retry loop", () => {
 		expect(appended).toEqual([]);
 	});
 });
-
-// ── Mutation Guard ──────────────────────────────────────────────────────────
-
-describe("taskImpliesEdits", () => {
-	test("detects implementation tasks", () => {
-		expect(taskImpliesEdits("implement the auth module")).toBe(true);
-		expect(taskImpliesEdits("fix the login bug")).toBe(true);
-		expect(taskImpliesEdits("edit the config file")).toBe(true);
-		expect(taskImpliesEdits("modify the parser")).toBe(true);
-		expect(taskImpliesEdits("patch the vulnerability")).toBe(true);
-		expect(taskImpliesEdits("refactor the database layer")).toBe(true);
-		expect(taskImpliesEdits("apply the changes")).toBe(true);
-		expect(taskImpliesEdits("make the changes")).toBe(true);
-		expect(taskImpliesEdits("do those fixes")).toBe(true);
-		expect(taskImpliesEdits("update the file config.ts")).toBe(true);
-		expect(taskImpliesEdits("add a new component")).toBe(true);
-		expect(taskImpliesEdits("delete the old module")).toBe(true);
-	});
-
-	test("returns false for review-only tasks", () => {
-		expect(taskImpliesEdits("review only, do not edit")).toBe(false);
-		expect(taskImpliesEdits("suggest fixes only")).toBe(false);
-		expect(taskImpliesEdits("only return findings")).toBe(false);
-		expect(taskImpliesEdits("do not edit anything")).toBe(false);
-		expect(taskImpliesEdits("review the code and report issues")).toBe(false);
-		expect(taskImpliesEdits("fix the login bug but do not edit files")).toBe(false);
-	});
-
-	test("returns false for plain text with no implementation words", () => {
-		expect(taskImpliesEdits("read the config file")).toBe(false);
-		expect(taskImpliesEdits("search for bugs")).toBe(false);
-		expect(taskImpliesEdits("explain the architecture")).toBe(false);
-	});
-});
-
-describe("hasMutationActivity", () => {
-	test("detects edit tool calls", () => {
-		const activities = [
-			{ id: "1", name: "read", args: { path: "a.ts" }, startTime: 0 },
-			{ id: "2", name: "edit", args: { path: "a.ts", oldText: "x", newText: "y" }, startTime: 1 },
-		];
-		expect(hasMutationActivity(activities as any)).toBe(true);
-	});
-
-	test("detects write tool calls", () => {
-		const activities = [
-			{ id: "1", name: "write", args: { path: "b.ts", content: "x" }, startTime: 0 },
-		];
-		expect(hasMutationActivity(activities as any)).toBe(true);
-	});
-
-	test("detects mutating bash commands", () => {
-		expect(hasMutationActivity([{ id: "1", name: "bash", args: { command: "sed -i 's/a/b/' file" }, startTime: 0 }] as any)).toBe(true);
-		expect(hasMutationActivity([{ id: "1", name: "bash", args: { command: "git commit -m 'fix'" }, startTime: 0 }] as any)).toBe(true);
-		expect(hasMutationActivity([{ id: "1", name: "bash", args: { command: "rm file" }, startTime: 0 }] as any)).toBe(true);
-		expect(hasMutationActivity([{ id: "1", name: "bash", args: { command: "python3 script.py" }, startTime: 0 }] as any)).toBe(true);
-	});
-
-	test("returns false for read-only activities", () => {
-		const activities = [
-			{ id: "1", name: "read", args: { path: "a.ts" }, startTime: 0 },
-			{ id: "2", name: "bash", args: { command: "git status" }, startTime: 1 },
-			{ id: "3", name: "bash", args: { command: "ls -la" }, startTime: 2 },
-		];
-		expect(hasMutationActivity(activities as any)).toBe(false);
-	});
-
-	test("returns false for empty activities", () => {
-		expect(hasMutationActivity([])).toBe(false);
-	});
-});
-
 // ── Settings Overrides ──────────────────────────────────────────────────────
 
 describe("readDelegateSettingsFile", () => {
@@ -1846,7 +1786,7 @@ describe("delegate extension integration", () => {
 		expect(toolDef).toBeDefined();
 		expect(toolDef!.name).toBe("spawn");
 		expect(toolDef!.label).toBe("Spawn Subagents");
-		expect(toolDef!.description).toContain("subagent");
+		expect(toolDef!.description).toBe(".");
 	});
 
 	test("has tasks array parameter with minItems 0 (allows help mode)", async () => {
@@ -1858,13 +1798,12 @@ describe("delegate extension integration", () => {
 		expect(schema.properties.tasks.minItems).toBe(0);
 	});
 
-	test("promptSnippet and promptGuidelines are set", async () => {
+	test("uses stealth registration metadata and schema", async () => {
 		ts = await createTestSession({ extensions: [EXTENSION] });
 		const toolDef = getToolDef(ts, "spawn");
-		expect(toolDef!.promptSnippet).toBeDefined();
-		expect(toolDef!.promptSnippet).toContain("subagent");
-		expect(toolDef!.promptGuidelines).toBeDefined();
-		expect(toolDef!.promptGuidelines.length).toBeGreaterThanOrEqual(2);
+		expect(toolDef!.promptSnippet).toBeUndefined();
+		expect(toolDef!.promptGuidelines ?? []).toEqual([]);
+		expect(collectSchemaDescriptions(toolDef!.parameters)).toEqual([]);
 	});
 
 	test("execute returns help when tasks is empty", async () => {
@@ -3187,12 +3126,6 @@ describe("async delegate integration", () => {
 		expect(result.content[0].text).toContain("async: true");
 		expect(result.content[0].text).toContain("poll");
 		expect(result.content[0].text).toContain("cancel");
-	});
-
-	test("promptGuidelines includes async mode guideline", async () => {
-		ts = await createTestSession({ extensions: [EXTENSION] });
-		const toolDef = getToolDef(ts, "spawn");
-		expect(toolDef!.promptGuidelines.some(g => g.includes("async"))).toBe(true);
 	});
 
 	test("action enum includes poll and cancel", async () => {

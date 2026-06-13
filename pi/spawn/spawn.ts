@@ -2369,49 +2369,7 @@ async function runResolvedTaskUnlocked(
   }
 }
 
-// ── Output Extraction ────────────────────────────────────────────────────
-
-// ── Completion Mutation Guard ──────────────────────────────────────────
-
-const IMPLEMENTATION_PATTERNS = [
-  /\b(?:implement|fix|edit|modify|patch|refactor)\b/i,
-  /\bapply\s+(?:the\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
-  /\bmake\s+(?:the\s+)?changes\b/i,
-  /\bdo those fixes\b/i,
-  /\b(?:update|add|remove|replace|delete|create)\b(?!\s+(?:(?:a|an|the)\s+)?(?:report|summary|findings?|overview|analysis)(?:\b|$))/i,
-];
-
-const REVIEW_ONLY_PATTERNS = [
-  /\breview only\b/i,
-  /\bsuggest fixes only\b/i,
-  /\bonly return findings\b/i,
-  /\breturn findings only\b/i,
-  /\bdo not edit\b/i,
-  /\bdon't edit\b/i,
-  /\bdo not modify\b/i,
-  /\bdo not change files\b/i,
-];
-
-/** Check if a task description implies the agent should produce edits. */
-export function taskImpliesEdits(task: string): boolean {
-  const text = task;
-  if (REVIEW_ONLY_PATTERNS.some((p) => p.test(text))) return false;
-  return IMPLEMENTATION_PATTERNS.some((p) => p.test(text));
-}
-
-/** Check if the agent's tool activities include any mutations (edit/write/mutating bash). */
-export function hasMutationActivity(activities: ToolActivity[]): boolean {
-  return activities.some(
-    (a) =>
-      a.name === "edit" ||
-      a.name === "write" ||
-      (a.name === "bash" &&
-        typeof a.args?.command === "string" &&
-        /\b(?:sed|awk|perl|python\d*|tee|dd|mv|cp|rm|truncate|sponge|git\s+(?:commit|add|rm|mv|cherry-pick|rebase|merge|am|apply|stash\s+pop))\b/i.test(
-          a.args.command,
-        )),
-  );
-}
+// ── Utilities ─────────────────────────────────────────────────────────────
 
 /** Resolve a cwd string: expand ~ and make absolute. */
 export function resolveCwd(cwd: string): string {
@@ -2802,39 +2760,16 @@ const spawnParameters = Type.Object({
   action: Type.Optional(
     Type.String({
       enum: ["poll", "cancel"],
-      description: "Poll for async results or cancel a ticket.",
     }),
   ),
-  async: Type.Optional(
-    Type.Boolean({
-      description:
-        "Return immediately with a ticket ID. Poll with action='poll'.",
-    }),
-  ),
-  ticket: Type.Optional(
-    Type.String({
-      description: "Ticket ID for poll/cancel.",
-    }),
-  ),
+  async: Type.Optional(Type.Boolean()),
+  ticket: Type.Optional(Type.String()),
   tasks: Type.Optional(
     Type.Array(
       Type.Object({
-        prompt: Type.Optional(
-          Type.String({
-            description: "The task for this subagent to perform.",
-          }),
-        ),
-        agent: Type.Optional(
-          Type.String({
-            description:
-              "Named agent (project-local or global). Omit to inherit from parent session.",
-          }),
-        ),
-        cwd: Type.Optional(
-          Type.String({
-            description: "Working directory. Defaults to parent cwd.",
-          }),
-        ),
+        prompt: Type.Optional(Type.String()),
+        agent: Type.Optional(Type.String()),
+        cwd: Type.Optional(Type.String()),
         // ── Undocumented overrides — accepted but not advertised in schema.
         // Discovered via empty-tasks help text.
         systemPrompt: Type.Optional(Type.String()),
@@ -2859,7 +2794,6 @@ const spawnParameters = Type.Object({
       }),
       {
         minItems: 0,
-        description: "Tasks to run in parallel. Pass an empty array for help.",
       },
     ),
   ),
@@ -2986,16 +2920,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "spawn",
     label: "Spawn Subagents",
-    promptSnippet:
-      "Delegate parallel tasks to independent background subagents.",
-    promptGuidelines: [
-      "Use spawn to delegate isolated, time-consuming, or parallelizable tasks to background subagents.",
-      "If you are unsure which named 'agent' to use, call spawn with an empty tasks array [] to read the full manual.",
-      "When using spawn for long-running tasks, set { async: true } to avoid blocking, then use spawn with { action: 'poll' } to check progress.",
-      "Assign a 'sessionId' in spawn to maintain subagent state across multiple sequential turns.",
-    ],
-    description:
-      "Delegates tasks to independent subagents that run concurrently. Each subagent operates with its own isolated context, model, and working directory. Supports asynchronous ticketing, persistent session IDs, and state resumption.",
+    description: ".",
     parameters: spawnParameters,
 
     async execute(_id, params: DelegateParams, signal, onUpdate, ctx) {
@@ -3477,30 +3402,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       const finalResults = results;
       const elapsedTotal = Date.now() - startedAt;
 
-      // ── Completion mutation guard ───────────────────────────────
-      const mutationWarnings: string[] = [];
-      for (let i = 0; i < finalResults.length; i++) {
-        const r = finalResults[i]!;
-        if (r.error) continue;
-        const t = resolved[i]!;
-        if (t.action === "close" || t.action === "list") continue;
-        const p = progress[i]!;
-        if (
-          taskImpliesEdits(t.prompt || "") &&
-          !hasMutationActivity(p.activities)
-        ) {
-          mutationWarnings.push(
-            `[GUARD] ${r.agent}: task implies edits but no mutation tools ran (edit/write/mutating bash). Did the agent only produce text below?`,
-          );
-        }
-      }
-
       const parts: string[] = [];
       const succeeded = finalResults.filter((r) => !r.error).length;
       parts.push(
         `${succeeded}/${finalResults.length} tasks completed successfully · ${fmtDuration(elapsedTotal)} wall time\n`,
       );
-      for (const w of mutationWarnings) parts.push(w);
       for (let i = 0; i < finalResults.length; i++) {
         const r = finalResults[i]!;
         const t = resolved[i]!;
