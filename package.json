@@ -6,7 +6,7 @@
     "test": "bun test pi/bermudis-pi-goodies pi/cc-cwd pi/diff pi/session-summarizer pi/experiments",
     "test:active": "bun test pi/bermudis-pi-goodies pi/cc-cwd pi/diff pi/session-summarizer",
     "test:experiments": "bun test pi/experiments",
-    "build:goodies": "esbuild pi/bermudis-pi-goodies/index.ts --bundle --platform=neutral --packages=external --format=esm --outfile=pi/bermudis-pi-goodies/bermudis-pi-goodies.bundle.ts",
+    "build:goodies": "esbuild pi/bermudis-pi-goodies/index.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=pi/bermudis-pi-goodies/bermudis-pi-goodies.bundle.ts",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"pi/**/*.ts\""
   },

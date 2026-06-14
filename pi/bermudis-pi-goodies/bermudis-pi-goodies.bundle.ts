@@ -1,3 +1,5 @@
+// @ts-nocheck
+
 // pi/bermudis-pi-goodies/copy-with-model.ts
 import { execSync, spawn } from "node:child_process";
 import { platform } from "node:os";
