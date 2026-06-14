@@ -1,5 +1,5 @@
 /**
- * bermundis-pi-goodies — a bundle of small, frequently-used Pi extensions.
+ * bermudis-pi-goodies — a bundle of small, frequently-used Pi extensions.
  *
  * Composes four independent modules, each registering its own commands/hooks
  * against the shared ExtensionAPI:
@@ -14,7 +14,7 @@ import nameWithAi from "./name-with-ai.ts";
 import notify from "./notify.ts";
 import zed from "./zed.ts";
 
-export default function bermundisPiGoodies(pi: ExtensionAPI) {
+export default function bermudisPiGoodies(pi: ExtensionAPI) {
   copyWithModel(pi);
   nameWithAi(pi);
   notify(pi);

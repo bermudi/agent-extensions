@@ -1,4 +1,4 @@
-# bermundis-pi-goodies
+# bermudis-pi-goodies
 
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
 extensions. One entry point, four independent features.
@@ -13,7 +13,7 @@ extensions. One entry point, four independent features.
 ## Install
 
 ```bash
-ln -s "$PWD/index.ts" ~/.pi/agent/extensions/bermundis-pi-goodies.ts
+ln -s "$PWD/index.ts" ~/.pi/agent/extensions/bermudis-pi-goodies.ts
 ```
 
 Then `/reload` in Pi. Each feature is independent — disabling one is a one-line

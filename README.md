@@ -15,7 +15,7 @@ Over time this grew into a few substantial projects, which have since been
 ```
 agent-extensions/
 ├── pi/
-│   ├── bermundis-pi-goodies/   # ACTIVE — copy-with-model, name-with-ai, notify, zed (one bundle)
+│   ├── bermudis-pi-goodies/   # ACTIVE — copy-with-model, name-with-ai, notify, zed (one bundle)
 │   ├── cc-cwd/                 # ACTIVE — injects project context into CommandCode proxy requests
 │   ├── diff/                   # ACTIVE — (project-local install)
 │   ├── session-summarizer/     # ACTIVE — (project-local install)
@@ -30,7 +30,7 @@ agent-extensions/
 
 The four extensions I actually use, kept at `pi/` root:
 
-- **bermundis-pi-goodies** — `/copy-with-model`, `/name-with-ai`, `/z`, and an
+- **bermudis-pi-goodies** — `/copy-with-model`, `/name-with-ai`, `/z`, and an
   `agent_end` desktop notification. Installed globally (as a bundle — see below).
 - **cc-cwd** — injects working dir, git state, AGENTS.md, and skills into
   CommandCode proxy requests. Installed globally.
@@ -47,17 +47,17 @@ will. Notable: `arena`, `roundtable`, `trim-context`, `pi-debate`, `session-refe
 
 Pi loads extensions via Node, which resolves relative imports against the
 symlink path — so multi-file extensions must ship as a **bundle**. The
-`bermundis-pi-goodies` bundle is committed; rebuild it after editing the source:
+`bermudis-pi-goodies` bundle is committed; rebuild it after editing the source:
 
 ```bash
-bun run build:goodies   # regenerates pi/bermundis-pi-goodies/bermundis-pi-goodies.bundle.ts
+bun run build:goodies   # regenerates pi/bermudis-pi-goodies/bermudis-pi-goodies.bundle.ts
 ```
 
 Symlink into the desired scope:
 
 ```bash
 # Global (all projects) — multi-file ext: point at the bundle
-ln -sf "$PWD/pi/bermundis-pi-goodies/bermundis-pi-goodies.bundle.ts" ~/.pi/agent/extensions/bermundis-pi-goodies.ts
+ln -sf "$PWD/pi/bermudis-pi-goodies/bermudis-pi-goodies.bundle.ts" ~/.pi/agent/extensions/bermudis-pi-goodies.ts
 
 # Global — single-file ext: point at the source directly
 ln -sf "$PWD/pi/cc-cwd/cc-cwd.ts" ~/.pi/agent/extensions/cc-cwd.ts

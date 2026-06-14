@@ -1,4 +1,4 @@
-// pi/bermundis-pi-goodies/copy-with-model.ts
+// pi/bermudis-pi-goodies/copy-with-model.ts
 import { execSync, spawn } from "node:child_process";
 import { platform } from "node:os";
 function copyToClipboard(text) {
@@ -109,7 +109,7 @@ function copy_with_model_default(pi) {
   });
 }
 
-// pi/bermundis-pi-goodies/name-with-ai.ts
+// pi/bermudis-pi-goodies/name-with-ai.ts
 import { Agent } from "@mariozechner/pi-agent-core";
 import { streamSimple } from "@mariozechner/pi-ai";
 import { convertToLlm } from "@mariozechner/pi-coding-agent";
@@ -249,7 +249,7 @@ function nameWithAiExtension(pi) {
   });
 }
 
-// pi/bermundis-pi-goodies/notify.ts
+// pi/bermudis-pi-goodies/notify.ts
 import { execFile } from "node:child_process";
 import { platform as platform2 } from "node:os";
 function notifyOSC99(title, body) {
@@ -303,7 +303,7 @@ function notify_default(pi) {
   });
 }
 
-// pi/bermundis-pi-goodies/zed.ts
+// pi/bermudis-pi-goodies/zed.ts
 import { spawn as spawn2 } from "node:child_process";
 function zed_default(pi) {
   const zedBin = process.platform === "linux" ? "zeditor" : "zed";
@@ -320,13 +320,13 @@ function zed_default(pi) {
   });
 }
 
-// pi/bermundis-pi-goodies/index.ts
-function bermundisPiGoodies(pi) {
+// pi/bermudis-pi-goodies/index.ts
+function bermudisPiGoodies(pi) {
   copy_with_model_default(pi);
   nameWithAiExtension(pi);
   notify_default(pi);
   zed_default(pi);
 }
 export {
-  bermundisPiGoodies as default
+  bermudisPiGoodies as default
 };
