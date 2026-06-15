@@ -21,7 +21,7 @@ agent-extensions/
 │   ├── session-summarizer/     # ACTIVE — (project-local install)
 │   └── experiments/            # ARCHIVE — exploratory/unused extensions (see below)
 ├── reference/                  # third-party extensions, read-only (study only)
-├── docs/                       # notes + ADRs
+├── docs/                       # notes + ADRs (incl. pi-extension-tool-api.md — registerTool reference)
 ├── scripts/                    # one-off utilities
 └── mcp/                        # MCP server experiments
 ```
