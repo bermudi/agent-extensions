@@ -251,60 +251,6 @@ function nameWithAiExtension(pi) {
   });
 }
 
-// pi/bermudis-pi-goodies/notify.ts
-import { execFile } from "node:child_process";
-import { platform as platform2 } from "node:os";
-function notifyOSC99(title, body) {
-  process.stdout.write(`\x1B]99;i=1:d=1:p=${title};${body}\x1B\\`);
-}
-function notifyMacOS(title, body) {
-  execFile("osascript", [
-    "-e",
-    `display notification "${body}" with title "${title}"`
-  ]);
-}
-function notifyWindows(title, body) {
-  const type = "Windows.UI.Notifications";
-  const mgr = `[${type}.ToastNotificationManager, ${type}, ContentType = WindowsRuntime]`;
-  const template = `[${type}.ToastTemplateType]::ToastText01`;
-  const toast = `[${type}.ToastNotification]::new($xml)`;
-  const script = [
-    `${mgr} > $null`,
-    `$xml = [${type}.ToastNotificationManager]::GetTemplateContent(${template})`,
-    `$xml.GetElementsByTagName('text')[0].AppendChild($xml.CreateTextNode('${body}')) > $null`,
-    `[${type}.ToastNotificationManager]::CreateToastNotifier('${title}').Show(${toast})`
-  ].join("; ");
-  execFile("powershell.exe", ["-NoProfile", "-Command", script], (err) => {
-    if (err) fallback();
-  });
-}
-function notifyLibnotify(title, body) {
-  execFile("notify-send", [title, body], (err) => {
-    if (err) fallback();
-  });
-}
-function fallback() {
-  process.stdout.write("\x07");
-}
-function notify(title, body) {
-  if (process.env.WT_SESSION) {
-    notifyWindows(title, body);
-  } else if (platform2() === "darwin") {
-    notifyMacOS(title, body);
-  } else if (process.env.KITTY_WINDOW_ID) {
-    notifyOSC99(title, body);
-  } else if (process.env.ALACRITTY_WINDOW_ID) {
-    fallback();
-  } else {
-    notifyLibnotify(title, body);
-  }
-}
-function notify_default(pi) {
-  pi.on("agent_end", async () => {
-    notify("Pi", "Ready for input");
-  });
-}
-
 // pi/bermudis-pi-goodies/zed.ts
 import { spawn as spawn2 } from "node:child_process";
 function zed_default(pi) {
@@ -326,7 +272,6 @@ function zed_default(pi) {
 function bermudisPiGoodies(pi) {
   copy_with_model_default(pi);
   nameWithAiExtension(pi);
-  notify_default(pi);
   zed_default(pi);
 }
 export {
