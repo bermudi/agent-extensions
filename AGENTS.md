@@ -6,7 +6,7 @@ Personal repo for Pi coding agent extensions.
 
 ```
 pi/
-  bermudis-pi-goodies/   # ACTIVE (global): copy-with-model, name-with-ai, notify, zed
+  bermudis-pi-goodies/   # ACTIVE (global): copy-with-model, name-with-ai, zed
   diff/                   # ACTIVE (project-local)
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
   session-summarizer/     # ACTIVE (project-local)
