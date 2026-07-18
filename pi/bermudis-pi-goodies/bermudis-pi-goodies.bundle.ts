@@ -1,6 +1,6 @@
 // @ts-nocheck
 
-// pi/bermudis-pi-goodies/copy-with-model.ts
+// copy-with-model.ts
 import { execSync, spawn } from "node:child_process";
 import { platform } from "node:os";
 function copyToClipboard(text) {
@@ -111,10 +111,10 @@ function copy_with_model_default(pi) {
   });
 }
 
-// pi/bermudis-pi-goodies/name-with-ai.ts
-import { Agent } from "@mariozechner/pi-agent-core";
-import { streamSimple } from "@mariozechner/pi-ai";
-import { convertToLlm } from "@mariozechner/pi-coding-agent";
+// name-with-ai.ts
+import { Agent } from "@earendil-works/pi-agent-core";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
+import { convertToLlm } from "@earendil-works/pi-coding-agent";
 var NAMING_PROMPT = [
   "You are a session naming engine. Given a user's message, produce a short, descriptive session name.",
   "",
@@ -251,7 +251,7 @@ function nameWithAiExtension(pi) {
   });
 }
 
-// pi/bermudis-pi-goodies/zed.ts
+// zed.ts
 import { spawn as spawn2 } from "node:child_process";
 function zed_default(pi) {
   const zedBin = process.platform === "linux" ? "zeditor" : "zed";
@@ -268,7 +268,7 @@ function zed_default(pi) {
   });
 }
 
-// pi/bermudis-pi-goodies/index.ts
+// index.ts
 function bermudisPiGoodies(pi) {
   copy_with_model_default(pi);
   nameWithAiExtension(pi);

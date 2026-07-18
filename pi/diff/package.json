@@ -1,0 +1,13 @@
+{
+  "name": "diff",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"*.ts\""
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "prettier": "^3.8.4"
+  }
+}

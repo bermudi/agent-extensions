@@ -1,0 +1,21 @@
+{
+  "name": "experiments",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "format": "prettier --write \"**/*.ts\""
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.80.10",
+    "@earendil-works/pi-ai": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@earendil-works/pi-tui": "^0.80.10",
+    "@marcfargas/pi-test-harness": "^0.6.1",
+    "@sinclair/typebox": "^0.34.0",
+    "prettier": "^3.8.4"
+  },
+  "patchedDependencies": {
+    "@marcfargas/pi-test-harness@0.6.1": "patches/@marcfargas%2Fpi-test-harness@0.6.1.patch"
+  }
+}

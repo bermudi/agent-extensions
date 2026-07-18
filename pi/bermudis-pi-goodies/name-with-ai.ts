@@ -9,9 +9,9 @@
  *   /name-with-ai <name>  — set manually (fallback passthrough)
  */
 
-import { Agent, type ThinkingLevel } from "@mariozechner/pi-agent-core";
-import { type Api, type Model, streamSimple } from "@mariozechner/pi-ai";
-import { convertToLlm, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Agent, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { type Api, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
+import { convertToLlm, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const NAMING_PROMPT = [
   "You are a session naming engine. Given a user's message, produce a short, descriptive session name.",

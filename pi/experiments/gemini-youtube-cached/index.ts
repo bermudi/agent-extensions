@@ -22,7 +22,7 @@
  * Requires: GEMINI_API_KEY in env or Pi's auth.json
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── YouTube URL detection ──────────────────────────────────────────────────
 

@@ -14,7 +14,7 @@
  * Place in: ~/.pi/agent/extensions/gemini-youtube/index.ts
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // YouTube URL patterns
 const YOUTUBE_PATTERNS = [

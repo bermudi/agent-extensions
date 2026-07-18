@@ -7,7 +7,7 @@
  *   - name-with-ai     /name-with-ai     generate a session name via the model
  *   - zed              /z                open Zed on cwd
  */
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import copyWithModel from "./copy-with-model.ts";
 import nameWithAi from "./name-with-ai.ts";
 import zed from "./zed.ts";

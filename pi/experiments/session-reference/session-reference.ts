@@ -8,7 +8,7 @@
  *
  * Also provides /sessions command for interactive browsing.
  */
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";

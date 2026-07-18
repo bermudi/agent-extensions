@@ -10,13 +10,10 @@
     "allowImportingTsExtensions": true
   },
   "include": [
-    "pi/**/*.ts"
+    "./**/*.ts"
   ],
   "exclude": [
     "node_modules",
-    "reference",
-    "pi/experiments",
-    "**/*.bundle.ts",
     "**/*.test.ts",
     "**/__tests__/**"
   ]

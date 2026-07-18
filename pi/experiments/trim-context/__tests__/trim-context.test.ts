@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { AgentMessage } from "@mariozechner/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-ai/compat";
 
 // We test the pure helper functions by re-implementing the exports.
 // Since the extension doesn't export helpers, we test the logic inline.

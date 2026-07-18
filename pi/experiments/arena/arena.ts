@@ -16,13 +16,13 @@ import {
   type Model,
   type Api,
   type UserMessage,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai/compat";
 import {
   type ExtensionAPI,
   type ExtensionContext,
   type ModelRegistry,
-} from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 // ── Types ─────────────────────────────────────────────────────────────────

@@ -13,20 +13,20 @@ import {
   type AgentEvent,
   type AgentMessage,
   type ThinkingLevel,
-} from "@mariozechner/pi-agent-core";
-import { type Api, type Model, streamSimple } from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-agent-core";
+import { type Api, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import {
   buildSessionContext,
   convertToLlm,
   type ExtensionAPI,
   type ExtensionContext,
   type ModelRegistry,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   matchesKey,
   truncateToWidth,
   visibleWidth,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 // ── Types ────────────────────────────────────────────────────────────────
 

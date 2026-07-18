@@ -20,8 +20,8 @@ import {
   type AgentMessage,
   type AgentTool,
   type ThinkingLevel,
-} from "@mariozechner/pi-agent-core";
-import { type Api, type Model, streamSimple } from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-agent-core";
+import { type Api, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import {
   convertToLlm,
   createBashTool,
@@ -35,8 +35,8 @@ import {
   getMarkdownTheme,
   keyHint,
   type ModelRegistry,
-} from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 // ── Types ────────────────────────────────────────────────────────────────

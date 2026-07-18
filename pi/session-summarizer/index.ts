@@ -12,16 +12,16 @@
  *   - UUID or path: summarize an arbitrary session
  */
 
-import { complete } from "@mariozechner/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   DynamicBorder,
   getMarkdownTheme,
-} from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, matchesKey, Text } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { resolve, basename } from "node:path";
 import { homedir } from "node:os";
