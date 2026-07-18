@@ -35,6 +35,16 @@ function claudeSupportsEffort(model: string): boolean {
   );
 }
 
+// Models that do not support the Responses API and must use Chat Completions.
+// These run web_search and embed citations inline as [[N]](url).
+const COMPLETIONS_ONLY_MODELS = ["grok-4.5"];
+
+function isCompletionsOnlyModel(model: string): boolean {
+  return COMPLETIONS_ONLY_MODELS.some(
+    (m) => model === m || model.toLowerCase() === m.toLowerCase(),
+  );
+}
+
 // --- Source extraction ---
 
 /**
@@ -157,6 +167,54 @@ async function researchViaMessagesAPI(
   return { text: text || "No response received.", sources };
 }
 
+// --- Chat Completions API helper (Grok etc.) ---
+
+interface CompletionsAPIResult {
+  text: string;
+  sources: string[];
+}
+
+/**
+ * Extract source URLs from a Chat Completions result. Grok embeds inline
+ * [[N]](url) citations directly in the message content.
+ */
+function extractSourcesChatCompletions(content: string): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  const pattern = /\[\[\d+\]\]\((https?:\/\/[^)\s]+)\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(content)) !== null) {
+    if (!seen.has(match[1])) {
+      seen.add(match[1]);
+      result.push(match[1]);
+    }
+  }
+  return result;
+}
+
+/**
+ * Research via Chat Completions API (Grok and other Responses-unsupported
+ * models). These models run web_search by default and embed citations inline.
+ */
+async function researchViaChatCompletions(
+  model: string,
+  prompt: string,
+  reasoning?: "low" | "medium" | "high",
+): Promise<CompletionsAPIResult> {
+  const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
+    model,
+    messages: [{ role: "user", content: prompt }],
+  };
+  if (reasoning) {
+    params.reasoning_effort = reasoning;
+  }
+
+  const response = await client.chat.completions.create(params);
+  const content = response.choices[0]?.message?.content || "No response received.";
+  const sources = extractSourcesChatCompletions(content);
+  return { text: content, sources };
+}
+
 // --- Tools ---
 
 server.tool(
@@ -168,7 +226,7 @@ server.tool(
       .string()
       .optional()
       .describe(
-        `Poe model to use (default: ${DEFAULT_MODEL}). Examples: GPT-5.4, Claude-Sonnet-4.6`,
+        `Poe model to use (default: ${DEFAULT_MODEL}). Examples: GPT-5.4, Claude-Sonnet-4.6, grok-4.5`,
       ),
     reasoning: z
       .enum(["low", "medium", "high"])
@@ -184,6 +242,17 @@ server.tool(
       // Route Claude models through Messages API for proper web search support
       if (isClaudeModel(modelId)) {
         const { text, sources } = await researchViaMessagesAPI(modelId, query, reasoning);
+
+        let result = text;
+        if (sources.length > 0) {
+          result += "\n\n## Sources\n" + sources.map((s) => `- ${s}`).join("\n");
+        }
+        return { content: [{ type: "text", text: result }] };
+      }
+
+      // Completions-only models (e.g. grok-4.5): Chat Completions with web_search
+      if (isCompletionsOnlyModel(modelId)) {
+        const { text, sources } = await researchViaChatCompletions(modelId, query, reasoning);
 
         let result = text;
         if (sources.length > 0) {
@@ -246,6 +315,26 @@ server.tool(
 
         // Step 2
         const step2 = await researchViaMessagesAPI(
+          modelId,
+          `Based on these initial research findings, identify any gaps, contradictions, or areas needing more detail. Then search for additional information to fill those gaps and produce a final comprehensive report.\n\nInitial findings:\n${step1.text}\n\nOriginal topic: ${topic}`,
+        );
+
+        const allSources = [...new Set([...step1.sources, ...step2.sources])];
+        let result = step2.text;
+        if (allSources.length > 0) {
+          result += "\n\n## Sources\n" + allSources.map((s) => `- ${s}`).join("\n");
+        }
+        return { content: [{ type: "text", text: result }] };
+      }
+
+      // Completions-only models (e.g. grok-4.5): Chat Completions with web_search
+      if (isCompletionsOnlyModel(modelId)) {
+        const step1 = await researchViaChatCompletions(
+          modelId,
+          `Research the following topic thoroughly. Provide key facts, recent developments, different perspectives, and cite sources.\n\nTopic: ${topic}`,
+        );
+
+        const step2 = await researchViaChatCompletions(
           modelId,
           `Based on these initial research findings, identify any gaps, contradictions, or areas needing more detail. Then search for additional information to fill those gaps and produce a final comprehensive report.\n\nInitial findings:\n${step1.text}\n\nOriginal topic: ${topic}`,
         );
