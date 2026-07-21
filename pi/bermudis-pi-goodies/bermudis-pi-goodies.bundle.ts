@@ -113,8 +113,12 @@ function copy_with_model_default(pi) {
 
 // name-with-ai.ts
 import { Agent } from "@earendil-works/pi-agent-core";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
-import { convertToLlm } from "@earendil-works/pi-coding-agent";
+import {
+  streamSimple
+} from "@earendil-works/pi-ai/compat";
+import {
+  convertToLlm
+} from "@earendil-works/pi-coding-agent";
 var NAMING_PROMPT = [
   "You are a session naming engine. Given a user's message, produce a short, descriptive session name.",
   "",
@@ -268,11 +272,49 @@ function zed_default(pi) {
   });
 }
 
+// prefer-tools.ts
+import {
+  isToolCallEventType
+} from "@earendil-works/pi-coding-agent";
+function cmdToken(token) {
+  return new RegExp(`(?:^|[\\n|;&<>()/])\\s*(?:sudo\\s+)?${token}\\b`);
+}
+var RULES = [
+  {
+    re: cmdToken("rm"),
+    reason: "rm is blocked \u2014 use `trash` instead (recoverable beats gone)"
+  },
+  {
+    re: cmdToken("[eEfF]?grep"),
+    reason: "grep is blocked \u2014 use `rg` (ripgrep) instead"
+  },
+  {
+    re: cmdToken("find"),
+    reason: "find is blocked \u2014 use `fd` instead"
+  },
+  {
+    re: cmdToken("(?:python3?|pip3?|pytest|mypy)"),
+    reason: "bare python/pip/pytest/mypy are blocked \u2014 use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)"
+  }
+];
+function preferTools(pi) {
+  pi.on("tool_call", async (event, _ctx) => {
+    if (!isToolCallEventType("bash", event)) return;
+    const command = event.input.command ?? "";
+    for (const { re, reason } of RULES) {
+      if (re.test(command)) {
+        return { block: true, reason };
+      }
+    }
+  });
+}
+
 // index.ts
 function bermudisPiGoodies(pi) {
   copy_with_model_default(pi);
   nameWithAiExtension(pi);
   zed_default(pi);
+  preferTools(pi);
 }
 export {
   bermudisPiGoodies as default
