@@ -6,7 +6,7 @@
  *   - copy-with-model  /copy-with-model  copy last reply tagged with the model
  *   - name-with-ai     /name-with-ai     generate a session name via the model
  *   - zed              /z                open Zed on cwd
- *   - prefer-tools    hook               block `rm` (use trash) + nudge rg/fd/uv
+ *   - prefer-tools    hook               block legacy tools (use trash/rg/fd/uv)
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import copyWithModel from "./copy-with-model.ts";
