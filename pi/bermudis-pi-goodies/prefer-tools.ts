@@ -6,8 +6,6 @@
  * substitutions, arithmetic, and plain arguments are ignored.
  *
  *   rm                  -> trash
- *   grep/egrep/fgrep    -> rg
- *   find                -> fd
  *   python/pip/pytest/  -> uv
  *     mypy
  */
@@ -25,14 +23,6 @@ const RULES: Rule[] = [
   {
     names: ["rm"],
     reason: "rm is blocked — use `trash` instead (recoverable beats gone)",
-  },
-  {
-    names: ["grep", "egrep", "Egrep", "fgrep", "Fgrep"],
-    reason: "grep is blocked — use `rg` (ripgrep) instead",
-  },
-  {
-    names: ["find"],
-    reason: "find is blocked — use `fd` instead",
   },
   {
     names: ["python", "python3", "pip", "pip3", "pytest", "mypy"],

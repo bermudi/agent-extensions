@@ -282,14 +282,6 @@ var RULES = [
     reason: "rm is blocked \u2014 use `trash` instead (recoverable beats gone)"
   },
   {
-    names: ["grep", "egrep", "Egrep", "fgrep", "Fgrep"],
-    reason: "grep is blocked \u2014 use `rg` (ripgrep) instead"
-  },
-  {
-    names: ["find"],
-    reason: "find is blocked \u2014 use `fd` instead"
-  },
-  {
     names: ["python", "python3", "pip", "pip3", "pytest", "mypy"],
     reason: "bare python/pip/pytest/mypy are blocked \u2014 use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)"
   }
