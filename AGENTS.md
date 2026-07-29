@@ -10,6 +10,7 @@ pi/
   diff/                   # ACTIVE (project-local)
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
   session-summarizer/     # ACTIVE (project-local)
+  kilo/                   # Kilo gateway provider (OpenRouter-compatible). NOT YET symlinked.
   experiments/            # ARCHIVE — unused/exploratory. Not typechecked, not in default test run.
 reference/                # third-party extensions, READ-ONLY. Study only, never edit/import/test.
 ```
