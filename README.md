@@ -14,29 +14,29 @@ Over time this grew into a few substantial projects, which have since been
 
 ```
 agent-extensions/
-├── pi/
-│   ├── bermudis-pi-goodies/   # ACTIVE — copy-with-model, name-with-ai, notify, zed (one bundle)
-│   ├── cc-cwd/                 # ACTIVE — injects project context into CommandCode proxy requests
-│   ├── diff/                   # ACTIVE — (project-local install)
-│   ├── session-summarizer/     # ACTIVE — (project-local install)
-│   └── experiments/            # ARCHIVE — exploratory/unused extensions (see below)
-├── reference/                  # third-party extensions, read-only (study only)
-├── docs/                       # notes + ADRs (incl. pi-extension-tool-api.md — registerTool reference)
-├── scripts/                    # one-off utilities
-└── mcp/                        # MCP server experiments
+├── pi-packages/
+│   ├── bermudis-pi-goodies/   # ACTIVE (global bundle): copy-with-model, name-with-ai,
+│   │                          #   zed, prefer-tools, kilo provider, provider-balance
+│   ├── diff/                  # ACTIVE (project-local install)
+│   ├── external-changes/      # ACTIVE (project-local install): diff of changes between agent runs
+│   ├── session-summarizer/    # ACTIVE (project-local install)
+│   └── experiments/           # ARCHIVE — exploratory/unused extensions (see below)
+└── mcp/                       # MCP server experiments
 ```
+
+Each extension is a **fully isolated package** — its own `package.json`,
+`tsconfig.json`, `node_modules/`, and `bun.lock`. There is no root `package.json`
+or root tooling; always work inside an extension directory.
 
 ### Active extensions
 
-The four extensions I actually use, kept at `pi/` root:
+- **bermudis-pi-goodies** — `/copy-with-model`, `/name-with-ai`, `/z`, the
+  `prefer-tools` hook, the Kilo provider, and the provider-balance footer.
+  Installed globally as an esbuild bundle (multi-file ext — see Install).
+- **diff** / **external-changes** / **session-summarizer** — installed
+  project-local (`.pi/extensions/`).
 
-- **bermudis-pi-goodies** — `/copy-with-model`, `/name-with-ai`, `/z`, and an
-  `agent_end` desktop notification. Installed globally (as a bundle — see below).
-- **cc-cwd** — injects working dir, git state, AGENTS.md, and skills into
-  CommandCode proxy requests. Installed globally.
-- **diff** / **session-summarizer** — installed project-local (`.pi/extensions/`).
-
-### Experiments (`pi/experiments/`)
+### Experiments (`pi-packages/experiments/`)
 
 Everything else — exploratory builds, abandoned ideas, research notes. Not gated
 by typecheck or the default test run. A few still have passing tests; revive at
@@ -50,32 +50,35 @@ symlink path — so multi-file extensions must ship as a **bundle**. The
 `bermudis-pi-goodies` bundle is committed; rebuild it after editing the source:
 
 ```bash
-bun run build:goodies   # regenerates pi/bermudis-pi-goodies/bermudis-pi-goodies.bundle.ts
+cd pi-packages/bermudis-pi-goodies && bun run build
+# regenerates bermudis-pi-goodies.bundle.ts
 ```
 
 Symlink into the desired scope:
 
 ```bash
 # Global (all projects) — multi-file ext: point at the bundle
-ln -sf "$PWD/pi/bermudis-pi-goodies/bermudis-pi-goodies.bundle.ts" ~/.pi/agent/extensions/bermudis-pi-goodies.ts
+ln -sf "$PWD/pi-packages/bermudis-pi-goodies/bermudis-pi-goodies.bundle.ts" ~/.pi/agent/extensions/bermudis-pi-goodies.ts
 
-# Global — single-file ext: point at the source directly
-ln -sf "$PWD/pi/cc-cwd/cc-cwd.ts" ~/.pi/agent/extensions/cc-cwd.ts
-
-# Project-local (this repo only)
-ln -sf "$PWD/pi/diff/diff.ts" .pi/extensions/diff.ts
+# Project-local (this repo only) — single-file ext: point at the source
+ln -sf "$PWD/pi-packages/diff/diff.ts" .pi/extensions/diff.ts
+ln -sf "$PWD/pi-packages/external-changes/external-changes.ts" .pi/extensions/external-changes.ts
+ln -sf "$PWD/pi-packages/session-summarizer/index.ts" .pi/extensions/session-summarizer.ts
 ```
 
-Then `/reload` in Pi.
+Then `/reload` in Pi. Don't install globally without asking.
 
 ## Develop
 
+There are no root scripts — run everything inside the extension you're touching:
+
 ```bash
-bun install
-bun run typecheck     # active extensions (experiments excluded)
-bun run test          # active + experiments (129 tests, no short-circuit)
-bun run test:active   # active extensions only
-bun run format        # prettier
+cd pi-packages/<ext>
+bun install        # first time only
+bun run typecheck  # active extensions (experiments has no typecheck script)
+bun run test       # extensions that have tests
+bun run format     # prettier on that extension's .ts files
+bun run build      # bermudis-pi-goodies only (esbuild bundle)
 ```
 
 For the extracted projects, develop in their own repos (`../pi-delegate`,
@@ -83,7 +86,9 @@ For the extracted projects, develop in their own repos (`../pi-delegate`,
 
 ## Adding a new extension
 
-1. Create `pi/<name>/<name>.ts` (or a dir with an `index.ts`).
-2. If it's a keeper, leave it at `pi/` root. If experimental, drop it in `pi/experiments/`.
-3. Symlink into Pi's discovery path when ready (don't install globally without asking).
-4. `bun run typecheck` and `bun run test` to verify.
+1. Create `pi-packages/<name>/<name>.ts` (or a dir with an `index.ts`) plus its
+   own `package.json` / `tsconfig.json`.
+2. If it's a keeper, leave it at `pi-packages/` root. If experimental, drop it
+   in `pi-packages/experiments/`.
+3. `cd` in and run `bun install`, then `bun run typecheck` / `bun run test`.
+4. Symlink into Pi's discovery path when ready (don't install globally without asking).

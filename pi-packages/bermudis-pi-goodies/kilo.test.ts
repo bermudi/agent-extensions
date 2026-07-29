@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   abortableSleep,
-  formatCredits,
   getKiloModelCompat,
   getKiloThinkingLevelMap,
   isFreeModel,
+  modelSupportsReasoning,
   parsePrice,
   shouldUseResponsesApi,
   thinkingLevelMapFromVariants,
@@ -31,19 +31,6 @@ describe("parsePrice", () => {
     expect(parsePrice(null)).toBe(0);
     expect(parsePrice("")).toBe(0);
     expect(parsePrice("not-a-number")).toBe(0);
-  });
-});
-
-describe("formatCredits", () => {
-  test("compact form above 1000", () => {
-    expect(formatCredits(1500)).toBe("$1.5k");
-    expect(formatCredits(25000)).toBe("$25.0k");
-  });
-
-  test("two-decimal form below 1000", () => {
-    expect(formatCredits(0)).toBe("$0.00");
-    expect(formatCredits(12.5)).toBe("$12.50");
-    expect(formatCredits(999.999)).toBe("$1000.00");
   });
 });
 
@@ -142,6 +129,44 @@ describe("getKiloModelCompat", () => {
   });
 });
 
+describe("modelSupportsReasoning", () => {
+  test("trusts the supported_parameters declaration", () => {
+    expect(
+      modelSupportsReasoning({
+        ...model("qwen/qwen3.7-flash"),
+        supported_parameters: ["reasoning"],
+      }),
+    ).toBe(true);
+  });
+
+  test("recognizes enabled reasoning variants when the parameter is omitted", () => {
+    expect(
+      modelSupportsReasoning({
+        ...model("qwen/qwen3.7-flash"),
+        opencode: {
+          variants: {
+            instant: { reasoning: { enabled: false, effort: "none" } },
+            thinking: { reasoning: { enabled: true, effort: "high" } },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  test("does not treat an off-only variant as reasoning support", () => {
+    expect(
+      modelSupportsReasoning({
+        ...model("some-model"),
+        opencode: {
+          variants: {
+            none: { reasoning: { enabled: false, effort: "none" } },
+          },
+        },
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("thinkingLevelMapFromVariants", () => {
   test("maps each level from variant reasoning efforts", () => {
     const variants = {
@@ -158,6 +183,7 @@ describe("thinkingLevelMapFromVariants", () => {
       medium: "medium",
       high: "high",
       xhigh: "xhigh",
+      max: null,
     });
   });
 
@@ -175,16 +201,40 @@ describe("thinkingLevelMapFromVariants", () => {
       medium: null,
       high: "high",
       xhigh: "xhigh",
+      max: null,
     });
   });
 
-  test("a 'max' variant surfaces as xhigh when xhigh is absent", () => {
+  test("descriptive variants map by their declared effort", () => {
+    const variants = {
+      instant: { reasoning: { enabled: false, effort: "none" } },
+      thinking: { reasoning: { enabled: true, effort: "high" } },
+    };
+    expect(thinkingLevelMapFromVariants(variants)).toEqual({
+      off: "none",
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: null,
+    });
+  });
+
+  test("max remains distinct from xhigh", () => {
     const variants = {
       high: { reasoning: { enabled: true, effort: "high" } },
+      xhigh: { reasoning: { enabled: true, effort: "xhigh" } },
       max: { reasoning: { enabled: true, effort: "max" } },
     };
-    const map = thinkingLevelMapFromVariants(variants)!;
-    expect(map.xhigh).toBe("max");
+    expect(thinkingLevelMapFromVariants(variants)).toEqual({
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    });
   });
 
   test("empty / missing variants yield undefined", () => {
@@ -212,6 +262,7 @@ describe("getKiloThinkingLevelMap", () => {
       medium: null,
       high: "high",
       xhigh: "xhigh",
+      max: null,
     });
   });
 
@@ -221,7 +272,8 @@ describe("getKiloThinkingLevelMap", () => {
       low: null,
       medium: null,
       high: "high",
-      xhigh: "max",
+      xhigh: null,
+      max: "max",
     });
   });
 });

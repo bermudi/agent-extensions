@@ -4,9 +4,9 @@
  * Access 300+ models via the Kilo Gateway (OpenRouter-compatible) at api.kilo.ai.
  * Device-code flow for browser-based login, or set KILO_API_KEY.
  *
- * Install (project-local):
- *   ln -s pi/kilo/kilo.ts .pi/extensions/kilo.ts
- *   # then /login kilo  (or export KILO_API_KEY=...)
+ * This module is bundled by bermudis-pi-goodies. Use /login kilo or
+ * KILO_API_KEY after installing the goodies bundle; do not install this file
+ * separately alongside the bundle.
  *
  * Design notes (pi 0.82.x):
  *  - Reads auth via the public ModelRegistry API (getApiKeyForProvider /
@@ -15,8 +15,6 @@
  *    hook. The framework calls it on startup and after login; when
  *    authenticated it returns the full Kilo catalog, otherwise it returns
  *    nothing and the configured free-model fallback list stays in place.
- *  - Credits are surfaced through ui.setStatus("kilo-credits", ...) which the
- *    built-in footer already renders inline — no custom footer needed.
  */
 
 import type {
@@ -26,7 +24,6 @@ import type {
 } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
-  ExtensionContext,
   ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
 
@@ -41,52 +38,14 @@ const KILO_GATEWAY_BASE = `${KILO_API_BASE}/api/gateway`;
 // chat completions for these is rejected by the gateway ("please use responses").
 const KILO_OPENROUTER_BASE = `${KILO_API_BASE}/api/openrouter`;
 const KILO_DEVICE_AUTH_ENDPOINT = `${KILO_API_BASE}/api/device-auth/codes`;
-const KILO_PROFILE_ENDPOINT = `${KILO_API_BASE}/api/profile`;
-const KILO_TOS_URL = "https://kilo.ai/terms";
-
 const POLL_INTERVAL_MS = 3000;
 const MODELS_FETCH_TIMEOUT_MS = 10_000;
-const BALANCE_FETCH_TIMEOUT_MS = 5_000;
 const LOGIN_REQUEST_TIMEOUT_MS = 15_000;
 // Kilo device-auth tokens are long-lived; treat as effectively non-expiring so
 // pi does not force a re-login every session.
 const TOKEN_EXPIRATION_MS = 365 * 24 * 60 * 60 * 1000; // 1 year
 
 const KILO_PROVIDER_ID = "kilo";
-
-// =============================================================================
-// Balance / credits
-// =============================================================================
-
-interface KiloBalance {
-  balance?: number;
-}
-
-async function fetchKiloBalance(token: string): Promise<number | null> {
-  try {
-    const response = await fetch(`${KILO_PROFILE_ENDPOINT}/balance`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      signal: AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS),
-    });
-    if (!response.ok) return null;
-    const data = (await response.json()) as KiloBalance;
-    return data.balance ?? null;
-  } catch {
-    // Intentionally silent: balance is a cosmetic status indicator. Logging
-    // here would spam the console if the endpoint is down or the token is
-    // rejected. Failure simply leaves the status unchanged. The timeout above
-    // bounds the delay so a stalled endpoint can't block startup/model-select.
-    return null;
-  }
-}
-
-export function formatCredits(balance: number): string {
-  if (balance >= 1000) return `$${(balance / 1000).toFixed(1)}k`;
-  return `$${balance.toFixed(2)}`;
-}
 
 // =============================================================================
 // Device authorization flow
@@ -347,9 +306,19 @@ export function getKiloModelCompat(
   } as NonNullable<ProviderModelConfig["compat"]>;
 }
 
-// Pi's selectable thinking levels. ("max" is a Kilo/OpenCode variant source,
-// not a Pi UI level — see thinkingLevelMapFromVariants.)
-type PiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+// Pi's selectable thinking levels. Kilo/OpenCode may use variant names such
+// as "thinking" instead of Pi level names; see thinkingLevelMapFromVariants.
+type PiThinkingLevel =
+  "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+const PI_THINKING_LEVELS = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
 
 /** Map a Kilo/OpenCode variant to its provider reasoning effort string. */
 function mapVariantEffort(
@@ -375,16 +344,26 @@ export function thinkingLevelMapFromVariants(
     mapVariantEffort(variants, "none") ?? mapVariantEffort(variants, "instant");
   if (off !== undefined) map.off = off;
 
-  for (const level of ["minimal", "low", "medium", "high", "xhigh"] as const) {
+  for (const level of PI_THINKING_LEVELS) {
     const effort = mapVariantEffort(variants, level);
     map[level] = effort === undefined ? null : effort;
   }
 
-  // Pi has no separate "max" thinking level. Expose a Kilo/OpenCode max variant
-  // as Pi's xhigh when xhigh is absent.
-  if (map.xhigh === null) {
-    const max = mapVariantEffort(variants, "max");
-    if (max !== undefined) map.xhigh = max;
+  // Kilo/OpenCode also uses descriptive variant names such as "thinking".
+  // Use the declared effort to place those variants at the corresponding Pi
+  // level (qwen3.7-flash, for example, declares thinking -> effort: high).
+  for (const variantName of Object.keys(variants)) {
+    const effort = mapVariantEffort(variants, variantName);
+    if (
+      !effort ||
+      !PI_THINKING_LEVELS.includes(
+        effort as (typeof PI_THINKING_LEVELS)[number],
+      )
+    ) {
+      continue;
+    }
+    const level = effort as (typeof PI_THINKING_LEVELS)[number];
+    if (map[level] === null) map[level] = effort;
   }
 
   return map as ProviderModelConfig["thinkingLevelMap"];
@@ -403,7 +382,8 @@ export function getKiloThinkingLevelMap(
       low: null,
       medium: null,
       high: "high",
-      xhigh: "max",
+      xhigh: null,
+      max: "max",
     };
   }
 
@@ -423,11 +403,24 @@ export function getKiloThinkingLevelMap(
   return undefined;
 }
 
+export function modelSupportsReasoning(m: OpenRouterModel): boolean {
+  if (m.supported_parameters?.includes("reasoning")) return true;
+
+  // Kilo's catalog sometimes describes reasoning through OpenCode variants
+  // without also listing "reasoning" in supported_parameters. The variants
+  // are still authoritative: an enabled effort variant means Pi must expose
+  // the model's thinking controls.
+  return Object.values(m.opencode?.variants ?? {}).some(
+    (variant) =>
+      variant.reasoning?.enabled === true &&
+      variant.reasoning.effort !== "none",
+  );
+}
+
 function mapOpenRouterModel(m: OpenRouterModel): ProviderModelConfig {
   const inputModalities = m.architecture?.input_modalities ?? ["text"];
   const supportsImages = inputModalities.includes("image");
-  const supportsReasoning =
-    m.supported_parameters?.includes("reasoning") ?? false;
+  const supportsReasoning = modelSupportsReasoning(m);
   const maxTokens =
     m.top_provider?.max_completion_tokens ??
     m.max_completion_tokens ??
@@ -588,63 +581,5 @@ export default async function (pi: ExtensionAPI) {
         return lastFullCatalog ?? freeModels;
       }
     },
-  });
-
-  // --- Credits status -------------------------------------------------------
-  // Written to the status bar via setStatus; pi's built-in footer renders
-  // extension statuses inline, so no custom footer component is required.
-
-  async function refreshCredits(ctx: ExtensionContext): Promise<void> {
-    // Resolved API key is the bearer token for the Kilo profile/balance API
-    // (OAuth access token, or KILO_API_KEY).
-    const token =
-      await ctx.modelRegistry.getApiKeyForProvider(KILO_PROVIDER_ID);
-    if (!token) {
-      ctx.ui.setStatus("kilo-credits", undefined);
-      return;
-    }
-    const balance = await fetchKiloBalance(token);
-    if (balance !== null) {
-      ctx.ui.setStatus(
-        "kilo-credits",
-        ctx.ui.theme.fg("accent", `💰 ${formatCredits(balance)}`),
-      );
-    }
-  }
-
-  // Refresh credits only on session start and when selecting a Kilo model —
-  // not every turn, to avoid a per-turn network call to the balance API.
-  pi.on("session_start", async (_event, ctx) => {
-    await refreshCredits(ctx);
-  });
-
-  pi.on("model_select", async (event, ctx) => {
-    if (event.model?.provider !== KILO_PROVIDER_ID) return;
-    await refreshCredits(ctx);
-  });
-
-  // --- Terms of Service notice (once, for non-OAuth use) --------------------
-  let tosShown = false;
-
-  pi.on("before_agent_start", async (_event, ctx) => {
-    if (tosShown) return;
-    if (ctx.model?.provider !== KILO_PROVIDER_ID) return;
-
-    // OAuth users accepted the ToS in the browser flow; suppress for them.
-    // isUsingOAuth is OAuth-specific, unlike getProviderAuthStatus().source,
-    // which is "stored" for any stored credential (including API keys).
-    if (ctx.model && ctx.modelRegistry.isUsingOAuth(ctx.model)) {
-      tosShown = true;
-      return;
-    }
-
-    tosShown = true;
-    return {
-      message: {
-        customType: "kilo",
-        content: `By using Kilo, you agree to the Terms of Service: ${KILO_TOS_URL}`,
-        display: true,
-      },
-    };
   });
 }

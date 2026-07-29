@@ -111,6 +111,526 @@ function copy_with_model_default(pi) {
   });
 }
 
+// kilo.ts
+var KILO_API_BASE = process.env.KILO_API_URL || "https://api.kilo.ai";
+var KILO_GATEWAY_BASE = `${KILO_API_BASE}/api/gateway`;
+var KILO_OPENROUTER_BASE = `${KILO_API_BASE}/api/openrouter`;
+var KILO_DEVICE_AUTH_ENDPOINT = `${KILO_API_BASE}/api/device-auth/codes`;
+var POLL_INTERVAL_MS = 3e3;
+var MODELS_FETCH_TIMEOUT_MS = 1e4;
+var LOGIN_REQUEST_TIMEOUT_MS = 15e3;
+var TOKEN_EXPIRATION_MS = 365 * 24 * 60 * 60 * 1e3;
+var KILO_PROVIDER_ID = "kilo";
+function abortableSleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error("Login cancelled"));
+    let timeout;
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(new Error("Login cancelled"));
+    };
+    timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function loginAbortSignal(signal) {
+  const timeout = AbortSignal.timeout(LOGIN_REQUEST_TIMEOUT_MS);
+  return signal ? AbortSignal.any([timeout, signal]) : timeout;
+}
+async function initiateDeviceAuth(signal) {
+  const response = await fetch(KILO_DEVICE_AUTH_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: loginAbortSignal(signal)
+  });
+  if (!response.ok) {
+    if (response.status === 429) {
+      throw new Error(
+        "Too many pending authorization requests. Please try again later."
+      );
+    }
+    throw new Error(
+      `Failed to initiate device authorization: ${response.status}`
+    );
+  }
+  return await response.json();
+}
+async function pollDeviceAuth(code, signal) {
+  const response = await fetch(`${KILO_DEVICE_AUTH_ENDPOINT}/${code}`, {
+    signal: loginAbortSignal(signal)
+  });
+  if (response.status === 202) return { status: "pending" };
+  if (response.status === 403) return { status: "denied" };
+  if (response.status === 410) return { status: "expired" };
+  if (!response.ok) {
+    throw new Error(`Failed to poll device authorization: ${response.status}`);
+  }
+  return await response.json();
+}
+async function loginKilo(callbacks) {
+  callbacks.onProgress?.("Initiating device authorization...");
+  const { code, verificationUrl, expiresIn } = await initiateDeviceAuth(
+    callbacks.signal
+  );
+  callbacks.onAuth({
+    url: verificationUrl,
+    instructions: `Enter code: ${code}`
+  });
+  callbacks.onProgress?.("Waiting for browser authorization...");
+  const deadline = Date.now() + expiresIn * 1e3;
+  while (Date.now() < deadline) {
+    if (callbacks.signal?.aborted) throw new Error("Login cancelled");
+    await abortableSleep(POLL_INTERVAL_MS, callbacks.signal);
+    const result = await pollDeviceAuth(code, callbacks.signal);
+    if (result.status === "approved") {
+      if (!result.token) {
+        throw new Error("Authorization approved but no token received");
+      }
+      callbacks.onProgress?.("Login successful!");
+      return {
+        refresh: result.token,
+        access: result.token,
+        expires: Date.now() + TOKEN_EXPIRATION_MS
+      };
+    }
+    if (result.status === "denied") {
+      throw new Error("Authorization denied by user.");
+    }
+    if (result.status === "expired") {
+      throw new Error("Authorization code expired. Please try again.");
+    }
+    const remaining = Math.ceil((deadline - Date.now()) / 1e3);
+    callbacks.onProgress?.(
+      `Waiting for browser authorization... (${remaining}s remaining)`
+    );
+  }
+  throw new Error("Authentication timed out. Please try again.");
+}
+async function refreshKiloToken(credentials) {
+  if (credentials.expires > Date.now()) return credentials;
+  throw new Error(
+    "Kilo token expired. Please run /login kilo to re-authenticate."
+  );
+}
+function parsePrice(price) {
+  if (!price) return 0;
+  const parsed = parseFloat(price);
+  if (isNaN(parsed)) return 0;
+  return parsed * 1e6;
+}
+function isFreeModel(m) {
+  const prompt = parseFloat(m.pricing?.prompt ?? "1");
+  const completion = parseFloat(m.pricing?.completion ?? "1");
+  if (prompt !== 0 || completion !== 0) return false;
+  if (m.id === "kilo-auto/free") return true;
+  if (m.id.includes(":free")) return true;
+  if (!m.id.includes("/")) return true;
+  if (m.id.startsWith("kilo/") || m.id.startsWith("openrouter/")) return true;
+  return false;
+}
+function shouldUseResponsesApi(m) {
+  if (m.opencode?.ai_sdk_provider === "openai") return true;
+  const shortId = m.id.includes("/") ? m.id.split("/").pop() ?? m.id : m.id;
+  const s = shortId.toLowerCase();
+  return s === "gpt-5" || s.startsWith("gpt-5.") || s.startsWith("gpt-5-") || s.startsWith("o1") || s.startsWith("o3") || s.startsWith("o4");
+}
+function getKiloModelCompat(m, api) {
+  if (api === "openai-responses") {
+    return {
+      sessionAffinityFormat: "openai-nosession",
+      supportsLongCacheRetention: false
+    };
+  }
+  return {
+    thinkingFormat: "openrouter",
+    supportsStore: false,
+    ...m.id.startsWith("anthropic/") ? { cacheControlFormat: "anthropic" } : {},
+    ...m.id === "deepseek/deepseek-v4-flash" || m.id === "deepseek/deepseek-v4-pro" ? { requiresReasoningContentOnAssistantMessages: true } : {}
+  };
+}
+var PI_THINKING_LEVELS = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+];
+function mapVariantEffort(variants, key) {
+  const variant = variants?.[key];
+  if (!variant) return void 0;
+  const reasoning = variant.reasoning;
+  if (!reasoning) return key;
+  if (reasoning.enabled === false || reasoning.effort === "none") return "none";
+  return reasoning.effort ?? key;
+}
+function thinkingLevelMapFromVariants(variants) {
+  if (!variants || Object.keys(variants).length === 0) return void 0;
+  const map = {};
+  const off = mapVariantEffort(variants, "none") ?? mapVariantEffort(variants, "instant");
+  if (off !== void 0) map.off = off;
+  for (const level of PI_THINKING_LEVELS) {
+    const effort = mapVariantEffort(variants, level);
+    map[level] = effort === void 0 ? null : effort;
+  }
+  for (const variantName of Object.keys(variants)) {
+    const effort = mapVariantEffort(variants, variantName);
+    if (!effort || !PI_THINKING_LEVELS.includes(
+      effort
+    )) {
+      continue;
+    }
+    const level = effort;
+    if (map[level] === null) map[level] = effort;
+  }
+  return map;
+}
+function getKiloThinkingLevelMap(m) {
+  const fromVariants = thinkingLevelMapFromVariants(m.opencode?.variants);
+  if (fromVariants) return fromVariants;
+  if (m.id === "deepseek/deepseek-v4-pro") {
+    return {
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: "max"
+    };
+  }
+  if (m.id.includes("gpt-5.5")) {
+    return {
+      off: "none",
+      minimal: null,
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh"
+    };
+  }
+  return void 0;
+}
+function modelSupportsReasoning(m) {
+  if (m.supported_parameters?.includes("reasoning")) return true;
+  return Object.values(m.opencode?.variants ?? {}).some(
+    (variant) => variant.reasoning?.enabled === true && variant.reasoning.effort !== "none"
+  );
+}
+function mapOpenRouterModel(m) {
+  const inputModalities = m.architecture?.input_modalities ?? ["text"];
+  const supportsImages = inputModalities.includes("image");
+  const supportsReasoning = modelSupportsReasoning(m);
+  const maxTokens = m.top_provider?.max_completion_tokens ?? m.max_completion_tokens ?? Math.ceil(m.context_length * 0.2);
+  const api = shouldUseResponsesApi(m) ? "openai-responses" : void 0;
+  return {
+    id: m.id,
+    name: m.name,
+    ...api ? { api, baseUrl: KILO_OPENROUTER_BASE } : {},
+    reasoning: supportsReasoning,
+    input: supportsImages ? ["text", "image"] : ["text"],
+    cost: {
+      input: parsePrice(m.pricing?.prompt),
+      output: parsePrice(m.pricing?.completion),
+      cacheRead: parsePrice(m.pricing?.input_cache_read),
+      cacheWrite: parsePrice(m.pricing?.input_cache_write)
+    },
+    contextWindow: m.context_length,
+    maxTokens,
+    thinkingLevelMap: getKiloThinkingLevelMap(m),
+    compat: getKiloModelCompat(m, api)
+  };
+}
+function modelsAbortSignal(signal) {
+  const timeout = AbortSignal.timeout(MODELS_FETCH_TIMEOUT_MS);
+  return signal ? AbortSignal.any([timeout, signal]) : timeout;
+}
+async function fetchKiloModels(options) {
+  const headers = {
+    "Content-Type": "application/json",
+    "User-Agent": "pi-kilo-provider"
+  };
+  if (options?.token) headers.Authorization = `Bearer ${options.token}`;
+  const response = await fetch(`${KILO_GATEWAY_BASE}/models`, {
+    headers,
+    signal: modelsAbortSignal(options?.signal)
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch models: ${response.status} ${response.statusText}`
+    );
+  }
+  const json = await response.json();
+  if (!json.data || !Array.isArray(json.data)) {
+    throw new Error("Invalid models response: missing data array");
+  }
+  return json.data.filter((m) => {
+    const outputMods = m.architecture?.output_modalities ?? [];
+    if (outputMods.includes("image")) return false;
+    if (options?.freeOnly && !isFreeModel(m)) return false;
+    return true;
+  }).map(mapOpenRouterModel);
+}
+var KILO_PROVIDER_CONFIG = {
+  baseUrl: KILO_GATEWAY_BASE,
+  // "$VAR" is pi's env-interpolation syntax; a bare "KILO_API_KEY" would be
+  // treated as a literal key. When unset, this resolves to undefined and the
+  // oauth flow / anonymous free-tier access take over.
+  apiKey: "$KILO_API_KEY",
+  api: "openai-completions",
+  headers: {
+    "X-KILOCODE-EDITORNAME": "Pi",
+    "User-Agent": "pi-kilo-provider"
+  }
+};
+async function kilo_default(pi) {
+  let freeModels = [];
+  let lastFullCatalog = null;
+  try {
+    freeModels = await fetchKiloModels({ freeOnly: true });
+  } catch (error) {
+    console.warn(
+      "[kilo] Failed to fetch free models at startup:",
+      error instanceof Error ? error.message : error
+    );
+  }
+  pi.registerProvider(KILO_PROVIDER_ID, {
+    ...KILO_PROVIDER_CONFIG,
+    models: freeModels,
+    oauth: {
+      name: "Kilo",
+      login: loginKilo,
+      refreshToken: refreshKiloToken,
+      getApiKey: (cred) => cred.access
+    },
+    // Called by the framework on startup (network refresh) and after login /
+    // logout. Resolves the bearer token from either credential kind so both
+    // OAuth and KILO_API_KEY users receive the full catalog.
+    refreshModels: async (context) => {
+      const credential = context.credential;
+      const token = credential?.type === "oauth" ? credential.access : credential?.type === "api_key" ? credential.key ?? null : null;
+      if (!token) {
+        lastFullCatalog = null;
+        return freeModels;
+      }
+      if (!context.allowNetwork || context.signal?.aborted) {
+        return lastFullCatalog ?? freeModels;
+      }
+      try {
+        const models = await fetchKiloModels({
+          token,
+          signal: context.signal
+        });
+        lastFullCatalog = models;
+        return models;
+      } catch (error) {
+        console.warn(
+          "[kilo] refreshModels fetch failed:",
+          error instanceof Error ? error.message : error
+        );
+        return lastFullCatalog ?? freeModels;
+      }
+    }
+  });
+}
+
+// provider-balance.ts
+import { FooterComponent } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+var KILO_API_BASE2 = process.env.KILO_API_URL || "https://api.kilo.ai";
+var KILO_BALANCE_ENDPOINT = `${KILO_API_BASE2}/api/profile/balance`;
+var BALANCE_FETCH_TIMEOUT_MS = 5e3;
+function numericProperty(value, key) {
+  if (typeof value !== "object" || value === null || !(key in value)) {
+    return null;
+  }
+  const candidate = value[key];
+  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : null;
+}
+function formatCredits(balance) {
+  if (balance >= 1e3) return `$${(balance / 1e3).toFixed(1)}k`;
+  return `$${balance.toFixed(2)}`;
+}
+function parseKiloBalance(value) {
+  return numericProperty(value, "balance");
+}
+async function fetchKiloBalance(token, signal) {
+  const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
+  const response = await fetch(KILO_BALANCE_ENDPOINT, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    signal: AbortSignal.any([timeout, signal])
+  });
+  if (!response.ok) {
+    throw new Error(`Kilo balance request failed: ${response.status}`);
+  }
+  const balance = parseKiloBalance(await response.json());
+  if (balance === null) {
+    throw new Error("Kilo balance response was invalid");
+  }
+  return `\u{1F4B0} ${formatCredits(balance)}`;
+}
+var BALANCE_ADAPTERS = {
+  kilo: { fetch: fetchKiloBalance }
+};
+var THINKING_LEVELS = /* @__PURE__ */ new Set([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+]);
+function normalizeThinkingLevel(value) {
+  return value === "off" || THINKING_LEVELS.has(value) ? value : "off";
+}
+function restoredThinkingLevel(ctx) {
+  const branch = ctx.sessionManager.getBranch();
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry?.type === "thinking_level_change") {
+      return normalizeThinkingLevel(entry.thinkingLevel);
+    }
+  }
+  return "off";
+}
+function createFooterSession(getContext, getThinkingLevel) {
+  const facade = {
+    get state() {
+      const ctx = getContext();
+      return {
+        model: ctx.model,
+        thinkingLevel: getThinkingLevel()
+      };
+    },
+    get sessionManager() {
+      return getContext().sessionManager;
+    },
+    modelRuntime: {
+      isUsingOAuth(provider) {
+        const model = getContext().model;
+        return model?.provider === provider && model !== void 0 ? getContext().modelRegistry.isUsingOAuth(model) : false;
+      }
+    },
+    getContextUsage() {
+      return getContext().getContextUsage();
+    }
+  };
+  return facade;
+}
+function addBalanceToWorkingDirectoryLine(lines, width, theme, balanceText) {
+  if (!balanceText || width <= 0) return lines;
+  const right = theme.fg("dim", balanceText);
+  const rightWidth = visibleWidth(right);
+  if (rightWidth >= width) {
+    return [truncateToWidth(right, width, ""), ...lines.slice(1)];
+  }
+  const leftLine = lines[0] ?? "";
+  const maxLeftWidth = Math.max(0, width - rightWidth - 2);
+  const left = truncateToWidth(leftLine, maxLeftWidth, "...");
+  const padding = " ".repeat(
+    Math.max(1, width - visibleWidth(left) - rightWidth)
+  );
+  return [`${left}${padding}${right}`, ...lines.slice(1)];
+}
+function providerBalance(pi) {
+  let activeContext;
+  let balanceText;
+  let refreshGeneration = 0;
+  let refreshController;
+  let requestRender;
+  let activeThinkingLevel = "off";
+  function clearBalance() {
+    balanceText = void 0;
+    requestRender?.();
+  }
+  async function refreshBalance(ctx, provider) {
+    const generation = ++refreshGeneration;
+    refreshController?.abort();
+    const controller = new AbortController();
+    refreshController = controller;
+    clearBalance();
+    const providerId = provider;
+    const adapter = providerId ? BALANCE_ADAPTERS[providerId] : void 0;
+    if (!adapter || !providerId) return;
+    try {
+      const token = await ctx.modelRegistry.getApiKeyForProvider(providerId);
+      if (!token || generation !== refreshGeneration) return;
+      balanceText = await adapter.fetch(token, controller.signal);
+      if (generation === refreshGeneration) requestRender?.();
+    } catch (error) {
+      if (generation !== refreshGeneration || controller.signal.aborted) return;
+      console.warn(
+        `[provider-balance] Failed to refresh ${providerId} balance:`,
+        error instanceof Error ? error.message : error
+      );
+    } finally {
+      if (generation === refreshGeneration) refreshController = void 0;
+    }
+  }
+  function installFooter(ctx) {
+    if (ctx.mode !== "tui") return;
+    activeContext = ctx;
+    ctx.ui.setFooter((tui, theme, footerData) => {
+      requestRender = () => tui.requestRender();
+      const footer = new FooterComponent(
+        createFooterSession(
+          () => {
+            if (!activeContext) {
+              throw new Error("Provider balance footer is inactive");
+            }
+            return activeContext;
+          },
+          () => activeThinkingLevel
+        ),
+        footerData
+      );
+      const unsubscribeBranchChange = footerData.onBranchChange(
+        () => tui.requestRender()
+      );
+      return {
+        invalidate: () => footer.invalidate(),
+        render: (width) => addBalanceToWorkingDirectoryLine(
+          footer.render(width),
+          width,
+          theme,
+          balanceText
+        ),
+        dispose: () => {
+          unsubscribeBranchChange();
+          footer.dispose();
+          requestRender = void 0;
+        }
+      };
+    });
+  }
+  pi.on("session_start", async (_event, ctx) => {
+    activeContext = ctx;
+    activeThinkingLevel = restoredThinkingLevel(ctx);
+    installFooter(ctx);
+    await refreshBalance(ctx, ctx.model?.provider);
+  });
+  pi.on("model_select", async (event, ctx) => {
+    activeContext = ctx;
+    await refreshBalance(ctx, event.model?.provider ?? ctx.model?.provider);
+  });
+  pi.on("thinking_level_select", (event) => {
+    activeThinkingLevel = event.level;
+    requestRender?.();
+  });
+  pi.on("session_shutdown", () => {
+    refreshController?.abort();
+    refreshController = void 0;
+    activeContext = void 0;
+    activeThinkingLevel = "off";
+    requestRender = void 0;
+  });
+}
+
 // name-with-ai.ts
 import { Agent } from "@earendil-works/pi-agent-core";
 import {
@@ -635,11 +1155,13 @@ function preferTools(pi) {
 }
 
 // index.ts
-function bermudisPiGoodies(pi) {
+async function bermudisPiGoodies(pi) {
   copy_with_model_default(pi);
   nameWithAiExtension(pi);
   zed_default(pi);
   preferTools(pi);
+  providerBalance(pi);
+  await kilo_default(pi);
 }
 export {
   bermudisPiGoodies as default
