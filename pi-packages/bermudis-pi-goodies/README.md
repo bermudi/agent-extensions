@@ -43,12 +43,15 @@ with provider defaults, exact model defaults, or both:
 }
 ```
 
-Exact `provider/model-id` entries take precedence over provider defaults. Once
-a model is managed, changing its thinking level in Pi records an exact-model
-override. Returning it to the provider default removes that redundant override.
-All current Pi levels are accepted: `off`, `minimal`, `low`, `medium`, `high`,
-`xhigh`, and `max`. `/model-thinking` shows the active resolution and config
-path; `/model-thinking reset` deletes the whole config.
+Exact `provider/model-id` entries take precedence over provider defaults. Use
+`/model-thinking set` to save the current model's current thinking level as an
+exact-model entry; it also bootstraps models not yet covered by the config and
+overwrites an existing entry. Once a model is managed, changing its thinking
+level in Pi records an exact-model override. Returning it to the provider
+default removes that redundant override. All current Pi levels are accepted:
+`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+`/model-thinking` shows the active resolution and config path;
+`/model-thinking reset` deletes the whole config.
 
 ## Provider and balance details
 

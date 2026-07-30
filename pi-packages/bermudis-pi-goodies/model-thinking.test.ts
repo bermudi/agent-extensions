@@ -197,6 +197,44 @@ describe("model-thinking", () => {
     });
   });
 
+  test("set saves the current level for the current model and overwrites its entry", async () => {
+    const path = temporaryConfig({
+      providers: { anthropic: "high" },
+      models: {
+        "anthropic/claude-test": "low",
+        "anthropic/other": "medium",
+      },
+    });
+    const pi = new PiHarness();
+    modelThinking(pi.api, { configPath: path });
+    const ctx = context(model("anthropic", "claude-test"));
+    pi.level = "xhigh";
+
+    await pi.commands.get("model-thinking")!("set", ctx);
+
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
+      providers: { anthropic: "high" },
+      models: {
+        "anthropic/claude-test": "xhigh",
+        "anthropic/other": "medium",
+      },
+    });
+  });
+
+  test("set can bootstrap an unmanaged model", async () => {
+    const path = temporaryConfig();
+    const pi = new PiHarness();
+    modelThinking(pi.api, { configPath: path });
+    const ctx = context(model("unmanaged", "model"));
+    pi.level = "xhigh";
+
+    await pi.commands.get("model-thinking")!("set", ctx);
+
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
+      models: { "unmanaged/model": "xhigh" },
+    });
+  });
+
   test("leaves unmanaged models to Pi and does not create a config", () => {
     const path = temporaryConfig();
     const pi = new PiHarness();

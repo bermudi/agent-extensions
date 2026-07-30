@@ -326,9 +326,38 @@ export default function modelThinking(
   });
 
   pi.registerCommand("model-thinking", {
-    description: "Show or reset model-specific thinking levels",
+    description: "Show, save, or reset model-specific thinking levels",
     handler: async (args, ctx) => {
       const command = args.trim();
+
+      if (command === "set") {
+        const model = ctx.model;
+        if (!model) {
+          ctx.ui.notify(
+            "Cannot save thinking level without an active model.",
+            "warning",
+          );
+          return;
+        }
+
+        const key = modelKey(model);
+        const level = pi.getThinkingLevel();
+        try {
+          const config = store.load();
+          store.save({
+            ...config,
+            models: { ...config.models, [key]: level },
+          });
+          ctx.ui.notify(`Saved ${key}: ${level}`, "info");
+        } catch (error) {
+          console.error(
+            "[model-thinking] failed to save current model:",
+            error,
+          );
+          ctx.ui.notify("Failed to save model-thinking config.", "error");
+        }
+        return;
+      }
 
       if (command === "reset") {
         try {
@@ -347,7 +376,7 @@ export default function modelThinking(
       }
 
       if (command !== "") {
-        ctx.ui.notify("Usage: /model-thinking [reset]", "warning");
+        ctx.ui.notify("Usage: /model-thinking [set|reset]", "warning");
         return;
       }
 
@@ -361,7 +390,7 @@ export default function modelThinking(
         `resolved: ${resolved ?? "none — pi handles this model natively"}`,
         `current: ${pi.getThinkingLevel()}`,
         "",
-        "run `/model-thinking reset` to clear all configured levels",
+        "run `/model-thinking set` to save this model and level; `/model-thinking reset` to clear all configured levels",
       ];
       const message = lines.join("\n");
 
