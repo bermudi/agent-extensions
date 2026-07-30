@@ -8,6 +8,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const KILO_API_BASE = process.env.KILO_API_URL || "https://api.kilo.ai";
 const KILO_BALANCE_ENDPOINT = `${KILO_API_BASE}/api/profile/balance`;
+const OPENROUTER_CREDITS_ENDPOINT = "https://openrouter.ai/api/v1/credits";
 const ZAI_QUOTA_ENDPOINT = "https://api.z.ai/api/monitor/usage/quota/limit";
 const ZAI_CODING_CN_QUOTA_ENDPOINT =
   "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
@@ -272,6 +273,21 @@ export function parseKiloBalance(value: unknown): number | null {
   return numericProperty(value, "balance");
 }
 
+export function parseOpenRouterCredits(value: unknown): number | null {
+  const data = objectProperty(value, "data");
+  const totalCredits = numericProperty(data, "total_credits");
+  const totalUsage = numericProperty(data, "total_usage");
+  if (
+    totalCredits === null ||
+    totalUsage === null ||
+    totalCredits < 0 ||
+    totalUsage < 0
+  ) {
+    return null;
+  }
+  return Math.max(0, totalCredits - totalUsage);
+}
+
 async function fetchKiloBalance(
   token: string,
   signal: AbortSignal,
@@ -291,6 +307,29 @@ async function fetchKiloBalance(
   const balance = parseKiloBalance(await response.json());
   if (balance === null) {
     throw new Error("Kilo balance response was invalid");
+  }
+  return formatCredits(balance);
+}
+
+async function fetchOpenRouterBalance(
+  token: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
+  const response = await fetch(OPENROUTER_CREDITS_ENDPOINT, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+    signal: AbortSignal.any([timeout, signal]),
+  });
+  if (!response.ok) {
+    throw new Error(`OpenRouter balance request failed: ${response.status}`);
+  }
+
+  const balance = parseOpenRouterCredits(await response.json());
+  if (balance === null) {
+    throw new Error("OpenRouter balance response was invalid");
   }
   return formatCredits(balance);
 }
@@ -366,6 +405,7 @@ async function fetchCodexQuota(
 
 const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
   kilo: { fetch: fetchKiloBalance },
+  openrouter: { fetch: fetchOpenRouterBalance },
   zai: { fetch: fetchZaiQuota },
   "zai-coding-cn": { fetch: fetchZaiCodingCnQuota },
   "openai-codex": { fetch: fetchCodexQuota, requiresOAuth: true },

@@ -11,6 +11,7 @@ import providerBalance, {
   parseCodexAccountId,
   parseCodexQuota,
   parseKiloBalance,
+  parseOpenRouterCredits,
   parseZaiQuota,
 } from "./provider-balance.ts";
 
@@ -138,6 +139,40 @@ describe("formatZaiQuota", () => {
         ],
       }),
     ).toBe("5h 75% left · 7d 60% left");
+  });
+});
+
+describe("parseOpenRouterCredits", () => {
+  test("computes remaining credits", () => {
+    expect(
+      parseOpenRouterCredits({
+        data: { total_credits: 10, total_usage: 2.34 },
+      }),
+    ).toBe(7.66);
+  });
+
+  test("clamps usage overshoot to zero", () => {
+    expect(
+      parseOpenRouterCredits({
+        data: { total_credits: 10, total_usage: 10.5 },
+      }),
+    ).toBe(0);
+  });
+
+  test("rejects malformed responses", () => {
+    expect(parseOpenRouterCredits(null)).toBeNull();
+    expect(parseOpenRouterCredits({})).toBeNull();
+    expect(parseOpenRouterCredits({ data: {} })).toBeNull();
+    expect(
+      parseOpenRouterCredits({
+        data: { total_credits: "10", total_usage: 2 },
+      }),
+    ).toBeNull();
+    expect(
+      parseOpenRouterCredits({
+        data: { total_credits: -1, total_usage: 0 },
+      }),
+    ).toBeNull();
   });
 });
 

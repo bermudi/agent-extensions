@@ -513,6 +513,7 @@ import { FooterComponent } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 var KILO_API_BASE2 = process.env.KILO_API_URL || "https://api.kilo.ai";
 var KILO_BALANCE_ENDPOINT = `${KILO_API_BASE2}/api/profile/balance`;
+var OPENROUTER_CREDITS_ENDPOINT = "https://openrouter.ai/api/v1/credits";
 var ZAI_QUOTA_ENDPOINT = "https://api.z.ai/api/monitor/usage/quota/limit";
 var ZAI_CODING_CN_QUOTA_ENDPOINT = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
 var CODEX_API_BASE = (process.env.CODEX_API_URL || process.env.CHATGPT_BASE_URL || "https://chatgpt.com/backend-api").replace(/\/+$/, "");
@@ -672,6 +673,15 @@ function formatCredits(balance) {
 function parseKiloBalance(value) {
   return numericProperty(value, "balance");
 }
+function parseOpenRouterCredits(value) {
+  const data = objectProperty(value, "data");
+  const totalCredits = numericProperty(data, "total_credits");
+  const totalUsage = numericProperty(data, "total_usage");
+  if (totalCredits === null || totalUsage === null || totalCredits < 0 || totalUsage < 0) {
+    return null;
+  }
+  return Math.max(0, totalCredits - totalUsage);
+}
 async function fetchKiloBalance(token, signal) {
   const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
   const response = await fetch(KILO_BALANCE_ENDPOINT, {
@@ -687,6 +697,24 @@ async function fetchKiloBalance(token, signal) {
   const balance = parseKiloBalance(await response.json());
   if (balance === null) {
     throw new Error("Kilo balance response was invalid");
+  }
+  return formatCredits(balance);
+}
+async function fetchOpenRouterBalance(token, signal) {
+  const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
+  const response = await fetch(OPENROUTER_CREDITS_ENDPOINT, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json"
+    },
+    signal: AbortSignal.any([timeout, signal])
+  });
+  if (!response.ok) {
+    throw new Error(`OpenRouter balance request failed: ${response.status}`);
+  }
+  const balance = parseOpenRouterCredits(await response.json());
+  if (balance === null) {
+    throw new Error("OpenRouter balance response was invalid");
   }
   return formatCredits(balance);
 }
@@ -741,6 +769,7 @@ async function fetchCodexQuota(token, signal) {
 }
 var BALANCE_ADAPTERS = {
   kilo: { fetch: fetchKiloBalance },
+  openrouter: { fetch: fetchOpenRouterBalance },
   zai: { fetch: fetchZaiQuota },
   "zai-coding-cn": { fetch: fetchZaiCodingCnQuota },
   "openai-codex": { fetch: fetchCodexQuota, requiresOAuth: true }
