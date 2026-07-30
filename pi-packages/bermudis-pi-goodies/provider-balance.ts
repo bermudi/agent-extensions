@@ -8,20 +8,172 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const KILO_API_BASE = process.env.KILO_API_URL || "https://api.kilo.ai";
 const KILO_BALANCE_ENDPOINT = `${KILO_API_BASE}/api/profile/balance`;
+const CODEX_API_BASE = (
+  process.env.CODEX_API_URL ||
+  process.env.CHATGPT_BASE_URL ||
+  "https://chatgpt.com/backend-api"
+).replace(/\/+$/, "");
+const CODEX_USAGE_ENDPOINT = `${CODEX_API_BASE}/wham/usage`;
+const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
 const BALANCE_FETCH_TIMEOUT_MS = 5_000;
 
 interface BalanceAdapter {
   fetch(token: string, signal: AbortSignal): Promise<string>;
+  requiresOAuth?: boolean;
+}
+
+interface CodexQuotaWindow {
+  usedPercent: number;
+  windowSeconds: number;
+}
+
+export interface CodexAdditionalQuota {
+  name: string;
+  primary: CodexQuotaWindow | null;
+  secondary: CodexQuotaWindow | null;
+}
+
+export interface CodexQuota {
+  primary: CodexQuotaWindow | null;
+  secondary: CodexQuotaWindow | null;
+  additional: CodexAdditionalQuota[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function objectProperty(
+  value: unknown,
+  key: string,
+): Record<string, unknown> | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  return asRecord(record[key]);
 }
 
 function numericProperty(value: unknown, key: string): number | null {
-  if (typeof value !== "object" || value === null || !(key in value)) {
-    return null;
-  }
-  const candidate = (value as Record<string, unknown>)[key];
+  const record = asRecord(value);
+  if (!record) return null;
+  const candidate = record[key];
   return typeof candidate === "number" && Number.isFinite(candidate)
     ? candidate
     : null;
+}
+
+function stringProperty(value: unknown, key: string): string | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const candidate = record[key];
+  return typeof candidate === "string" && candidate.trim()
+    ? candidate.trim()
+    : null;
+}
+
+function decodeBase64Url(value: string): string {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+  const binary = atob(base64 + padding);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+export function parseCodexAccountId(token: string): string | null {
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) return null;
+
+  try {
+    const payload = asRecord(JSON.parse(decodeBase64Url(parts[1])));
+    const auth = payload ? asRecord(payload[CODEX_AUTH_CLAIM]) : null;
+    const accountId = auth?.chatgpt_account_id;
+    return typeof accountId === "string" && accountId.trim()
+      ? accountId.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseCodexQuotaWindow(value: unknown): CodexQuotaWindow | null {
+  const usedPercent = numericProperty(value, "used_percent");
+  const windowSeconds = numericProperty(value, "limit_window_seconds");
+  if (usedPercent === null || windowSeconds === null || windowSeconds <= 0) {
+    return null;
+  }
+  return { usedPercent, windowSeconds };
+}
+
+interface ParsedCodexQuotaWindows {
+  primary: CodexQuotaWindow | null;
+  secondary: CodexQuotaWindow | null;
+}
+
+function parseCodexQuotaWindows(
+  value: unknown,
+): ParsedCodexQuotaWindows | null {
+  const rateLimit = asRecord(value);
+  if (!rateLimit) return null;
+
+  const primary = parseCodexQuotaWindow(rateLimit.primary_window);
+  const secondary = parseCodexQuotaWindow(rateLimit.secondary_window);
+  return primary || secondary ? { primary, secondary } : null;
+}
+
+export function parseCodexQuota(value: unknown): CodexQuota | null {
+  const payload = asRecord(value);
+  if (!payload) return null;
+
+  const base = parseCodexQuotaWindows(payload.rate_limit);
+  const additional = Array.isArray(payload.additional_rate_limits)
+    ? payload.additional_rate_limits.flatMap((candidate) => {
+        const name = stringProperty(candidate, "limit_name");
+        const windows = parseCodexQuotaWindows(
+          objectProperty(candidate, "rate_limit"),
+        );
+        return name && windows ? [{ name, ...windows }] : [];
+      })
+    : [];
+
+  if (!base && additional.length === 0) return null;
+  return {
+    primary: base?.primary ?? null,
+    secondary: base?.secondary ?? null,
+    additional,
+  };
+}
+
+function formatWindowDuration(windowSeconds: number): string {
+  const minutes = Math.max(1, Math.round(windowSeconds / 60));
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)}d`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${minutes}m`;
+}
+
+function formatCodexQuotaWindow(window: CodexQuotaWindow): string {
+  const usedPercent = Math.min(100, Math.max(0, window.usedPercent));
+  const remainingPercent = Math.round(100 - usedPercent);
+  return `${formatWindowDuration(window.windowSeconds)} ${remainingPercent}% left`;
+}
+
+function compactCodexQuotaName(name: string): string {
+  return /codex-spark$/i.test(name) ? "Spark" : name;
+}
+
+export function formatCodexQuota(quota: CodexQuota): string {
+  const parts = [quota.primary, quota.secondary]
+    .filter((window): window is CodexQuotaWindow => window !== null)
+    .map(formatCodexQuotaWindow);
+
+  for (const additional of quota.additional) {
+    const name = compactCodexQuotaName(additional.name);
+    for (const window of [additional.primary, additional.secondary]) {
+      if (window) parts.push(`${name} ${formatCodexQuotaWindow(window)}`);
+    }
+  }
+
+  return parts.join(" · ");
 }
 
 export function formatCredits(balance: number): string {
@@ -56,8 +208,40 @@ async function fetchKiloBalance(
   return `💰 ${formatCredits(balance)}`;
 }
 
+async function fetchCodexQuota(
+  token: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const accountId = parseCodexAccountId(token);
+  if (!accountId) {
+    throw new Error("Codex access token did not contain an account ID");
+  }
+
+  const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
+  const response = await fetch(CODEX_USAGE_ENDPOINT, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      "User-Agent": "pi",
+      originator: "pi",
+      "chatgpt-account-id": accountId,
+    },
+    signal: AbortSignal.any([timeout, signal]),
+  });
+  if (!response.ok) {
+    throw new Error(`Codex quota request failed: ${response.status}`);
+  }
+
+  const quota = parseCodexQuota(await response.json());
+  if (quota === null) {
+    throw new Error("Codex quota response was invalid");
+  }
+  return `📊 ${formatCodexQuota(quota)}`;
+}
+
 const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
   kilo: { fetch: fetchKiloBalance },
+  "openai-codex": { fetch: fetchCodexQuota, requiresOAuth: true },
 };
 
 type FooterSession = ConstructorParameters<typeof FooterComponent>[0];
@@ -165,9 +349,20 @@ export default function providerBalance(pi: ExtensionAPI): void {
     requestRender?.();
   }
 
+  /** Refresh the balance for whatever model is active. Provider-agnostic: the
+   *  adapter registry in refreshBalance decides whether there is anything to
+   *  fetch, so this is a no-op for providers without a balance adapter. */
+  function refreshForModel(
+    ctx: ExtensionContext,
+    model: ExtensionContext["model"],
+  ): Promise<void> {
+    return refreshBalance(ctx, model?.provider, model);
+  }
+
   async function refreshBalance(
     ctx: ExtensionContext,
     provider: string | undefined,
+    model: ExtensionContext["model"],
   ): Promise<void> {
     const generation = ++refreshGeneration;
     refreshController?.abort();
@@ -178,6 +373,14 @@ export default function providerBalance(pi: ExtensionAPI): void {
     const providerId = provider;
     const adapter = providerId ? BALANCE_ADAPTERS[providerId] : undefined;
     if (!adapter || !providerId) return;
+    if (
+      adapter.requiresOAuth &&
+      (!model ||
+        model.provider !== providerId ||
+        !ctx.modelRegistry.isUsingOAuth(model))
+    ) {
+      return;
+    }
 
     try {
       const token = await ctx.modelRegistry.getApiKeyForProvider(providerId);
@@ -234,16 +437,28 @@ export default function providerBalance(pi: ExtensionAPI): void {
     });
   }
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", (_event, ctx) => {
     activeContext = ctx;
     activeThinkingLevel = restoredThinkingLevel(ctx);
     installFooter(ctx);
-    await refreshBalance(ctx, ctx.model?.provider);
+    // Footer data is supplemental. Never hold up session readiness on network.
+    void refreshForModel(ctx, ctx.model);
   });
 
-  pi.on("model_select", async (event, ctx) => {
+  pi.on("model_select", (event, ctx) => {
     activeContext = ctx;
-    await refreshBalance(ctx, event.model?.provider ?? ctx.model?.provider);
+    // AgentSession awaits model_select handlers before the picker can close.
+    // Start the footer refresh, but do not make model selection wait for it.
+    void refreshForModel(ctx, event.model ?? ctx.model);
+  });
+
+  // After a run fully settles (retries/compaction/continuations done), refresh
+  // so the status bar reflects consumption and any external tier change. Fires
+  // once per completed run for whatever provider is active; providers without a
+  // balance adapter are skipped inside refreshBalance.
+  pi.on("agent_settled", (_event, ctx) => {
+    activeContext = ctx;
+    void refreshForModel(ctx, ctx.model);
   });
 
   pi.on("thinking_level_select", (event) => {

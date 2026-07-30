@@ -36,7 +36,7 @@ manifests, lockfiles, tests, and typechecks.
 
 | Package | Scope | Entry point | Purpose |
 |---|---|---|---|
-| [`bermudis-pi-goodies`](pi-packages/bermudis-pi-goodies/) | Global | `bermudis-pi-goodies.bundle.ts` | Commands, hooks, the Kilo provider, and the Kilo balance footer |
+| [`bermudis-pi-goodies`](pi-packages/bermudis-pi-goodies/) | Global | `bermudis-pi-goodies.bundle.ts` | Commands, hooks, the Kilo provider, and Kilo/Codex quota footer |
 | [`diff`](pi-packages/diff/) | Project-local | `diff.ts` | Show files changed during the last agent run |
 | [`external-changes`](pi-packages/external-changes/) | Project-local | `external-changes.ts` | Tell the next agent turn about edits, commits, and files made outside the session |
 | [`session-summarizer`](pi-packages/session-summarizer/) | Project-local | `index.ts` | Summarize the current or another branched Pi session |
@@ -51,8 +51,8 @@ This is a bundle of independent features sharing one Pi extension entry point:
 | `name-with-ai` | `/name-with-ai [name]` | Generates a short session name from the first user message, or sets a supplied name directly. Uses the current Pi model. |
 | `zed` | `/z` | Opens the current working directory in a new Zed window. Uses `zeditor` on Linux and `zed` elsewhere. |
 | `prefer-tools` | `tool_call` hook | Blocks `rm` in command position in favor of `trash`, and blocks bare `python`, `pip`, `pytest`, and `mypy` in favor of `uv`. Quoted text, heredocs, arguments, and similar non-command occurrences are ignored. |
-| `kilo` | Provider / `/login kilo` | Adds the Kilo Gateway provider, including free-model discovery, authenticated catalog refresh, device-code login, and OpenRouter-compatible routing. |
-| `provider-balance` | Footer | Displays the current Kilo credit balance beside the working-directory footer line when authenticated. |
+| `kilo` | Provider / `/login kilo` | Adds the Kilo Gateway provider, including a free-router fallback, cached authenticated catalog refresh, device-code login, and OpenRouter-compatible routing. |
+| `provider-balance` | Footer | Displays Kilo credits or OpenAI Codex subscription quota beside the working-directory footer line when authenticated. |
 
 Kilo authentication can use either Pi's `/login kilo` flow or `KILO_API_KEY`.
 `KILO_API_URL` can point the provider at a compatible alternate API endpoint.

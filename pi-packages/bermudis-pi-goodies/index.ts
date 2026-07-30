@@ -8,7 +8,7 @@
  *   - zed              /z                open Zed on cwd
  *   - prefer-tools     hook              block legacy tools (use trash/rg/fd/uv)
  *   - kilo             provider          access Kilo Gateway models
- *   - provider-balance footer            show remaining Kilo credits in the footer
+ *   - provider-balance footer            show Kilo credits or Codex quota in the footer
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import copyWithModel from "./copy-with-model.ts";
