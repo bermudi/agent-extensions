@@ -10,7 +10,7 @@ extensions. One entry point, six independent features.
 | `zed` | `/z` | Open Zed editor on the current working directory. |
 | `prefer-tools` | hook (no command) | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`. |
 | `kilo` | provider | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`. |
-| `provider-balance` | footer (no command) | Show remaining Kilo credits or OpenAI Codex quota on the right side of the working-directory footer line. |
+| `provider-balance` | footer (no command) | Show remaining Kilo credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 
 ## Install
 
@@ -27,11 +27,13 @@ Kilo registration is network-free: it starts with `kilo-auto/free`, restores
 an authenticated catalog from Pi's model store, and normally revalidates that
 catalog no more than every four hours. Balance and quota requests run in the background so they
 never delay session startup, model selection, or post-run input readiness.
-The footer also reads OpenAI Codex's ChatGPT subscription quota when using
-`openai-codex` OAuth;
+The footer also reads z.ai GLM Coding Plan token quota for `zai` (Global) and
+`zai-coding-cn` (BigModel China), and OpenAI Codex's ChatGPT subscription quota
+when using `openai-codex` OAuth;
 it skips platform API-key auth because that has no ChatGPT subscription quota.
-The quota comes from `GET /wham/usage`; `CODEX_API_URL` or `CHATGPT_BASE_URL`
-can override its base URL. The footer refreshes on session start, model
+Z.ai uses `GET /api/monitor/usage/quota/limit`; Codex uses `GET /wham/usage`,
+and `CODEX_API_URL` or `CHATGPT_BASE_URL` can override the Codex base URL.
+The footer refreshes on session start, model
 switch, and after each completed run (`agent_settled`), so it tracks both
 consumption and external tier changes for whatever provider is active —
 providers without a balance adapter are skipped, so this costs nothing for

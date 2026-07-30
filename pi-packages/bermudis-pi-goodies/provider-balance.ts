@@ -8,6 +8,9 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const KILO_API_BASE = process.env.KILO_API_URL || "https://api.kilo.ai";
 const KILO_BALANCE_ENDPOINT = `${KILO_API_BASE}/api/profile/balance`;
+const ZAI_QUOTA_ENDPOINT = "https://api.z.ai/api/monitor/usage/quota/limit";
+const ZAI_CODING_CN_QUOTA_ENDPOINT =
+  "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
 const CODEX_API_BASE = (
   process.env.CODEX_API_URL ||
   process.env.CHATGPT_BASE_URL ||
@@ -176,6 +179,90 @@ export function formatCodexQuota(quota: CodexQuota): string {
   return parts.join(" · ");
 }
 
+export interface ZaiQuotaWindow {
+  usedPercent: number;
+  windowSeconds: number;
+}
+
+export interface ZaiQuota {
+  planName: string | null;
+  tokenWindows: ZaiQuotaWindow[];
+}
+
+function parseZaiWindowSeconds(unit: number, number: number): number | null {
+  if (!Number.isInteger(number) || number <= 0) return null;
+
+  const secondsPerUnit: Record<number, number> = {
+    1: 24 * 60 * 60, // days
+    3: 60 * 60, // hours
+    5: 60, // minutes
+    6: 7 * 24 * 60 * 60, // weeks
+  };
+  const multiplier = secondsPerUnit[unit];
+  return multiplier ? number * multiplier : null;
+}
+
+function parseZaiUsedPercent(value: unknown): number | null {
+  const percentage = numericProperty(value, "percentage");
+  if (percentage !== null) return percentage;
+
+  // Older responses sometimes omit `percentage`, but include the raw quota
+  // and either `remaining` or `currentValue`. Do not turn an incomplete limit
+  // into a false 0% reading.
+  const limit = numericProperty(value, "usage");
+  if (limit === null || limit <= 0) return null;
+  const remaining = numericProperty(value, "remaining");
+  const currentValue = numericProperty(value, "currentValue");
+  const used =
+    remaining !== null
+      ? Math.max(limit - remaining, currentValue ?? 0)
+      : currentValue;
+  return used === null ? null : (used / limit) * 100;
+}
+
+export function parseZaiQuota(value: unknown): ZaiQuota | null {
+  const payload = asRecord(value);
+  if (
+    !payload ||
+    payload.success !== true ||
+    numericProperty(payload, "code") !== 200
+  ) {
+    return null;
+  }
+
+  const data = asRecord(payload.data);
+  const limits = data?.limits;
+  if (!Array.isArray(limits)) return null;
+
+  const tokenWindows = limits.flatMap((candidate) => {
+    if (stringProperty(candidate, "type") !== "TOKENS_LIMIT") return [];
+    const unit = numericProperty(candidate, "unit");
+    const number = numericProperty(candidate, "number");
+    const usedPercent = parseZaiUsedPercent(candidate);
+    if (unit === null || number === null || usedPercent === null) return [];
+    const windowSeconds = parseZaiWindowSeconds(unit, number);
+    return windowSeconds === null ? [] : [{ usedPercent, windowSeconds }];
+  });
+
+  if (tokenWindows.length === 0) return null;
+  tokenWindows.sort((a, b) => a.windowSeconds - b.windowSeconds);
+
+  const planName =
+    stringProperty(data, "planName") ??
+    stringProperty(data, "plan") ??
+    stringProperty(data, "plan_type") ??
+    stringProperty(data, "packageName") ??
+    null;
+  return { planName, tokenWindows };
+}
+
+export function formatZaiQuota(quota: ZaiQuota): string {
+  return [...quota.tokenWindows]
+    .sort((a, b) => a.windowSeconds - b.windowSeconds)
+    .map(formatCodexQuotaWindow)
+    .join(" · ");
+}
+
 export function formatCredits(balance: number): string {
   if (balance >= 1000) return `$${(balance / 1000).toFixed(1)}k`;
   return `$${balance.toFixed(2)}`;
@@ -205,7 +292,45 @@ async function fetchKiloBalance(
   if (balance === null) {
     throw new Error("Kilo balance response was invalid");
   }
-  return `💰 ${formatCredits(balance)}`;
+  return formatCredits(balance);
+}
+
+async function fetchZaiQuotaAt(
+  endpoint: string,
+  token: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
+  const response = await fetch(endpoint, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+    signal: AbortSignal.any([timeout, signal]),
+  });
+  if (!response.ok) {
+    throw new Error(`Z.ai quota request failed: ${response.status}`);
+  }
+
+  const quota = parseZaiQuota(await response.json());
+  if (quota === null) {
+    throw new Error("Z.ai quota response was invalid");
+  }
+  return formatZaiQuota(quota);
+}
+
+async function fetchZaiQuota(
+  token: string,
+  signal: AbortSignal,
+): Promise<string> {
+  return fetchZaiQuotaAt(ZAI_QUOTA_ENDPOINT, token, signal);
+}
+
+async function fetchZaiCodingCnQuota(
+  token: string,
+  signal: AbortSignal,
+): Promise<string> {
+  return fetchZaiQuotaAt(ZAI_CODING_CN_QUOTA_ENDPOINT, token, signal);
 }
 
 async function fetchCodexQuota(
@@ -236,11 +361,13 @@ async function fetchCodexQuota(
   if (quota === null) {
     throw new Error("Codex quota response was invalid");
   }
-  return `📊 ${formatCodexQuota(quota)}`;
+  return formatCodexQuota(quota);
 }
 
 const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
   kilo: { fetch: fetchKiloBalance },
+  zai: { fetch: fetchZaiQuota },
+  "zai-coding-cn": { fetch: fetchZaiCodingCnQuota },
   "openai-codex": { fetch: fetchCodexQuota, requiresOAuth: true },
 };
 

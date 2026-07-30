@@ -7,9 +7,11 @@ import type {
 import providerBalance, {
   formatCodexQuota,
   formatCredits,
+  formatZaiQuota,
   parseCodexAccountId,
   parseCodexQuota,
   parseKiloBalance,
+  parseZaiQuota,
 } from "./provider-balance.ts";
 
 describe("event latency", () => {
@@ -34,6 +36,108 @@ describe("event latency", () => {
     );
 
     expect(result).toBeUndefined();
+  });
+});
+
+describe("parseZaiQuota", () => {
+  test("parses token windows and ignores MCP time limits", () => {
+    expect(
+      parseZaiQuota({
+        success: true,
+        code: 200,
+        data: {
+          planName: "Pro",
+          limits: [
+            {
+              type: "TIME_LIMIT",
+              unit: 5,
+              number: 1,
+              percentage: 10,
+            },
+            {
+              type: "TOKENS_LIMIT",
+              unit: 1,
+              number: 7,
+              percentage: 40,
+            },
+            {
+              type: "TOKENS_LIMIT",
+              unit: 3,
+              number: 5,
+              percentage: 25,
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      planName: "Pro",
+      tokenWindows: [
+        { usedPercent: 25, windowSeconds: 18_000 },
+        { usedPercent: 40, windowSeconds: 604_800 },
+      ],
+    });
+  });
+
+  test("computes usage when percentage is omitted", () => {
+    expect(
+      parseZaiQuota({
+        success: true,
+        code: 200,
+        data: {
+          limits: [
+            {
+              type: "TOKENS_LIMIT",
+              unit: 3,
+              number: 5,
+              usage: 1000,
+              remaining: 750,
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      planName: null,
+      tokenWindows: [{ usedPercent: 25, windowSeconds: 18_000 }],
+    });
+  });
+
+  test("rejects API errors, unknown windows, and responses without tokens", () => {
+    expect(parseZaiQuota(null)).toBeNull();
+    expect(parseZaiQuota({ success: false, code: 401 })).toBeNull();
+    expect(
+      parseZaiQuota({
+        success: true,
+        code: 200,
+        data: {
+          limits: [{ type: "TIME_LIMIT", unit: 5, number: 1, percentage: 10 }],
+        },
+      }),
+    ).toBeNull();
+    expect(
+      parseZaiQuota({
+        success: true,
+        code: 200,
+        data: {
+          limits: [
+            { type: "TOKENS_LIMIT", unit: 99, number: 5, percentage: 10 },
+          ],
+        },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("formatZaiQuota", () => {
+  test("shows the shortest token window first", () => {
+    expect(
+      formatZaiQuota({
+        planName: "Pro",
+        tokenWindows: [
+          { usedPercent: 40, windowSeconds: 604_800 },
+          { usedPercent: 25, windowSeconds: 18_000 },
+        ],
+      }),
+    ).toBe("5h 75% left · 7d 60% left");
   });
 });
 
