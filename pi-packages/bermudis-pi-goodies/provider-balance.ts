@@ -556,10 +556,13 @@ export default function providerBalance(pi: ExtensionAPI): void {
       if (generation === refreshGeneration) requestRender?.();
     } catch (error) {
       if (generation !== refreshGeneration || controller.signal.aborted) return;
-      console.warn(
-        `[provider-balance] Failed to refresh ${providerId} balance:`,
-        error instanceof Error ? error.message : error,
-      );
+      // This is a best-effort background refresh. Writing to stdout/stderr while
+      // Pi owns the terminal corrupts the TUI (the text appears in the editor),
+      // so expose failures to other extensions without producing terminal output.
+      pi.events.emit("provider-balance:refresh-error", {
+        provider: providerId,
+        message: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       if (generation === refreshGeneration) refreshController = undefined;
     }

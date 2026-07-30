@@ -38,6 +38,60 @@ describe("event latency", () => {
 
     expect(result).toBeUndefined();
   });
+
+  test("background refresh failures do not write through the TUI", async () => {
+    let modelSelectHandler:
+      ((event: ModelSelectEvent, ctx: ExtensionContext) => unknown) | undefined;
+    const emitted: Array<{ channel: string; data: unknown }> = [];
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+
+    try {
+      providerBalance({
+        on(event, handler) {
+          if (event === "model_select") {
+            modelSelectHandler = handler as typeof modelSelectHandler;
+          }
+        },
+        events: {
+          emit(channel, data) {
+            emitted.push({ channel, data });
+          },
+          on() {
+            return () => {};
+          },
+        },
+      } as unknown as ExtensionAPI);
+      if (!modelSelectHandler) {
+        throw new Error("provider-balance did not register model_select");
+      }
+
+      const model = { provider: "openai-codex" };
+      const context = {
+        model,
+        modelRegistry: {
+          isUsingOAuth: () => true,
+          getApiKeyForProvider: async () => "not-a-jwt",
+        },
+      } as unknown as ExtensionContext;
+      modelSelectHandler({ model } as ModelSelectEvent, context);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(warnings).toEqual([]);
+      expect(emitted).toEqual([
+        {
+          channel: "provider-balance:refresh-error",
+          data: {
+            provider: "openai-codex",
+            message: "Codex access token did not contain an account ID",
+          },
+        },
+      ]);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
 });
 
 describe("parseZaiQuota", () => {
