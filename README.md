@@ -15,6 +15,7 @@ agent-extensions/
 ├── README.md
 └── pi-packages/
     ├── bermudis-pi-goodies/  # maintained; global bundle
+    ├── critique/             # maintained; opt-in Critique TUI launcher
     ├── diff/                 # maintained; project-local extension
     ├── external-changes/     # maintained; project-local extension
     ├── session-summarizer/   # maintained; project-local extension
@@ -37,6 +38,7 @@ manifests, lockfiles, tests, and typechecks.
 | Package | Scope | Entry point | Purpose |
 |---|---|---|---|
 | [`bermudis-pi-goodies`](pi-packages/bermudis-pi-goodies/) | Global | `bermudis-pi-goodies.bundle.ts` | Commands, hooks, the Kilo provider, and Kilo/OpenRouter/z.ai/Codex quota footer |
+| [`critique`](pi-packages/critique/) | Opt-in | `index.ts` | Suspend Pi and open the repository diff in Critique's Bun TUI |
 | [`diff`](pi-packages/diff/) | Project-local | `diff.ts` | Show files changed during the last agent run |
 | [`external-changes`](pi-packages/external-changes/) | Project-local | `external-changes.ts` | Tell the next agent turn about edits, commits, and files made outside the session |
 | [`session-summarizer`](pi-packages/session-summarizer/) | Project-local | `index.ts` | Summarize the current or another branched Pi session |
@@ -61,6 +63,22 @@ Do not put credentials in this repository.
 The standalone source files remain in the package for development and tests,
 but Pi should load the generated bundle once for the whole feature set. Do not
 load `kilo.ts` or `provider-balance.ts` separately alongside the bundle.
+
+### `critique`
+
+Use `/critique [arguments]` to release Pi's terminal and open the current
+repository in [Critique](https://github.com/remorses/critique). The extension
+runs the pinned Bun-only CLI as a child process, then restores Pi after `q` or
+`Esc`. It does not register an agent-callable upload tool.
+
+```text
+/critique
+/critique --staged
+/critique main HEAD
+/critique --filter "src/**/*.ts"
+/critique review          # AI review through Pi via pi-acp
+/critique review --staged
+```
 
 ### `diff`
 
@@ -164,6 +182,14 @@ Use `/reload` in Pi after changing or installing an extension. Do not install
 anything globally without explicit approval; the global link changes behavior
 in every Pi project on the machine.
 
+`critique` owns runtime dependencies, so test it from its real path rather than
+symlinking `index.ts`:
+
+```bash
+cd pi-packages/critique
+pi -e ./index.ts
+```
+
 ## Development
 
 Use [Bun](https://bun.sh/) inside an extension directory. Never run `bun
@@ -183,6 +209,7 @@ Useful package commands:
 | Package | Typecheck | Tests | Format | Build |
 |---|---:|---:|---:|---:|
 | `bermudis-pi-goodies` | `bun run typecheck` | `bun run test` | `bun run format` | `bun run build` |
+| `critique` | `bun run typecheck` | `bun run test` | `bun run format` | — |
 | `diff` | `bun run typecheck` | — | `bun run format` | — |
 | `external-changes` | `bun run typecheck` | `bun run test` | `bun run format` | — |
 | `session-summarizer` | `bun run typecheck` | — | `bun run format` | — |

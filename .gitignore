@@ -1,5 +1,6 @@
 node_modules/
 bun.lock
+!pi-packages/critique/bun.lock
 *.bundle.mjs
 *.bundle.ts
 .agents/

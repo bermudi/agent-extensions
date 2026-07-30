@@ -1,0 +1,455 @@
+diff --git a/src/cli.tsx b/src/cli.tsx
+index 7512f1e9c5bf4f008d095c445f65ed1af65184f4..97298ba61f423f4bab42fa91c7493be6607626bf 100755
+--- a/src/cli.tsx
++++ b/src/cli.tsx
+@@ -62,6 +62,7 @@ import {
+   type GitCommandOptions,
+ } from "./diff-utils.js";
+ import type { TreeFileInfo } from "./directory-tree.js";
++import type { AcpAgentLaunch } from "./review/agent-launch.js";
+ import packageJson from "../package.json" assert { type: "json" };
+ 
+ 
+@@ -111,7 +112,7 @@ interface ReviewModeOptions {
+ // Review mode handler
+ async function runReviewMode(
+   gitCommand: string,
+-  agent: string,
++  agentLaunch: AcpAgentLaunch,
+   options: ReviewModeOptions = {},
+   reviewOptions?: { isDefaultMode?: boolean; diffOptions?: Pick<GitCommandOptions, "context" | "filter" | "positionalFilters"> },
+ ) {
+@@ -124,7 +125,7 @@ async function runReviewMode(
+   // When --json is set, redirect clack output to stderr
+   const out = json ? { output: process.stderr } : {};
+ 
+-  logger.info("Starting review mode", { gitCommand, agent });
++  logger.info("Starting review mode", { gitCommand, agent: agentLaunch.id });
+ 
+   // Intro
+   clack.intro("critique review", out);
+@@ -373,7 +374,7 @@ async function runReviewMode(
+   try {
+     // Create client and start connection in background (non-blocking)
+     // This lets us list sessions while ACP server is starting
+-    acpClient = createAcpClient(agent as "opencode" | "claude", (notification) => {
++    acpClient = createAcpClient(agentLaunch, (notification) => {
+       if (reviewSessionId && notification.sessionId === reviewSessionId) {
+         printNotification(notification);
+       }
+@@ -513,7 +514,11 @@ async function runReviewMode(
+           updatedAt: now,
+           status: "in_progress",
+           cwd,
+-          agent: agent as "opencode" | "claude",
++          agent: agentLaunch.id,
++          ...(agentLaunch.custom ? {
++            agentCommand: [...agentLaunch.command],
++            agentCwd: agentLaunch.cwd,
++          } : {}),
+           title: "Untitled review",
+           hunks,
+           reviewYaml: { hunks: [] },
+@@ -882,7 +887,7 @@ async function runResumeMode(options: ResumeModeOptions) {
+   if (review.status === "in_progress") {
+     clack.log.info(`Resuming interrupted review: ${review.title}`);
+ 
+-    const { createAcpClient, readReviewYaml, saveReview } = await import("./review/index.js");
++    const { createAcpClient, readReviewYaml, restoreAcpAgentLaunch, saveReview } = await import("./review/index.js");
+     const { tmpdir } = await import("os");
+     const { join } = await import("path");
+ 
+@@ -906,7 +911,9 @@ async function runResumeMode(options: ResumeModeOptions) {
+     fs.writeFileSync(yamlPath, existingYaml);
+ 
+     // Connect to ACP and try to resume
+-    const acpClient = createAcpClient(review.agent);
++    const acpClient = createAcpClient(
++      restoreAcpAgentLaunch(review.agent, review.agentCommand, review.agentCwd),
++    );
+     acpClient.startConnection();
+ 
+     const resumeSpinner = clack.spinner();
+@@ -2358,8 +2365,14 @@ cli
+ 
+ cli
+   .command("review [base] [head]", "AI-powered diff review")
+-  .option("--agent <name>", "AI agent to use (default: opencode)")
+-  .option("--model <id>", "Model to use for review (e.g., anthropic/claude-sonnet-4-20250514 for opencode, claude-sonnet-4-20250514 for claude)")
++  .option("--agent <name>", "Built-in AI agent to use: opencode or claude (default: opencode)")
++  .option("--agent-command <executable>", "Launch any ACP-compatible agent executable")
++  .option("--agent-arg <argument>", wrapJsonSchema<string[]>({
++    type: "array",
++    items: { type: "string" },
++    description: "Argument for --agent-command (can be repeated)",
++  }))
++  .option("--model <id>", "ACP model ID to use for review")
+   .option("--staged", "Review staged changes")
+   .option("--commit <ref>", "Review changes from a specific commit")
+   .option("--context <lines>", "Number of context lines (default: 6)")
+@@ -2395,12 +2408,16 @@ cli
+         return;
+       }
+ 
+-      // Default agent to opencode if not specified
+-      const agent = options.agent || "opencode";
+-      if (agent !== "opencode" && agent !== "claude") {
+-        console.error(`Unknown agent: ${agent}. Supported: opencode, claude`);
+-        process.exit(1);
+-      }
++      const { resolveAcpAgentLaunch } = await import("./review/agent-launch.js");
++      const agentArgs = options.agentArg
++        ? Array.isArray(options.agentArg) ? options.agentArg : [options.agentArg]
++        : undefined;
++      const agentLaunch = resolveAcpAgentLaunch({
++        agent: options.agent,
++        agentCommand: options.agentCommand,
++        agentArgs,
++        cwd: process.cwd(),
++      });
+ 
+       const gitCommand = buildGitCommand({
+         staged: options.staged,
+@@ -2428,7 +2445,7 @@ cli
+         pageSize: options.pdfPageSize,
+       } : undefined;
+       const isDefaultMode = !options.staged && !options.commit && !base && !head;
+-      await runReviewMode(gitCommand, agent, {
++      await runReviewMode(gitCommand, agentLaunch, {
+         sessionIds,
+         webOptions,
+         pdfOptions,
+diff --git a/src/review/acp-client.ts b/src/review/acp-client.ts
+index 1c0c6f33596cf50adef31f0917add39ab2d03c84..e0427c2578ae872b3e7215d9af501f6dc61bbc2f 100644
+--- a/src/review/acp-client.ts
++++ b/src/review/acp-client.ts
+@@ -1,5 +1,5 @@
+ // ACP (Agent Client Protocol) client for communicating with AI coding assistants.
+-// Supports OpenCode and Claude Code agents for session listing, content loading,
++// Supports built-in and custom ACP agents for session listing, content loading,
+ // and creating AI-powered review sessions with streaming updates.
+ 
+ import {
+@@ -10,27 +10,32 @@ import {
+ 
+ } from "@agentclientprotocol/sdk"
+ import type { SessionInfo, SessionContent } from "./types.js"
++import { resolveAcpAgentLaunch, type AcpAgentLaunch, type AgentType } from "./agent-launch.js"
+ import { logger } from "../logger.js"
+ import fs from "fs"
+ import path from "path"
+ import os from "os"
+ 
+-export type AgentType = "opencode" | "claude"
++export type { AcpAgentLaunch, AgentType } from "./agent-launch.js"
++
++function isMethodNotFound(error: unknown): boolean {
++  return typeof error === "object" && error !== null && "code" in error && error.code === -32601
++}
+ 
+ /**
+  * Client for communicating with AI agents via ACP protocol
+- * Supports both OpenCode and Claude Code
+  */
+ export class AcpClient {
+   private proc: ReturnType<typeof Bun.spawn> | null = null
+   private client: ClientSideConnection | null = null
+   private sessionUpdates: Map<string, SessionNotification[]> = new Map()
+   private onUpdateCallback: ((notification: SessionNotification) => void) | null = null
+-  private agent: AgentType
++  private launch: AcpAgentLaunch
+   private connectionPromise: Promise<void> | null = null
++  private supportsSessionList = false
+ 
+-  constructor(agent: AgentType = "opencode") {
+-    this.agent = agent
++  constructor(agent: AgentType | AcpAgentLaunch = "opencode") {
++    this.launch = typeof agent === "string" ? resolveAcpAgentLaunch({ agent }) : agent
+     this.connect = this.connect.bind(this)
+     this.ensureConnected = this.ensureConnected.bind(this)
+     this.listSessions = this.listSessions.bind(this)
+@@ -68,14 +73,13 @@ export class AcpClient {
+    */
+   private async connect(onUpdate?: (notification: SessionNotification) => void): Promise<void> {
+     this.onUpdateCallback = onUpdate || null
+-    logger.info(`Spawning ${this.agent} ACP server...`)
+-
+-    // Spawn the appropriate ACP server
+-    const command = this.agent === "opencode"
+-      ? ["opencode", "acp"]
+-      : ["bunx", "@zed-industries/claude-code-acp"]
++    logger.info(`Spawning ${this.launch.id} ACP server...`, {
++      executable: this.launch.command[0],
++      argumentCount: this.launch.command.length - 1,
++    })
+ 
+-    this.proc = Bun.spawn(command, {
++    this.proc = Bun.spawn(this.launch.command, {
++      cwd: this.launch.cwd,
+       stdin: "pipe",
+       stdout: "pipe",
+       stderr: "inherit",
+@@ -150,11 +154,12 @@ export class AcpClient {
+ 
+     // Initialize the connection
+     logger.info("Initializing ACP connection...")
+-    await this.client.initialize({
++    const response = await this.client.initialize({
+       protocolVersion: 1,
+       clientCapabilities: {},
+     })
+-    logger.info("ACP connection established")
++    this.supportsSessionList = response.agentCapabilities?.sessionCapabilities?.list != null
++    logger.info("ACP connection established", { supportsSessionList: this.supportsSessionList })
+   }
+ 
+   /**
+@@ -169,6 +174,14 @@ export class AcpClient {
+       throw new Error("Client connection failed")
+     }
+ 
++    if (!this.supportsSessionList) {
++      if (this.launch.sessionListFallback === "claude-files") {
++        return this.listClaudeSessions(cwd, limit)
++      }
++      logger.info(`${this.launch.id} does not support ACP session listing; continuing without session context`)
++      return []
++    }
++
+     // Try ACP unstable_listSessions first
+     try {
+       const sessions: SessionInfo[] = []
+@@ -205,9 +218,13 @@ export class AcpClient {
+     } catch (error) {
+       // Fall back to file-based listing for agents that don't support listSessions
+       logger.debug("ACP listSessions not supported, falling back to file parsing", { error })
+-      if (this.agent === "claude") {
++      if (this.launch.sessionListFallback === "claude-files") {
+         return this.listClaudeSessions(cwd, limit)
+       }
++      if (this.launch.custom && isMethodNotFound(error)) {
++        logger.info(`${this.launch.id} does not support ACP session listing; continuing without session context`)
++        return []
++      }
+       throw error
+     }
+   }
+@@ -319,7 +336,7 @@ export class AcpClient {
+    * Create a new session and send the review prompt
+    * Returns the sessionId immediately, completes when prompt finishes
+    * Note: Use connect(onUpdate) to receive streaming notifications
+-   * @param options.model - Optional model ID to use (format depends on agent: "anthropic/claude-sonnet-4-..." for opencode, "claude-sonnet-4-..." for claude)
++   * @param options.model - Optional ACP model ID exposed by the selected agent
+    */
+   async createReviewSession(
+     cwd: string,
+@@ -352,13 +369,15 @@ export class AcpClient {
+ 
+       if (!modelExists) {
+         const modelList = availableModels.map(m => `  ${m.modelId}`).join("\n")
+-        const agentHint = this.agent === "opencode"
++        const agentHint = this.launch.id === "opencode"
+           ? "provider/model-id (e.g., anthropic/claude-sonnet-4-20250514)"
+-          : "model-id (e.g., claude-sonnet-4-20250514)"
++          : this.launch.id === "claude"
++            ? "model-id (e.g., claude-sonnet-4-20250514)"
++            : undefined
+         throw new Error(
+-          `Model "${options.model}" not found.\n\n` +
+-          `Available models:\n${modelList || "  (none)"}\n\n` +
+-          `Format for ${this.agent}: ${agentHint}`
++          `Model "${options.model}" not found for ${this.launch.id}.\n\n` +
++          `Available models:\n${modelList || "  (none)"}` +
++          (agentHint ? `\n\nExpected format: ${agentHint}` : "")
+         )
+       }
+ 
+@@ -688,12 +707,12 @@ Write the review to ${outputPath}. Cover all hunks (lockfiles and auto-generated
+ /**
+  * Create an ACP client and optionally start connection in background
+  * Connection is lazy - will connect on first method that needs it
+- * @param agent - Which agent to use (opencode or claude)
++ * @param agent - Built-in agent name or resolved custom ACP launch command
+  * @param onUpdate - Optional callback for session update notifications
+  * @param startConnectionNow - If true, starts connection immediately in background
+  */
+ export function createAcpClient(
+-  agent: AgentType = "opencode",
++  agent: AgentType | AcpAgentLaunch = "opencode",
+   onUpdate?: (notification: SessionNotification) => void,
+   startConnectionNow = false,
+ ): AcpClient {
+diff --git a/node_modules/critique/src/review/agent-launch.ts b/src/review/agent-launch.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1eb53646ef35d7d06be8e1d06240e81ceb34e42
+--- /dev/null
++++ b/src/review/agent-launch.ts
+@@ -0,0 +1,94 @@
++// Resolves built-in and user-provided ACP agent launch commands.
++// Commands are always passed directly to Bun.spawn as argv, never through a shell.
++
++import path from "path"
++
++export type AgentType = "opencode" | "claude"
++export type SessionListFallback = "claude-files"
++
++export interface AcpAgentLaunch {
++  id: string
++  command: string[]
++  custom: boolean
++  cwd?: string
++  sessionListFallback?: SessionListFallback
++}
++
++export interface AcpAgentLaunchOptions {
++  agent?: string
++  agentCommand?: string
++  agentArgs?: string[]
++  cwd?: string
++}
++
++const BUILTIN_AGENTS: Record<AgentType, Omit<AcpAgentLaunch, "custom">> = {
++  opencode: {
++    id: "opencode",
++    command: ["opencode", "acp"],
++  },
++  claude: {
++    id: "claude",
++    command: ["bunx", "@zed-industries/claude-code-acp"],
++    sessionListFallback: "claude-files",
++  },
++}
++
++function isAgentType(value: string): value is AgentType {
++  return value === "opencode" || value === "claude"
++}
++
++function createCustomLaunch(command: string[], id?: string, cwd?: string): AcpAgentLaunch {
++  if (!Array.isArray(command) || command.some(part => typeof part !== "string")) {
++    throw new Error("ACP agent command must be an array of strings")
++  }
++
++  const executable = command[0]?.trim()
++  if (!executable) {
++    throw new Error("ACP agent command must not be empty")
++  }
++
++  return {
++    id: id || path.basename(executable) || executable,
++    command: [executable, ...command.slice(1)],
++    custom: true,
++    ...(cwd ? { cwd } : {}),
++  }
++}
++
++export function resolveAcpAgentLaunch(options: AcpAgentLaunchOptions = {}): AcpAgentLaunch {
++  const { agent, agentCommand, agentArgs = [], cwd } = options
++
++  if (agentCommand !== undefined && agent !== undefined) {
++    throw new Error("--agent and --agent-command cannot be used together")
++  }
++  if (agentCommand === undefined && agentArgs.length > 0) {
++    throw new Error("--agent-arg requires --agent-command")
++  }
++
++  if (agentCommand !== undefined) {
++    return createCustomLaunch([agentCommand, ...agentArgs], undefined, cwd)
++  }
++
++  const agentName = agent ?? "opencode"
++  if (!isAgentType(agentName)) {
++    throw new Error(`Unknown agent: ${agentName}. Supported built-ins: opencode, claude; use --agent-command for another ACP agent`)
++  }
++
++  const launch = BUILTIN_AGENTS[agentName]
++  return {
++    ...launch,
++    command: [...launch.command],
++    custom: false,
++  }
++}
++
++export function restoreAcpAgentLaunch(
++  agent: string,
++  agentCommand?: string[],
++  cwd?: string,
++): AcpAgentLaunch {
++  if (agentCommand !== undefined) {
++    return createCustomLaunch(agentCommand, agent, cwd)
++  }
++  return resolveAcpAgentLaunch({ agent })
++}
+diff --git a/src/review/index.ts b/src/review/index.ts
+index b145b32a4ce28ed93b7756ffbcdf5f7705de19b6..34e8b6f04672ac5f33bc7202f522b0047649d405 100644
+--- a/src/review/index.ts
++++ b/src/review/index.ts
+@@ -1,5 +1,5 @@
+ // AI-powered diff review module using Agent Client Protocol (ACP).
+-// Coordinates with OpenCode or Claude Code to generate progressive disclosure reviews.
++// Coordinates with built-in or custom ACP agents to generate progressive disclosure reviews.
+ // Re-exports all review functionality for use by the CLI.
+ 
+ export {
+@@ -21,7 +21,14 @@ export {
+   findHunkByStableId,
+   combineHunkPatches,
+ } from "./hunk-parser.js"
+-export { AcpClient, OpencodeAcpClient, createAcpClient, type AgentType } from "./acp-client.js"
++export { AcpClient, OpencodeAcpClient, createAcpClient } from "./acp-client.js"
++export {
++  resolveAcpAgentLaunch,
++  restoreAcpAgentLaunch,
++  type AcpAgentLaunch,
++  type AcpAgentLaunchOptions,
++  type AgentType,
++} from "./agent-launch.js"
+ export { compressSession, sessionsToContextXml } from "./session-context.js"
+ export { watchReviewYaml, readReviewYaml, waitForFirstValidGroup } from "./yaml-watcher.js"
+ export { StreamDisplay } from "./stream-display.js"
+diff --git a/src/review/storage.ts b/src/review/storage.ts
+index 1a818bbc39ba399a0860fa2470cb7d625132e41b..f5e0508f9cfc89d5ae5a25c17bb866e98db486d5 100644
+--- a/src/review/storage.ts
++++ b/src/review/storage.ts
+@@ -27,7 +27,11 @@ export interface StoredReview {
+   updatedAt: number
+   status: ReviewStatus
+   cwd: string
+-  agent: "opencode" | "claude"
++  agent: string
++  /** Exact argv used for a custom ACP agent. Built-in agents omit this field. */
++  agentCommand?: string[]
++  /** Working directory used to launch a custom ACP agent. */
++  agentCwd?: string
+   title: string
+   hunks: IndexedHunk[]
+   reviewYaml: ReviewYaml
+@@ -43,7 +47,7 @@ export interface ReviewMetadata {
+   status: ReviewStatus
+   cwd: string
+   title: string
+-  agent: "opencode" | "claude"
++  agent: string
+ }
+ 
+ /**
+@@ -51,8 +55,9 @@ export interface ReviewMetadata {
+  */
+ function ensureReviewsDir(): void {
+   if (!fs.existsSync(REVIEWS_DIR)) {
+-    fs.mkdirSync(REVIEWS_DIR, { recursive: true })
++    fs.mkdirSync(REVIEWS_DIR, { recursive: true, mode: 0o700 })
+   }
++  fs.chmodSync(REVIEWS_DIR, 0o700)
+ }
+ 
+ /**
+@@ -70,7 +75,8 @@ export function saveReview(review: StoredReview): void {
+   ensureReviewsDir()
+   
+   const filepath = getReviewPath(review.id)
+-  fs.writeFileSync(filepath, JSON.stringify(review, null, 2))
++  fs.writeFileSync(filepath, JSON.stringify(review, null, 2), { mode: 0o600 })
++  fs.chmodSync(filepath, 0o600)
+   
+   // Cleanup old reviews
+   cleanupOldReviews()
