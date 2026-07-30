@@ -1,94 +1,222 @@
 # agent-extensions
 
-Personal repo for [Pi](https://github.com/earendil-works/pi) coding agent extensions.
+Personal [Pi](https://github.com/earendil-works/pi) extensions and experiments.
 
-Over time this grew into a few substantial projects, which have since been
-**extracted into standalone sibling repos** (history preserved via `git filter-repo`):
+This repository is intentionally **not** a monorepo with shared tooling. Every
+maintained extension is an isolated package with its own dependencies,
+`package.json`, and TypeScript configuration. Work inside the package you are
+changing; there is no root install or root test command.
 
-| Sibling repo | Was here as | What it is |
-|--------------|-------------|------------|
-| [`../pi-delegate`](../pi-delegate) | `pi/delegate` | Parallel subagent delegation with async ticketing, session pooling, retries |
-| [`../pi-session-search`](../pi-session-search) | `pi/session-search` + `pi/compaction-engine` | Full-text search across sessions (FTS5) + its transcript/compaction engine |
+## Repository layout
 
-## Structure
-
-```
+```text
 agent-extensions/
-├── pi-packages/
-│   ├── bermudis-pi-goodies/   # ACTIVE (global bundle): copy-with-model, name-with-ai,
-│   │                          #   zed, prefer-tools, kilo provider, provider-balance
-│   ├── diff/                  # ACTIVE (project-local install)
-│   ├── external-changes/      # ACTIVE (project-local install): diff of changes between agent runs
-│   ├── session-summarizer/    # ACTIVE (project-local install)
-│   └── experiments/           # ARCHIVE — exploratory/unused extensions (see below)
-└── mcp/                       # MCP server experiments
+├── AGENTS.md
+├── README.md
+└── pi-packages/
+    ├── bermudis-pi-goodies/  # maintained; global bundle
+    ├── diff/                 # maintained; project-local extension
+    ├── external-changes/     # maintained; project-local extension
+    ├── session-summarizer/   # maintained; project-local extension
+    └── experiments/          # archived, opt-in experiments
 ```
 
-Each extension is a **fully isolated package** — its own `package.json`,
-`tsconfig.json`, `node_modules/`, and `bun.lock`. There is no root `package.json`
-or root tooling; always work inside an extension directory.
+Two larger projects were extracted into sibling repositories with their
+history preserved:
 
-### Active extensions
+| Repository | Former location | Purpose |
+|---|---|---|
+| [`../pi-delegate`](../pi-delegate) | `pi/delegate` | Parallel subagent delegation, async ticketing, session pooling, and retries |
+| [`../pi-session-search`](../pi-session-search) | `pi/session-search` and `pi/compaction-engine` | Full-text search across sessions, branch-aware reading, and resume workflows |
 
-- **bermudis-pi-goodies** — `/copy-with-model`, `/name-with-ai`, `/z`, the
-  `prefer-tools` hook, the Kilo provider, and the provider-balance footer.
-  Installed globally as an esbuild bundle (multi-file ext — see Install).
-- **diff** / **external-changes** / **session-summarizer** — installed
-  project-local (`.pi/extensions/`).
+Develop those projects in their own directories. They have their own package
+manifests, lockfiles, tests, and typechecks.
 
-### Experiments (`pi-packages/experiments/`)
+## Maintained extensions
 
-Everything else — exploratory builds, abandoned ideas, research notes. Not gated
-by typecheck or the default test run. A few still have passing tests; revive at
-will. Notable: `arena`, `roundtable`, `trim-context`, `pi-debate`, `session-reference`.
-`supervise` depends on the extracted `../pi-delegate` via a cross-repo import.
+| Package | Scope | Entry point | Purpose |
+|---|---|---|---|
+| [`bermudis-pi-goodies`](pi-packages/bermudis-pi-goodies/) | Global | `bermudis-pi-goodies.bundle.ts` | Commands, hooks, the Kilo provider, and the Kilo balance footer |
+| [`diff`](pi-packages/diff/) | Project-local | `diff.ts` | Show files changed during the last agent run |
+| [`external-changes`](pi-packages/external-changes/) | Project-local | `external-changes.ts` | Tell the next agent turn about edits, commits, and files made outside the session |
+| [`session-summarizer`](pi-packages/session-summarizer/) | Project-local | `index.ts` | Summarize the current or another branched Pi session |
 
-## Install
+### `bermudis-pi-goodies`
 
-Pi loads extensions via Node, which resolves relative imports against the
-symlink path — so multi-file extensions must ship as a **bundle**. The
-`bermudis-pi-goodies` bundle is committed; rebuild it after editing the source:
+This is a bundle of independent features sharing one Pi extension entry point:
+
+| Feature | Interface | Behavior |
+|---|---|---|
+| `copy-with-model` | `/copy-with-model` | Copies the last assistant reply as a fenced code block tagged with the model name. Supports common Linux, macOS, and Windows clipboard paths, with an OSC 52 fallback. |
+| `name-with-ai` | `/name-with-ai [name]` | Generates a short session name from the first user message, or sets a supplied name directly. Uses the current Pi model. |
+| `zed` | `/z` | Opens the current working directory in a new Zed window. Uses `zeditor` on Linux and `zed` elsewhere. |
+| `prefer-tools` | `tool_call` hook | Blocks `rm` in command position in favor of `trash`, and blocks bare `python`, `pip`, `pytest`, and `mypy` in favor of `uv`. Quoted text, heredocs, arguments, and similar non-command occurrences are ignored. |
+| `kilo` | Provider / `/login kilo` | Adds the Kilo Gateway provider, including free-model discovery, authenticated catalog refresh, device-code login, and OpenRouter-compatible routing. |
+| `provider-balance` | Footer | Displays the current Kilo credit balance beside the working-directory footer line when authenticated. |
+
+Kilo authentication can use either Pi's `/login kilo` flow or `KILO_API_KEY`.
+`KILO_API_URL` can point the provider at a compatible alternate API endpoint.
+Do not put credentials in this repository.
+
+The standalone source files remain in the package for development and tests,
+but Pi should load the generated bundle once for the whole feature set. Do not
+load `kilo.ts` or `provider-balance.ts` separately alongside the bundle.
+
+### `diff`
+
+The extension records the repository state when an agent run starts and
+combines Git changes with files touched through Pi's `edit` and `write` tools.
+At the end of the run it reports how many files changed.
+
+Commands:
+
+```text
+/diff       Choose a changed file and view its Git diff
+/diff list  List changed files
+/diff clear Reset the tracked list and establish a new baseline
+```
+
+### `external-changes`
+
+This is a silent lifecycle extension for Git repositories. After the agent has
+fully settled, it records a baseline consisting of `HEAD`, the working tree,
+and untracked files. Before the next agent turn it injects a bounded report for:
+
+- uncommitted changes made outside the session;
+- commits made outside the session; and
+- newly created untracked files.
+
+It does nothing outside a Git worktree and remains silent when there is no drift.
+
+### `session-summarizer`
+
+Use `/summarize` to produce a compact, model-generated summary of a current or
+branched session:
+
+```text
+/summarize                    Summarize the current session
+/summarize <session-path>     Summarize a specific JSONL session
+/summarize <session-uuid>     Resolve a session UUID or prefix and summarize it
+```
+
+The summarizer understands branch ancestry, compaction and handoff boundaries,
+tool activity, model usage, token statistics, and costs when those values are
+available. It uses the currently selected Pi model and API credentials.
+
+## Archived experiments
+
+[`pi-packages/experiments/`](pi-packages/experiments/) contains exploratory or
+unused extensions. It is not maintained production code and is not included in
+the maintained typecheck gate. Some experiments have tests and can be run on
+demand.
+
+Examples include:
+
+- `arena`, `roundtable`, and `pi-debate` — multi-agent discussion experiments;
+- `supervise` — supervision tooling related to `../pi-delegate`;
+- `session-reference` and `trim-context` — session and context experiments;
+- `gemini-youtube` and `gemini-youtube-cached` — YouTube analysis experiments;
+- `command-center`, `fusion`, `forge-compaction`, and `extension-timer` — UI and
+  lifecycle experiments; and
+- `subagent-landscape` — research notes and comparison documents.
+
+Treat the directory as a laboratory, not an API promise.
+
+## Installation
+
+Pi discovers extensions from either of these locations:
+
+| Location | Scope |
+|---|---|
+| `.pi/extensions/*.ts` | The current project only |
+| `~/.pi/agent/extensions/*.ts` | All Pi projects for the current user |
+
+The commands below assume they are run from the repository root.
+
+### Global goodies bundle
+
+`bermudis-pi-goodies` is a multi-file extension. Pi loads it through a symlink,
+so the symlink must point to the committed bundle rather than `index.ts` or one
+of the individual feature modules:
 
 ```bash
-cd pi-packages/bermudis-pi-goodies && bun run build
-# regenerates bermudis-pi-goodies.bundle.ts
+mkdir -p ~/.pi/agent/extensions
+ln -sf "$PWD/pi-packages/bermudis-pi-goodies/bermudis-pi-goodies.bundle.ts" \
+  ~/.pi/agent/extensions/bermudis-pi-goodies.ts
 ```
 
-Symlink into the desired scope:
+### Project-local extensions
+
+Create the discovery directory if this project does not already have one, then
+link the individual single-file extensions:
 
 ```bash
-# Global (all projects) — multi-file ext: point at the bundle
-ln -sf "$PWD/pi-packages/bermudis-pi-goodies/bermudis-pi-goodies.bundle.ts" ~/.pi/agent/extensions/bermudis-pi-goodies.ts
-
-# Project-local (this repo only) — single-file ext: point at the source
-ln -sf "$PWD/pi-packages/diff/diff.ts" .pi/extensions/diff.ts
-ln -sf "$PWD/pi-packages/external-changes/external-changes.ts" .pi/extensions/external-changes.ts
-ln -sf "$PWD/pi-packages/session-summarizer/index.ts" .pi/extensions/session-summarizer.ts
+mkdir -p .pi/extensions
+ln -sf "$PWD/pi-packages/diff/diff.ts" \
+  .pi/extensions/diff.ts
+ln -sf "$PWD/pi-packages/external-changes/external-changes.ts" \
+  .pi/extensions/external-changes.ts
+ln -sf "$PWD/pi-packages/session-summarizer/index.ts" \
+  .pi/extensions/session-summarizer.ts
 ```
 
-Then `/reload` in Pi. Don't install globally without asking.
+Use `/reload` in Pi after changing or installing an extension. Do not install
+anything globally without explicit approval; the global link changes behavior
+in every Pi project on the machine.
 
-## Develop
+## Development
 
-There are no root scripts — run everything inside the extension you're touching:
+Use [Bun](https://bun.sh/) inside an extension directory. Never run `bun
+install` or `bun add` at this repository root: there is deliberately no root
+`package.json`, lockfile, or `node_modules` directory.
 
 ```bash
-cd pi-packages/<ext>
-bun install        # first time only
-bun run typecheck  # active extensions (experiments has no typecheck script)
-bun run test       # extensions that have tests
-bun run format     # prettier on that extension's .ts files
-bun run build      # bermudis-pi-goodies only (esbuild bundle)
+cd pi-packages/<extension>
+bun install                 # first setup, or after dependency changes
+bun run typecheck           # packages with a typecheck script
+bun run test                # packages with tests
+bun run format              # package-specific Prettier command
 ```
 
-For the extracted projects, develop in their own repos (`../pi-delegate`,
-`../pi-session-search`) — each has its own `package.json`, tests, and typecheck.
+Useful package commands:
 
-## Adding a new extension
+| Package | Typecheck | Tests | Format | Build |
+|---|---:|---:|---:|---:|
+| `bermudis-pi-goodies` | `bun run typecheck` | `bun run test` | `bun run format` | `bun run build` |
+| `diff` | `bun run typecheck` | — | `bun run format` | — |
+| `external-changes` | `bun run typecheck` | `bun run test` | `bun run format` | — |
+| `session-summarizer` | `bun run typecheck` | — | `bun run format` | — |
+| `experiments` | not gated | `bun run test` | `bun run format` | — |
 
-1. Create `pi-packages/<name>/<name>.ts` (or a dir with an `index.ts`) plus its
-   own `package.json` / `tsconfig.json`.
-2. If it's a keeper, leave it at `pi-packages/` root. If experimental, drop it
-   in `pi-packages/experiments/`.
-3. `cd` in and run `bun install`, then `bun run typecheck` / `bun run test`.
-4. Symlink into Pi's discovery path when ready (don't install globally without asking).
+For a normal goodies change:
+
+```bash
+cd pi-packages/bermudis-pi-goodies
+bun run typecheck
+bun run test
+bun run build
+```
+
+The build regenerates `bermudis-pi-goodies.bundle.ts`; commit the regenerated
+bundle with its source changes. The bundle deliberately leaves external Pi
+packages unresolved because Pi supplies them at runtime.
+
+For a maintained extension change, run the narrowest relevant typecheck and
+test first. Broaden verification when shared APIs or package boundaries are
+changed. Experiments are opt-in and may depend on extracted sibling projects.
+
+## Adding an extension
+
+1. Create a new directory under `pi-packages/` for maintained work, or under
+   `pi-packages/experiments/` for exploratory work.
+2. Add an isolated `package.json` and `tsconfig.json`; declare dependencies in
+   that package rather than at the repository root.
+3. Run `bun install` from the new package directory.
+4. Add a focused typecheck and test command where practical.
+5. For a multi-file extension, add an esbuild bundle and load the bundle from
+   Pi. A directly symlinked multi-file source extension will resolve imports
+   relative to the symlink location and is expected to fail.
+6. Install or symlink it only when it is ready, then use `/reload` in Pi.
+
+Keep extensions small, observable, and explicit about failures. Do not hide
+errors or silently swallow external-process failures.
