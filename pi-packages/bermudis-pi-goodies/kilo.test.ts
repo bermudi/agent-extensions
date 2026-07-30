@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import {
+import type {
+  ExtensionAPI,
+  ProviderConfig,
+} from "@earendil-works/pi-coding-agent";
+import kilo, {
   abortableSleep,
   getKiloModelCompat,
   getKiloThinkingLevelMap,
@@ -11,6 +15,17 @@ import {
   type OpenRouterModel,
 } from "./kilo.ts";
 
+function captureKiloProvider(): ProviderConfig {
+  let config: ProviderConfig | undefined;
+  kilo({
+    registerProvider(provider, registeredConfig) {
+      if (provider === "kilo") config = registeredConfig;
+    },
+  } as unknown as ExtensionAPI);
+  if (!config) throw new Error("Kilo provider was not registered");
+  return config;
+}
+
 // Minimal OpenRouterModel factory; isFreeModel only reads id + pricing.
 function model(
   id: string,
@@ -18,6 +33,92 @@ function model(
 ): OpenRouterModel {
   return { id, name: id, context_length: 8192, pricing };
 }
+
+describe("catalog refresh", () => {
+  test("extension registration performs no startup fetch", () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCount = 0;
+    globalThis.fetch = (() => {
+      fetchCount++;
+      throw new Error("unexpected startup fetch");
+    }) as typeof fetch;
+
+    try {
+      const provider = captureKiloProvider();
+      expect(fetchCount).toBe(0);
+      expect(provider.models?.map(({ id }) => id)).toEqual(["kilo-auto/free"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("reuses a fresh catalog instead of fetching on every picker refresh", async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCount = 0;
+    globalThis.fetch = (async () => {
+      fetchCount++;
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: "example/model",
+              name: "Example Model",
+              context_length: 32_000,
+              architecture: {
+                input_modalities: ["text"],
+                output_modalities: ["text"],
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    try {
+      const provider = captureKiloProvider();
+      const refreshModels = provider.refreshModels;
+      if (!refreshModels)
+        throw new Error("Kilo refresh hook was not registered");
+
+      let stored:
+        | Awaited<
+            ReturnType<Parameters<typeof refreshModels>[0]["store"]["read"]>
+          >
+        | undefined;
+      const context: Parameters<typeof refreshModels>[0] = {
+        credential: { type: "api_key", key: "test-key" },
+        store: {
+          read: async () => stored,
+          write: async (entry) => {
+            stored = entry;
+          },
+          delete: async () => {
+            stored = undefined;
+          },
+        },
+        allowNetwork: true,
+      };
+
+      const first = await refreshModels(context);
+      const second = await refreshModels(context);
+
+      const reloadedProvider = captureKiloProvider();
+      const reloadRefresh = reloadedProvider.refreshModels;
+      if (!reloadRefresh)
+        throw new Error("Reloaded Kilo refresh hook was not registered");
+      const restored = await reloadRefresh({ ...context, allowNetwork: false });
+
+      expect(first.map(({ id }) => id)).toEqual(["example/model"]);
+      expect(second.map(({ id }) => id)).toEqual(["example/model"]);
+      expect(restored.map(({ id }) => id)).toEqual(["example/model"]);
+      expect(fetchCount).toBe(1);
+      expect(stored?.models).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
 
 describe("parsePrice", () => {
   test("converts per-token to per-million-token", () => {

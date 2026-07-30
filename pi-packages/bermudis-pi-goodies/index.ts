@@ -18,13 +18,11 @@ import nameWithAi from "./name-with-ai.ts";
 import zed from "./zed.ts";
 import preferTools from "./prefer-tools.ts";
 
-export default async function bermudisPiGoodies(
-  pi: ExtensionAPI,
-): Promise<void> {
+export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   copyWithModel(pi);
   nameWithAi(pi);
   zed(pi);
   preferTools(pi);
   providerBalance(pi);
-  await kilo(pi);
+  kilo(pi);
 }

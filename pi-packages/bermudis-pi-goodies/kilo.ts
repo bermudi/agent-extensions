@@ -12,13 +12,14 @@
  *  - Reads auth via the public ModelRegistry API (getApiKeyForProvider /
  *    getProviderAuthStatus). The older `authStorage` map was removed upstream.
  *  - Dynamic model catalog uses the modern ProviderConfig.refreshModels(context)
- *    hook. The framework calls it on startup and after login; when
- *    authenticated it returns the full Kilo catalog, otherwise it returns
- *    nothing and the configured free-model fallback list stays in place.
+ *    hook. A static free router keeps extension loading network-free; authenticated
+ *    catalogs are persisted through pi's model store and revalidated at most every
+ *    four hours (or when pi explicitly forces a refresh).
  */
 
 import type {
   Api,
+  Model,
   OAuthCredentials,
   OAuthLoginCallbacks,
 } from "@earendil-works/pi-ai";
@@ -40,6 +41,9 @@ const KILO_OPENROUTER_BASE = `${KILO_API_BASE}/api/openrouter`;
 const KILO_DEVICE_AUTH_ENDPOINT = `${KILO_API_BASE}/api/device-auth/codes`;
 const POLL_INTERVAL_MS = 3000;
 const MODELS_FETCH_TIMEOUT_MS = 10_000;
+// Match pi's built-in remote catalogs: model pickers should normally consume a
+// fresh local snapshot, not turn every open into a network round trip.
+const MODELS_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const LOGIN_REQUEST_TIMEOUT_MS = 15_000;
 // Kilo device-auth tokens are long-lived; treat as effectively non-expiring so
 // pi does not force a re-login every session.
@@ -451,6 +455,57 @@ function mapOpenRouterModel(m: OpenRouterModel): ProviderModelConfig {
   };
 }
 
+// Keep extension loading entirely local. Previously the async extension factory
+// downloaded all 346 models just to discover the free subset, adding about a
+// second to every pi startup before the TUI could appear. The stable Kilo free
+// router is enough as a bootstrap; authenticated catalogs are restored from
+// pi's model store and refreshed in the background.
+const KILO_FREE_MODELS: ProviderModelConfig[] = [
+  mapOpenRouterModel({
+    id: "kilo-auto/free",
+    name: "Auto Free",
+    context_length: 256_000,
+    top_provider: { max_completion_tokens: 10_000 },
+    pricing: {
+      prompt: "0",
+      completion: "0",
+      input_cache_read: "0",
+      input_cache_write: "0",
+    },
+    architecture: {
+      input_modalities: ["text"],
+      output_modalities: ["text"],
+    },
+    supported_parameters: ["reasoning"],
+  }),
+];
+
+function modelConfigToStoredModel(model: ProviderModelConfig): Model<Api> {
+  return {
+    ...model,
+    provider: KILO_PROVIDER_ID,
+    api: model.api ?? "openai-completions",
+    baseUrl: model.baseUrl ?? KILO_GATEWAY_BASE,
+  };
+}
+
+function storedModelToConfig(model: Model<Api>): ProviderModelConfig | null {
+  if (model.provider !== KILO_PROVIDER_ID) return null;
+  return {
+    id: model.id,
+    name: model.name,
+    ...(model.api !== "openai-completions" ? { api: model.api } : {}),
+    ...(model.baseUrl !== KILO_GATEWAY_BASE ? { baseUrl: model.baseUrl } : {}),
+    reasoning: model.reasoning,
+    thinkingLevelMap: model.thinkingLevelMap,
+    input: model.input,
+    cost: model.cost,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    compat: model.compat,
+  };
+}
+
 /** Combine the fetch ceiling timeout with an optional caller signal. */
 function modelsAbortSignal(signal?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(MODELS_FETCH_TIMEOUT_MS);
@@ -515,35 +570,26 @@ const KILO_PROVIDER_CONFIG = {
 // Extension entry point
 // =============================================================================
 
-export default async function (pi: ExtensionAPI) {
-  // Fallback catalog: free models, usable without authentication. The full
-  // catalog is loaded via refreshModels once the user authenticates.
-  let freeModels: ProviderModelConfig[] = [];
-  // Last successfully fetched authenticated catalog, kept so a transient
-  // refresh failure (or an offline pass) doesn't wipe paid models back to the
-  // free list. Cleared on logout.
+export default function kilo(pi: ExtensionAPI): void {
+  // The in-memory copy makes repeated refreshes (the /models flow performs two)
+  // effectively synchronous. The persisted copy makes extension startup local
+  // and preserves the full authenticated catalog across pi processes.
   let lastFullCatalog: ProviderModelConfig[] | null = null;
-  try {
-    freeModels = await fetchKiloModels({ freeOnly: true });
-  } catch (error) {
-    console.warn(
-      "[kilo] Failed to fetch free models at startup:",
-      error instanceof Error ? error.message : error,
-    );
-  }
+  let lastFullCatalogCheckedAt = 0;
+  let refreshInFlight: Promise<ProviderModelConfig[]> | undefined;
 
   pi.registerProvider(KILO_PROVIDER_ID, {
     ...KILO_PROVIDER_CONFIG,
-    models: freeModels,
+    models: KILO_FREE_MODELS,
     oauth: {
       name: "Kilo",
       login: loginKilo,
       refreshToken: refreshKiloToken,
       getApiKey: (cred: OAuthCredentials) => cred.access,
     },
-    // Called by the framework on startup (network refresh) and after login /
-    // logout. Resolves the bearer token from either credential kind so both
-    // OAuth and KILO_API_KEY users receive the full catalog.
+    // Called by the framework during cache-only startup, background startup
+    // refresh, model-picker refreshes, and login. Ordinary picker opens honor a
+    // four-hour freshness window; explicit forced refreshes bypass it.
     refreshModels: async (context) => {
       const credential = context.credential;
       const token =
@@ -553,33 +599,70 @@ export default async function (pi: ExtensionAPI) {
             ? (credential.key ?? null)
             : null;
 
-      // Logged out (no credential): revert to the public free catalog and drop
-      // any cached authenticated list so it can't leak past logout.
-      if (!token) {
-        lastFullCatalog = null;
-        return freeModels;
+      if (!token) return KILO_FREE_MODELS;
+
+      if (!lastFullCatalog) {
+        try {
+          const stored = await context.store.read();
+          const restored = (stored?.models ?? []).flatMap((model) => {
+            const config = storedModelToConfig(model);
+            return config ? [config] : [];
+          });
+          if (restored.length > 0) {
+            lastFullCatalog = restored;
+            lastFullCatalogCheckedAt = stored?.checkedAt ?? 0;
+          }
+        } catch (error) {
+          console.warn(
+            "[kilo] Failed to restore cached models:",
+            error instanceof Error ? error.message : error,
+          );
+        }
       }
-      // Authenticated but offline / cancelled: serve the last good catalog if
-      // we have one, else the free list.
-      if (!context.allowNetwork || context.signal?.aborted) {
-        return lastFullCatalog ?? freeModels;
+
+      const fallback = lastFullCatalog ?? KILO_FREE_MODELS;
+      if (!context.allowNetwork || context.signal?.aborted) return fallback;
+      if (
+        !context.force &&
+        lastFullCatalog &&
+        Date.now() - lastFullCatalogCheckedAt < MODELS_REFRESH_INTERVAL_MS
+      ) {
+        return lastFullCatalog;
       }
-      try {
-        const models = await fetchKiloModels({
-          token,
-          signal: context.signal,
-        });
-        lastFullCatalog = models;
-        return models;
-      } catch (error) {
-        // Transient failure: keep the last authenticated catalog rather than
-        // silently replacing it with the free list.
-        console.warn(
-          "[kilo] refreshModels fetch failed:",
-          error instanceof Error ? error.message : error,
-        );
-        return lastFullCatalog ?? freeModels;
-      }
+
+      refreshInFlight ??= (async () => {
+        try {
+          const models = await fetchKiloModels({
+            token,
+            signal: context.signal,
+          });
+          const checkedAt = Date.now();
+          lastFullCatalog = models;
+          lastFullCatalogCheckedAt = checkedAt;
+          try {
+            await context.store.write({
+              models: models.map(modelConfigToStoredModel),
+              checkedAt,
+            });
+          } catch (error) {
+            console.warn(
+              "[kilo] Failed to persist refreshed models:",
+              error instanceof Error ? error.message : error,
+            );
+          }
+          return models;
+        } catch (error) {
+          console.warn(
+            "[kilo] refreshModels fetch failed:",
+            error instanceof Error ? error.message : error,
+          );
+          return lastFullCatalog ?? KILO_FREE_MODELS;
+        } finally {
+          refreshInFlight = undefined;
+        }
+      })();
+
+      return refreshInFlight;
     },
   });
 }
