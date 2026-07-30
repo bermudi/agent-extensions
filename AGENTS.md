@@ -46,6 +46,8 @@ price of true isolation and is intentional.
 - `pi-packages/experiments/` — archive of unused/exploratory extensions. Excluded from typecheck; tests run via `bun run test` inside `pi-packages/experiments/` but the dir is not gated as maintained code.
 - Active extensions live at `pi-packages/<name>/`. New keepers go there; experiments go in `pi-packages/experiments/`.
 - Multi-file extensions symlinked globally must ship a **bundle** (esbuild, `--packages=external`) — pi's Node loader resolves relative imports against the symlink path, breaking unbundled multi-file exts. Single-file extensions can be symlinked directly. See `bermudis-pi-goodies` `build` script for the pattern.
+
+- **The bundle is a build artifact, not tracked in git.** After a fresh clone, run `bun install && bun run build` in the extension directory before symlinking. The `.gitignore` covers `*.bundle.{mjs,ts}`.
 - Test your work: `bun run typecheck` and `bun run test` inside the extension dir.
 - Do not symlink/install globally without bermudi's explicit request. The current WIP trial has only the goodies bundle installed globally; the standalone Kilo and provider-balance links are retired (both features ship in the goodies bundle).
 - Extensions load at session start. Use `/reload` to pick up changes mid-session.

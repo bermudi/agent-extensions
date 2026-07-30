@@ -118,6 +118,7 @@ var KILO_OPENROUTER_BASE = `${KILO_API_BASE}/api/openrouter`;
 var KILO_DEVICE_AUTH_ENDPOINT = `${KILO_API_BASE}/api/device-auth/codes`;
 var POLL_INTERVAL_MS = 3e3;
 var MODELS_FETCH_TIMEOUT_MS = 1e4;
+var MODELS_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1e3;
 var LOGIN_REQUEST_TIMEOUT_MS = 15e3;
 var TOKEN_EXPIRATION_MS = 365 * 24 * 60 * 60 * 1e3;
 var KILO_PROVIDER_ID = "kilo";
@@ -343,6 +344,49 @@ function mapOpenRouterModel(m) {
     compat: getKiloModelCompat(m, api)
   };
 }
+var KILO_FREE_MODELS = [
+  mapOpenRouterModel({
+    id: "kilo-auto/free",
+    name: "Auto Free",
+    context_length: 256e3,
+    top_provider: { max_completion_tokens: 1e4 },
+    pricing: {
+      prompt: "0",
+      completion: "0",
+      input_cache_read: "0",
+      input_cache_write: "0"
+    },
+    architecture: {
+      input_modalities: ["text"],
+      output_modalities: ["text"]
+    },
+    supported_parameters: ["reasoning"]
+  })
+];
+function modelConfigToStoredModel(model) {
+  return {
+    ...model,
+    provider: KILO_PROVIDER_ID,
+    api: model.api ?? "openai-completions",
+    baseUrl: model.baseUrl ?? KILO_GATEWAY_BASE
+  };
+}
+function storedModelToConfig(model) {
+  if (model.provider !== KILO_PROVIDER_ID) return null;
+  return {
+    id: model.id,
+    name: model.name,
+    ...model.api !== "openai-completions" ? { api: model.api } : {},
+    ...model.baseUrl !== KILO_GATEWAY_BASE ? { baseUrl: model.baseUrl } : {},
+    reasoning: model.reasoning,
+    thinkingLevelMap: model.thinkingLevelMap,
+    input: model.input,
+    cost: model.cost,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    compat: model.compat
+  };
+}
 function modelsAbortSignal(signal) {
   const timeout = AbortSignal.timeout(MODELS_FETCH_TIMEOUT_MS);
   return signal ? AbortSignal.any([timeout, signal]) : timeout;
@@ -385,53 +429,81 @@ var KILO_PROVIDER_CONFIG = {
     "User-Agent": "pi-kilo-provider"
   }
 };
-async function kilo_default(pi) {
-  let freeModels = [];
+function kilo(pi) {
   let lastFullCatalog = null;
-  try {
-    freeModels = await fetchKiloModels({ freeOnly: true });
-  } catch (error) {
-    console.warn(
-      "[kilo] Failed to fetch free models at startup:",
-      error instanceof Error ? error.message : error
-    );
-  }
+  let lastFullCatalogCheckedAt = 0;
+  let refreshInFlight;
   pi.registerProvider(KILO_PROVIDER_ID, {
     ...KILO_PROVIDER_CONFIG,
-    models: freeModels,
+    models: KILO_FREE_MODELS,
     oauth: {
       name: "Kilo",
       login: loginKilo,
       refreshToken: refreshKiloToken,
       getApiKey: (cred) => cred.access
     },
-    // Called by the framework on startup (network refresh) and after login /
-    // logout. Resolves the bearer token from either credential kind so both
-    // OAuth and KILO_API_KEY users receive the full catalog.
+    // Called by the framework during cache-only startup, background startup
+    // refresh, model-picker refreshes, and login. Ordinary picker opens honor a
+    // four-hour freshness window; explicit forced refreshes bypass it.
     refreshModels: async (context) => {
       const credential = context.credential;
       const token = credential?.type === "oauth" ? credential.access : credential?.type === "api_key" ? credential.key ?? null : null;
-      if (!token) {
-        lastFullCatalog = null;
-        return freeModels;
+      if (!token) return KILO_FREE_MODELS;
+      if (!lastFullCatalog) {
+        try {
+          const stored = await context.store.read();
+          const restored = (stored?.models ?? []).flatMap((model) => {
+            const config = storedModelToConfig(model);
+            return config ? [config] : [];
+          });
+          if (restored.length > 0) {
+            lastFullCatalog = restored;
+            lastFullCatalogCheckedAt = stored?.checkedAt ?? 0;
+          }
+        } catch (error) {
+          console.warn(
+            "[kilo] Failed to restore cached models:",
+            error instanceof Error ? error.message : error
+          );
+        }
       }
-      if (!context.allowNetwork || context.signal?.aborted) {
-        return lastFullCatalog ?? freeModels;
+      const fallback = lastFullCatalog ?? KILO_FREE_MODELS;
+      if (!context.allowNetwork || context.signal?.aborted) return fallback;
+      if (!context.force && lastFullCatalog && Date.now() - lastFullCatalogCheckedAt < MODELS_REFRESH_INTERVAL_MS) {
+        return lastFullCatalog;
       }
-      try {
-        const models = await fetchKiloModels({
-          token,
-          signal: context.signal
-        });
-        lastFullCatalog = models;
-        return models;
-      } catch (error) {
-        console.warn(
-          "[kilo] refreshModels fetch failed:",
-          error instanceof Error ? error.message : error
-        );
-        return lastFullCatalog ?? freeModels;
-      }
+      refreshInFlight ??= (async () => {
+        try {
+          const models = await fetchKiloModels({
+            token,
+            signal: context.signal
+          });
+          const checkedAt = Date.now();
+          lastFullCatalog = models;
+          lastFullCatalogCheckedAt = checkedAt;
+          try {
+            await context.store.write({
+              models: models.map(modelConfigToStoredModel),
+              checkedAt
+            });
+          } catch (error) {
+            console.warn(
+              "[kilo] Failed to persist refreshed models:",
+              error instanceof Error ? error.message : error
+            );
+          }
+          return models;
+        } catch (error) {
+          console.warn(
+            "[kilo] refreshModels fetch failed:",
+            error instanceof Error ? error.message : error
+          );
+          return lastFullCatalog ?? KILO_FREE_MODELS;
+        } finally {
+          refreshInFlight = void 0;
+        }
+      })();
+      return refreshInFlight;
     }
   });
 }
@@ -441,13 +513,105 @@ import { FooterComponent } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 var KILO_API_BASE2 = process.env.KILO_API_URL || "https://api.kilo.ai";
 var KILO_BALANCE_ENDPOINT = `${KILO_API_BASE2}/api/profile/balance`;
+var CODEX_API_BASE = (process.env.CODEX_API_URL || process.env.CHATGPT_BASE_URL || "https://chatgpt.com/backend-api").replace(/\/+$/, "");
+var CODEX_USAGE_ENDPOINT = `${CODEX_API_BASE}/wham/usage`;
+var CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
 var BALANCE_FETCH_TIMEOUT_MS = 5e3;
+function asRecord(value) {
+  return typeof value === "object" && value !== null ? value : null;
+}
+function objectProperty(value, key) {
+  const record = asRecord(value);
+  if (!record) return null;
+  return asRecord(record[key]);
+}
 function numericProperty(value, key) {
-  if (typeof value !== "object" || value === null || !(key in value)) {
+  const record = asRecord(value);
+  if (!record) return null;
+  const candidate = record[key];
+  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : null;
+}
+function stringProperty(value, key) {
+  const record = asRecord(value);
+  if (!record) return null;
+  const candidate = record[key];
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
+}
+function decodeBase64Url(value) {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = "=".repeat((4 - base64.length % 4) % 4);
+  const binary = atob(base64 + padding);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+function parseCodexAccountId(token) {
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) return null;
+  try {
+    const payload = asRecord(JSON.parse(decodeBase64Url(parts[1])));
+    const auth = payload ? asRecord(payload[CODEX_AUTH_CLAIM]) : null;
+    const accountId = auth?.chatgpt_account_id;
+    return typeof accountId === "string" && accountId.trim() ? accountId.trim() : null;
+  } catch {
     return null;
   }
-  const candidate = value[key];
-  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : null;
+}
+function parseCodexQuotaWindow(value) {
+  const usedPercent = numericProperty(value, "used_percent");
+  const windowSeconds = numericProperty(value, "limit_window_seconds");
+  if (usedPercent === null || windowSeconds === null || windowSeconds <= 0) {
+    return null;
+  }
+  return { usedPercent, windowSeconds };
+}
+function parseCodexQuotaWindows(value) {
+  const rateLimit = asRecord(value);
+  if (!rateLimit) return null;
+  const primary = parseCodexQuotaWindow(rateLimit.primary_window);
+  const secondary = parseCodexQuotaWindow(rateLimit.secondary_window);
+  return primary || secondary ? { primary, secondary } : null;
+}
+function parseCodexQuota(value) {
+  const payload = asRecord(value);
+  if (!payload) return null;
+  const base = parseCodexQuotaWindows(payload.rate_limit);
+  const additional = Array.isArray(payload.additional_rate_limits) ? payload.additional_rate_limits.flatMap((candidate) => {
+    const name = stringProperty(candidate, "limit_name");
+    const windows = parseCodexQuotaWindows(
+      objectProperty(candidate, "rate_limit")
+    );
+    return name && windows ? [{ name, ...windows }] : [];
+  }) : [];
+  if (!base && additional.length === 0) return null;
+  return {
+    primary: base?.primary ?? null,
+    secondary: base?.secondary ?? null,
+    additional
+  };
+}
+function formatWindowDuration(windowSeconds) {
+  const minutes = Math.max(1, Math.round(windowSeconds / 60));
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)}d`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${minutes}m`;
+}
+function formatCodexQuotaWindow(window) {
+  const usedPercent = Math.min(100, Math.max(0, window.usedPercent));
+  const remainingPercent = Math.round(100 - usedPercent);
+  return `${formatWindowDuration(window.windowSeconds)} ${remainingPercent}% left`;
+}
+function compactCodexQuotaName(name) {
+  return /codex-spark$/i.test(name) ? "Spark" : name;
+}
+function formatCodexQuota(quota) {
+  const parts = [quota.primary, quota.secondary].filter((window) => window !== null).map(formatCodexQuotaWindow);
+  for (const additional of quota.additional) {
+    const name = compactCodexQuotaName(additional.name);
+    for (const window of [additional.primary, additional.secondary]) {
+      if (window) parts.push(`${name} ${formatCodexQuotaWindow(window)}`);
+    }
+  }
+  return parts.join(" \xB7 ");
 }
 function formatCredits(balance) {
   if (balance >= 1e3) return `$${(balance / 1e3).toFixed(1)}k`;
@@ -474,8 +638,34 @@ async function fetchKiloBalance(token, signal) {
   }
   return `\u{1F4B0} ${formatCredits(balance)}`;
 }
+async function fetchCodexQuota(token, signal) {
+  const accountId = parseCodexAccountId(token);
+  if (!accountId) {
+    throw new Error("Codex access token did not contain an account ID");
+  }
+  const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
+  const response = await fetch(CODEX_USAGE_ENDPOINT, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      "User-Agent": "pi",
+      originator: "pi",
+      "chatgpt-account-id": accountId
+    },
+    signal: AbortSignal.any([timeout, signal])
+  });
+  if (!response.ok) {
+    throw new Error(`Codex quota request failed: ${response.status}`);
+  }
+  const quota = parseCodexQuota(await response.json());
+  if (quota === null) {
+    throw new Error("Codex quota response was invalid");
+  }
+  return `\u{1F4CA} ${formatCodexQuota(quota)}`;
+}
 var BALANCE_ADAPTERS = {
-  kilo: { fetch: fetchKiloBalance }
+  kilo: { fetch: fetchKiloBalance },
+  "openai-codex": { fetch: fetchCodexQuota, requiresOAuth: true }
 };
 var THINKING_LEVELS = /* @__PURE__ */ new Set([
   "minimal",
@@ -548,7 +738,10 @@ function providerBalance(pi) {
     balanceText = void 0;
     requestRender?.();
   }
-  async function refreshBalance(ctx, provider) {
+  function refreshForModel(ctx, model) {
+    return refreshBalance(ctx, model?.provider, model);
+  }
+  async function refreshBalance(ctx, provider, model) {
     const generation = ++refreshGeneration;
     refreshController?.abort();
     const controller = new AbortController();
@@ -557,6 +750,9 @@ function providerBalance(pi) {
     const providerId = provider;
     const adapter = providerId ? BALANCE_ADAPTERS[providerId] : void 0;
     if (!adapter || !providerId) return;
+    if (adapter.requiresOAuth && (!model || model.provider !== providerId || !ctx.modelRegistry.isUsingOAuth(model))) {
+      return;
+    }
     try {
       const token = await ctx.modelRegistry.getApiKeyForProvider(providerId);
       if (!token || generation !== refreshGeneration) return;
@@ -608,15 +804,19 @@ function providerBalance(pi) {
       };
     });
   }
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", (_event, ctx) => {
     activeContext = ctx;
     activeThinkingLevel = restoredThinkingLevel(ctx);
     installFooter(ctx);
-    await refreshBalance(ctx, ctx.model?.provider);
+    void refreshForModel(ctx, ctx.model);
   });
-  pi.on("model_select", async (event, ctx) => {
+  pi.on("model_select", (event, ctx) => {
     activeContext = ctx;
-    await refreshBalance(ctx, event.model?.provider ?? ctx.model?.provider);
+    void refreshForModel(ctx, event.model ?? ctx.model);
+  });
+  pi.on("agent_settled", (_event, ctx) => {
+    activeContext = ctx;
+    void refreshForModel(ctx, ctx.model);
   });
   pi.on("thinking_level_select", (event) => {
     activeThinkingLevel = event.level;
@@ -1155,13 +1355,13 @@ function preferTools(pi) {
 }
 
 // index.ts
-async function bermudisPiGoodies(pi) {
+function bermudisPiGoodies(pi) {
   copy_with_model_default(pi);
   nameWithAiExtension(pi);
   zed_default(pi);
   preferTools(pi);
   providerBalance(pi);
-  await kilo_default(pi);
+  kilo(pi);
 }
 export {
   bermudisPiGoodies as default
