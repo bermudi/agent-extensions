@@ -1,7 +1,7 @@
 # bermudis-pi-goodies
 
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
-extensions. One entry point, six independent features.
+extensions. One entry point, seven independent features.
 
 | Feature | Command / hook | What it does |
 |---------|----------------|--------------|
@@ -9,6 +9,7 @@ extensions. One entry point, six independent features.
 | `name-with-ai` | `/name-with-ai [name]` | Generate a short session name from the first user message (or set one manually). |
 | `zed` | `/z` | Open Zed editor on the current working directory. |
 | `prefer-tools` | hook (no command) | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`. |
+| `model-thinking` | hook + `/model-thinking` | Apply provider/model thinking defaults and remember per-model changes. |
 | `kilo` | provider | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`. |
 | `provider-balance` | footer (no command) | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 
@@ -23,6 +24,34 @@ ln -s "$PWD/bermudis-pi-goodies.bundle.ts" ~/.pi/agent/extensions/bermudis-pi-go
 
 Then `/reload` in Pi. Each feature is independent — disabling one is a one-line
 edit in `index.ts`. Kilo's provider and its balance footer are bundled here.
+
+## Model-specific thinking
+
+This feature is deliberately opt-in: models not covered by the config retain
+Pi's native thinking-level behavior. Create `~/.pi/agent/model-thinking.json`
+with provider defaults, exact model defaults, or both:
+
+```json
+{
+  "providers": {
+    "anthropic": "high",
+    "openai-codex": "xhigh"
+  },
+  "models": {
+    "anthropic/claude-haiku-4-5": "low"
+  }
+}
+```
+
+Exact `provider/model-id` entries take precedence over provider defaults. Once
+a model is managed, changing its thinking level in Pi records an exact-model
+override. Returning it to the provider default removes that redundant override.
+All current Pi levels are accepted: `off`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, and `max`. `/model-thinking` shows the active resolution and config
+path; `/model-thinking reset` deletes the whole config.
+
+## Provider and balance details
+
 Kilo registration is network-free: it starts with `kilo-auto/free`, restores
 an authenticated catalog from Pi's model store, and normally revalidates that
 catalog no more than every four hours. Balance and quota requests run in the background so they

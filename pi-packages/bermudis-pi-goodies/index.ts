@@ -7,12 +7,14 @@
  *   - name-with-ai     /name-with-ai     generate a session name via the model
  *   - zed              /z                open Zed on cwd
  *   - prefer-tools     hook              block legacy tools (use trash/rg/fd/uv)
+ *   - model-thinking   hook + command    remember thinking levels by provider/model
  *   - kilo             provider          access Kilo Gateway models
  *   - provider-balance footer            show Kilo credits or Codex quota in the footer
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import copyWithModel from "./copy-with-model.ts";
 import kilo from "./kilo.ts";
+import modelThinking from "./model-thinking.ts";
 import providerBalance from "./provider-balance.ts";
 import nameWithAi from "./name-with-ai.ts";
 import zed from "./zed.ts";
@@ -23,6 +25,7 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   nameWithAi(pi);
   zed(pi);
   preferTools(pi);
+  modelThinking(pi);
   providerBalance(pi);
   kilo(pi);
 }
