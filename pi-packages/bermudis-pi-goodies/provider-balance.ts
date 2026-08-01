@@ -20,6 +20,8 @@ const CODEX_API_BASE = (
 const CODEX_USAGE_ENDPOINT = `${CODEX_API_BASE}/wham/usage`;
 const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
 const BALANCE_FETCH_TIMEOUT_MS = 5_000;
+/** Refresh the footer balance every Nth turn end during a run. See turn_end handler. */
+const REFRESH_EVERY_N_TURNS = 5;
 
 interface BalanceAdapter {
   fetch(token: string, signal: AbortSignal): Promise<string>;
@@ -506,6 +508,8 @@ function addBalanceToWorkingDirectoryLine(
 export default function providerBalance(pi: ExtensionAPI): void {
   let activeContext: ExtensionContext | undefined;
   let balanceText: string | undefined;
+  /** Provider the currently-displayed balanceText belongs to. */
+  let displayedProvider: string | undefined;
   let refreshGeneration = 0;
   let refreshController: AbortController | undefined;
   let requestRender: (() => void) | undefined;
@@ -535,7 +539,16 @@ export default function providerBalance(pi: ExtensionAPI): void {
     refreshController?.abort();
     const controller = new AbortController();
     refreshController = controller;
-    clearBalance();
+
+    // Only blank the footer when the displayed value is for a different
+    // provider than the one we're about to fetch. A same-provider refresh
+    // keeps the last known value on screen until the fresh one lands (an
+    // atomic swap), which matters now that we refresh mid-turn rather than
+    // once per run — otherwise the number would flicker off on every refresh.
+    if (provider !== displayedProvider) {
+      displayedProvider = provider;
+      clearBalance();
+    }
 
     const providerId = provider;
     const adapter = providerId ? BALANCE_ADAPTERS[providerId] : undefined;
@@ -631,6 +644,18 @@ export default function providerBalance(pi: ExtensionAPI): void {
     void refreshForModel(ctx, ctx.model);
   });
 
+  // Live updates during a run. A turn is one assistant response plus its tool
+  // results, so turn_end is exactly the granularity at which balance/credits
+  // change. Refresh every Nth turn instead of every turn so chatty runs don't
+  // hammer provider status endpoints; agent_settled still fires afterward and
+  // guarantees a final refresh, so runs shorter than N turns and the trailing
+  // turns past the last multiple are never left stale.
+  pi.on("turn_end", (event, ctx) => {
+    activeContext = ctx;
+    if ((event.turnIndex + 1) % REFRESH_EVERY_N_TURNS !== 0) return;
+    void refreshForModel(ctx, ctx.model);
+  });
+
   pi.on("thinking_level_select", (event) => {
     activeThinkingLevel = event.level;
     requestRender?.();
@@ -642,5 +667,9 @@ export default function providerBalance(pi: ExtensionAPI): void {
     activeContext = undefined;
     activeThinkingLevel = "off";
     requestRender = undefined;
+    // Drop the prior session's balance so the next footer doesn't flash a
+    // stale value from a different provider before its first refresh lands.
+    balanceText = undefined;
+    displayedProvider = undefined;
   });
 }

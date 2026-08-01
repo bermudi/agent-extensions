@@ -3,6 +3,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ModelSelectEvent,
+  TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import providerBalance, {
   formatCodexQuota,
@@ -91,6 +92,85 @@ describe("event latency", () => {
     } finally {
       console.warn = originalWarn;
     }
+  });
+});
+
+describe("turn_end cadence", () => {
+  function setup(): {
+    fire: (event: TurnEndEvent) => void;
+    apiKeyCalls: () => number;
+  } {
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: unknown) => unknown
+    >();
+    providerBalance({
+      on(event, handler) {
+        handlers.set(
+          event,
+          handler as (event: unknown, ctx: unknown) => unknown,
+        );
+      },
+      events: {
+        emit() {},
+        on() {
+          return () => {};
+        },
+      },
+    } as unknown as ExtensionAPI);
+
+    const turnEnd = handlers.get("turn_end");
+    if (!turnEnd) {
+      throw new Error("provider-balance did not register turn_end");
+    }
+
+    let apiKeyCalls = 0;
+    // A provider with an adapter ("kilo") forces the refresh path to call
+    // getApiKeyForProvider before bailing. Returning null avoids any network
+    // while making every real refresh attempt observable as one call.
+    const ctx = {
+      model: { provider: "kilo" },
+      modelRegistry: {
+        isUsingOAuth: () => false,
+        getApiKeyForProvider: async () => {
+          apiKeyCalls++;
+          return null;
+        },
+      },
+    } as unknown as ExtensionContext;
+
+    return {
+      fire: (event: TurnEndEvent) => {
+        void turnEnd(event, ctx);
+      },
+      apiKeyCalls: () => apiKeyCalls,
+    };
+  }
+
+  function turnEndAt(index: number): TurnEndEvent {
+    return {
+      type: "turn_end",
+      turnIndex: index,
+      message: {} as TurnEndEvent["message"],
+      toolResults: [],
+    };
+  }
+
+  test("refreshes on every 5th turn end over a 20-turn run", async () => {
+    const { fire, apiKeyCalls } = setup();
+    for (let i = 0; i < 20; i++) fire(turnEndAt(i));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // turnIndex 4, 9, 14, 19 -> exactly 4 refresh attempts.
+    expect(apiKeyCalls()).toBe(4);
+  });
+
+  test("does not refresh before the 5th turn", async () => {
+    const { fire, apiKeyCalls } = setup();
+    for (let i = 0; i < 4; i++) fire(turnEndAt(i));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(apiKeyCalls()).toBe(0);
   });
 });
 
