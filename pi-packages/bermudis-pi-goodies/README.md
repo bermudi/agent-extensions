@@ -9,7 +9,7 @@ extensions. One entry point, seven independent features.
 | `name-with-ai` | `/name-with-ai [name]` | Generate a short session name from the first user message (or set one manually). |
 | `zed` | `/z` | Open Zed editor on the current working directory. |
 | `prefer-tools` | hook (no command) | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`. |
-| `model-thinking` | hook + `/model-thinking` | Apply provider/model thinking defaults and remember per-model changes. |
+| `model-thinking` | hook + `/model-thinking` | Apply provider/model thinking defaults and explicitly save per-model defaults. |
 | `kilo` | provider | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`. |
 | `provider-balance` | footer (no command) | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 
@@ -44,11 +44,10 @@ with provider defaults, exact model defaults, or both:
 ```
 
 Exact `provider/model-id` entries take precedence over provider defaults. Use
-`/model-thinking set` to save the current model's current thinking level as an
-exact-model entry; it also bootstraps models not yet covered by the config and
-overwrites an existing entry. Once a model is managed, changing its thinking
-level in Pi records an exact-model override. Returning it to the provider
-default removes that redundant override. All current Pi levels are accepted:
+`/model-thinking set` to explicitly save the current model's current thinking
+level as an exact-model entry; it also bootstraps models not yet covered by the
+config and overwrites an existing entry. Manual thinking-level changes in Pi do
+not modify this file. All current Pi levels are accepted:
 `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 `/model-thinking` shows the active resolution and config path;
 `/model-thinking reset` deletes the whole config.

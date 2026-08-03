@@ -152,7 +152,7 @@ describe("model-thinking", () => {
     });
   });
 
-  test("ignores Pi's pre-model_select event and remembers a later user choice", () => {
+  test("does not remember automatic or manual thinking changes", () => {
     const path = temporaryConfig({ providers: { anthropic: "high" } });
     const pi = new PiHarness();
     modelThinking(pi.api, { configPath: path });
@@ -176,11 +176,10 @@ describe("model-thinking", () => {
     expect(pi.level).toBe("medium");
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
       providers: { anthropic: "high" },
-      models: { "anthropic/second": "medium" },
     });
   });
 
-  test("removes an exact override when the user returns to the provider default", () => {
+  test("does not alter an exact override when the user changes levels", () => {
     const path = temporaryConfig({
       providers: { anthropic: "high" },
       models: { "anthropic/claude-test": "low" },
@@ -194,6 +193,7 @@ describe("model-thinking", () => {
 
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
       providers: { anthropic: "high" },
+      models: { "anthropic/claude-test": "low" },
     });
   });
 

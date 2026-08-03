@@ -36,13 +36,6 @@ interface ModelRef {
   id: string;
 }
 
-interface PendingProgrammaticSet {
-  token: symbol;
-  modelKey: string;
-  /** Undefined while setThinkingLevel is still on the stack. */
-  effectiveLevel?: ThinkingLevel;
-}
-
 interface ModelThinkingOptions {
   /** Internal seam used by tests; normal callers use Pi's global agent dir. */
   configPath?: string;
@@ -212,117 +205,27 @@ export default function modelThinking(
   const store = new ConfigStore(
     options.configPath ?? join(getAgentDir(), CONFIG_FILENAME),
   );
-  let activeModelKey: string | undefined;
-  let pendingProgrammaticSet: PendingProgrammaticSet | undefined;
-
   function apply(ctx: ExtensionContext, silent: boolean): void {
     const model = ctx.model;
     const level = resolveThinkingLevel(store.load(), model);
     if (!model || level === undefined) return;
 
     const before = pi.getThinkingLevel();
-    const token = Symbol("programmatic thinking-level change");
-    pendingProgrammaticSet = {
-      token,
-      modelKey: modelKey(model),
-    };
+    pi.setThinkingLevel(level);
+    const after = pi.getThinkingLevel();
 
-    try {
-      pi.setThinkingLevel(level);
-      const after = pi.getThinkingLevel();
-
-      // Pi currently emits synchronously. Retaining the effective level also
-      // handles a future deferred emitter and provider capability clamping.
-      if (pendingProgrammaticSet?.token === token) {
-        pendingProgrammaticSet =
-          after === before
-            ? undefined
-            : {
-                token,
-                modelKey: modelKey(model),
-                effectiveLevel: after,
-              };
-      }
-
-      if (after !== before && !silent) {
-        ctx.ui.notify(`Thinking: ${before} → ${after}`, "info");
-      }
-    } catch (error) {
-      if (pendingProgrammaticSet?.token === token) {
-        pendingProgrammaticSet = undefined;
-      }
-      throw error;
+    if (after !== before && !silent) {
+      ctx.ui.notify(`Thinking: ${before} → ${after}`, "info");
     }
-  }
-
-  function rememberUserLevel(
-    ctx: ExtensionContext,
-    level: ThinkingLevel,
-  ): void {
-    const model = ctx.model;
-    if (!model) return;
-
-    const config = store.load();
-    const key = modelKey(model);
-    const providerDefault = config.providers?.[model.provider];
-
-    if (providerDefault !== undefined && level === providerDefault) {
-      if (config.models?.[key] === undefined) return;
-      const models = { ...config.models };
-      delete models[key];
-      const updated = { ...config };
-      if (Object.keys(models).length === 0) delete updated.models;
-      else updated.models = models;
-      store.save(updated);
-      return;
-    }
-
-    if (config.models?.[key] === level) return;
-    store.save({
-      ...config,
-      models: { ...config.models, [key]: level },
-    });
   }
 
   pi.on("model_select", (event, ctx) => {
-    activeModelKey = modelKey(event.model);
     apply(ctx, event.source === "restore");
   });
 
   pi.on("session_start", (_event, ctx) => {
     if (!ctx.model) return;
-    activeModelKey = modelKey(ctx.model);
     apply(ctx, true);
-  });
-
-  pi.on("thinking_level_select", (event, ctx) => {
-    const model = ctx.model;
-    if (!model) return;
-    const currentKey = modelKey(model);
-
-    // Pi clamps/inherits thinking before model_select. At that point ctx.model
-    // is already new, while activeModelKey still identifies the previous model.
-    if (activeModelKey !== undefined && currentKey !== activeModelKey) return;
-
-    const pending = pendingProgrammaticSet;
-    if (
-      pending?.modelKey === currentKey &&
-      (pending.effectiveLevel === undefined ||
-        pending.effectiveLevel === event.level)
-    ) {
-      pendingProgrammaticSet = undefined;
-      return;
-    }
-
-    const config = store.load();
-    if (resolveThinkingLevel(config, model) === undefined) return;
-
-    try {
-      rememberUserLevel(ctx, event.level);
-    } catch (error) {
-      console.error("[model-thinking] failed to save config:", error);
-      ctx.ui.notify("Failed to save model-thinking config.", "error");
-    }
   });
 
   pi.registerCommand("model-thinking", {
