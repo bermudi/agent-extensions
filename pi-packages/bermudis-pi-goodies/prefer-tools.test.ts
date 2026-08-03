@@ -40,8 +40,6 @@ describe("detectLegacyTool", () => {
     );
   });
 
-
-
   it("blocks sudo and absolute/relative paths", () => {
     blocked(
       "sudo rm -rf /",

@@ -24,13 +24,15 @@ const BALANCE_FETCH_TIMEOUT_MS = 5_000;
 const REFRESH_EVERY_N_TURNS = 5;
 
 interface BalanceAdapter {
-  fetch(token: string, signal: AbortSignal): Promise<string>;
+  fetch(token: string, signal: AbortSignal): Promise<Balance>;
   requiresOAuth?: boolean;
 }
 
 interface CodexQuotaWindow {
   usedPercent: number;
   windowSeconds: number;
+  /** Unix timestamp in seconds, supplied by Codex when available. */
+  resetAt?: number;
 }
 
 export interface CodexAdditionalQuota {
@@ -108,7 +110,16 @@ function parseCodexQuotaWindow(value: unknown): CodexQuotaWindow | null {
   if (usedPercent === null || windowSeconds === null || windowSeconds <= 0) {
     return null;
   }
-  return { usedPercent, windowSeconds };
+
+  // `reset_at` is a Unix timestamp in seconds. It is optional in Codex
+  // responses, so an absent or malformed reset timestamp must not discard an
+  // otherwise valid usage window.
+  const resetAt = numericProperty(value, "reset_at");
+  return {
+    usedPercent,
+    windowSeconds,
+    ...(resetAt !== null && resetAt > 0 ? { resetAt } : {}),
+  };
 }
 
 interface ParsedCodexQuotaWindows {
@@ -157,34 +168,128 @@ function formatWindowDuration(windowSeconds: number): string {
   return `${minutes}m`;
 }
 
-function formatCodexQuotaWindow(window: CodexQuotaWindow): string {
-  const usedPercent = Math.min(100, Math.max(0, window.usedPercent));
-  const remainingPercent = Math.round(100 - usedPercent);
-  return `${formatWindowDuration(window.windowSeconds)} ${remainingPercent}% left`;
+function formatResetCountdown(secondsUntilReset: number): string {
+  const minutes = Math.max(0, Math.ceil(secondsUntilReset / 60));
+  if (minutes === 0) return "now";
+  if (minutes < 60) return `${minutes}m`;
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  // Spaceless ("3d16h"): the footer is a status bar, not prose.
+  return remainingHours === 0 ? `${days}d` : `${days}d${remainingHours}h`;
 }
 
 function compactCodexQuotaName(name: string): string {
   return /codex-spark$/i.test(name) ? "Spark" : name;
 }
 
-export function formatCodexQuota(quota: CodexQuota): string {
-  const parts = [quota.primary, quota.secondary]
-    .filter((window): window is CodexQuotaWindow => window !== null)
-    .map(formatCodexQuotaWindow);
+// --- Unified balance model -------------------------------------------------
+// Providers differ only in *parsing*; every provider's data is projected to
+// the same Balance model and one formatter renders it all. The footer reads
+// like a status bar: glyphs carry the meaning, words are dropped.
+//   credits      -> "$1.5k"
+//   quota window -> "[label ]7d 72%[ ↻4d4h]"   (↻ = resets in)
 
+export interface QuotaWindow {
+  /** Remaining quota, 0–100. */
+  remainingPercent: number;
+  /** Window length in seconds, shown as a compact "7d"/"5h" label. */
+  windowSeconds?: number;
+  /** Unix-seconds timestamp the window resets at. */
+  resetAt?: number;
+}
+
+export interface BalanceSegment {
+  /** Label for extra windows that need disambiguating (e.g. "Spark"). */
+  label?: string;
+  /** Prepaid money remaining (Kilo, OpenRouter). */
+  credits?: number;
+  /** Usage window remaining (z.ai, Codex). */
+  quota?: QuotaWindow;
+}
+
+export type Balance = BalanceSegment[];
+
+/** Structural shape shared by Codex and z.ai usage windows. */
+interface UsedPercentWindow {
+  usedPercent: number;
+  windowSeconds: number;
+  resetAt?: number;
+}
+
+function clampPercent(value: number): number {
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+/** Flip a provider's "used" window into the model's "remaining" window. */
+function windowToQuota(window: UsedPercentWindow): QuotaWindow {
+  return {
+    remainingPercent: 100 - window.usedPercent,
+    windowSeconds: window.windowSeconds,
+    ...(window.resetAt !== undefined ? { resetAt: window.resetAt } : {}),
+  };
+}
+
+function formatResetSuffix(resetAt: number | undefined, nowMs: number): string {
+  if (
+    typeof resetAt !== "number" ||
+    !Number.isFinite(resetAt) ||
+    resetAt <= 0
+  ) {
+    return "";
+  }
+  return ` ↻${formatResetCountdown(resetAt - nowMs / 1000)}`;
+}
+
+function formatSegment(segment: BalanceSegment, nowMs: number): string {
+  if (segment.credits !== undefined) return formatCredits(segment.credits);
+  const quota = segment.quota;
+  if (!quota) return "";
+
+  const window = quota.windowSeconds
+    ? `${formatWindowDuration(quota.windowSeconds)} `
+    : "";
+  const percent = `${clampPercent(quota.remainingPercent)}%`;
+  const core = `${window}${percent}${formatResetSuffix(quota.resetAt, nowMs)}`;
+  return segment.label ? `${segment.label} ${core}` : core;
+}
+
+export function formatBalance(balance: Balance, nowMs = Date.now()): string {
+  return balance
+    .map((segment) => formatSegment(segment, nowMs))
+    .filter((segment) => segment.length > 0)
+    .join(" · ");
+}
+
+export function codexQuotaToBalance(quota: CodexQuota): Balance {
+  const segments: BalanceSegment[] = [];
+  for (const window of [quota.primary, quota.secondary]) {
+    if (window) segments.push({ quota: windowToQuota(window) });
+  }
   for (const additional of quota.additional) {
-    const name = compactCodexQuotaName(additional.name);
+    const label = compactCodexQuotaName(additional.name);
     for (const window of [additional.primary, additional.secondary]) {
-      if (window) parts.push(`${name} ${formatCodexQuotaWindow(window)}`);
+      if (window) segments.push({ label, quota: windowToQuota(window) });
     }
   }
+  return segments;
+}
 
-  return parts.join(" · ");
+export function formatCodexQuota(
+  quota: CodexQuota,
+  nowMs = Date.now(),
+): string {
+  return formatBalance(codexQuotaToBalance(quota), nowMs);
 }
 
 export interface ZaiQuotaWindow {
   usedPercent: number;
   windowSeconds: number;
+  /** Unix timestamp in seconds, derived from Z.ai's `nextResetTime`. */
+  resetAt?: number;
 }
 
 export interface ZaiQuota {
@@ -223,6 +328,15 @@ function parseZaiUsedPercent(value: unknown): number | null {
   return used === null ? null : (used / limit) * 100;
 }
 
+function parseZaiResetAt(value: unknown): number | undefined {
+  const nextResetTime = numericProperty(value, "nextResetTime");
+  if (nextResetTime === null || nextResetTime <= 0) return undefined;
+
+  // Z.ai has returned Unix timestamps in milliseconds. Accept seconds too so
+  // a backend representation change cannot turn the countdown into decades.
+  return nextResetTime >= 10_000_000_000 ? nextResetTime / 1000 : nextResetTime;
+}
+
 export function parseZaiQuota(value: unknown): ZaiQuota | null {
   const payload = asRecord(value);
   if (
@@ -244,7 +358,15 @@ export function parseZaiQuota(value: unknown): ZaiQuota | null {
     const usedPercent = parseZaiUsedPercent(candidate);
     if (unit === null || number === null || usedPercent === null) return [];
     const windowSeconds = parseZaiWindowSeconds(unit, number);
-    return windowSeconds === null ? [] : [{ usedPercent, windowSeconds }];
+    if (windowSeconds === null) return [];
+    const resetAt = parseZaiResetAt(candidate);
+    return [
+      {
+        usedPercent,
+        windowSeconds,
+        ...(resetAt === undefined ? {} : { resetAt }),
+      },
+    ];
   });
 
   if (tokenWindows.length === 0) return null;
@@ -259,11 +381,14 @@ export function parseZaiQuota(value: unknown): ZaiQuota | null {
   return { planName, tokenWindows };
 }
 
-export function formatZaiQuota(quota: ZaiQuota): string {
+export function zaiQuotaToBalance(quota: ZaiQuota): Balance {
   return [...quota.tokenWindows]
     .sort((a, b) => a.windowSeconds - b.windowSeconds)
-    .map(formatCodexQuotaWindow)
-    .join(" · ");
+    .map((window) => ({ quota: windowToQuota(window) }));
+}
+
+export function formatZaiQuota(quota: ZaiQuota, nowMs = Date.now()): string {
+  return formatBalance(zaiQuotaToBalance(quota), nowMs);
 }
 
 export function formatCredits(balance: number): string {
@@ -293,7 +418,7 @@ export function parseOpenRouterCredits(value: unknown): number | null {
 async function fetchKiloBalance(
   token: string,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<Balance> {
   const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
   const response = await fetch(KILO_BALANCE_ENDPOINT, {
     headers: {
@@ -310,13 +435,13 @@ async function fetchKiloBalance(
   if (balance === null) {
     throw new Error("Kilo balance response was invalid");
   }
-  return formatCredits(balance);
+  return [{ credits: balance }];
 }
 
 async function fetchOpenRouterBalance(
   token: string,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<Balance> {
   const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
   const response = await fetch(OPENROUTER_CREDITS_ENDPOINT, {
     headers: {
@@ -333,14 +458,14 @@ async function fetchOpenRouterBalance(
   if (balance === null) {
     throw new Error("OpenRouter balance response was invalid");
   }
-  return formatCredits(balance);
+  return [{ credits: balance }];
 }
 
 async function fetchZaiQuotaAt(
   endpoint: string,
   token: string,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<Balance> {
   const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
   const response = await fetch(endpoint, {
     headers: {
@@ -357,27 +482,27 @@ async function fetchZaiQuotaAt(
   if (quota === null) {
     throw new Error("Z.ai quota response was invalid");
   }
-  return formatZaiQuota(quota);
+  return zaiQuotaToBalance(quota);
 }
 
 async function fetchZaiQuota(
   token: string,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<Balance> {
   return fetchZaiQuotaAt(ZAI_QUOTA_ENDPOINT, token, signal);
 }
 
 async function fetchZaiCodingCnQuota(
   token: string,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<Balance> {
   return fetchZaiQuotaAt(ZAI_CODING_CN_QUOTA_ENDPOINT, token, signal);
 }
 
 async function fetchCodexQuota(
   token: string,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<Balance> {
   const accountId = parseCodexAccountId(token);
   if (!accountId) {
     throw new Error("Codex access token did not contain an account ID");
@@ -402,7 +527,7 @@ async function fetchCodexQuota(
   if (quota === null) {
     throw new Error("Codex quota response was invalid");
   }
-  return formatCodexQuota(quota);
+  return codexQuotaToBalance(quota);
 }
 
 const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
@@ -507,8 +632,8 @@ function addBalanceToWorkingDirectoryLine(
 
 export default function providerBalance(pi: ExtensionAPI): void {
   let activeContext: ExtensionContext | undefined;
-  let balanceText: string | undefined;
-  /** Provider the currently-displayed balanceText belongs to. */
+  let balance: Balance | undefined;
+  /** Provider the currently-displayed balance belongs to. */
   let displayedProvider: string | undefined;
   let refreshGeneration = 0;
   let refreshController: AbortController | undefined;
@@ -516,7 +641,7 @@ export default function providerBalance(pi: ExtensionAPI): void {
   let activeThinkingLevel: ActiveThinkingLevel = "off";
 
   function clearBalance(): void {
-    balanceText = undefined;
+    balance = undefined;
     requestRender?.();
   }
 
@@ -565,7 +690,7 @@ export default function providerBalance(pi: ExtensionAPI): void {
     try {
       const token = await ctx.modelRegistry.getApiKeyForProvider(providerId);
       if (!token || generation !== refreshGeneration) return;
-      balanceText = await adapter.fetch(token, controller.signal);
+      balance = await adapter.fetch(token, controller.signal);
       if (generation === refreshGeneration) requestRender?.();
     } catch (error) {
       if (generation !== refreshGeneration || controller.signal.aborted) return;
@@ -609,7 +734,7 @@ export default function providerBalance(pi: ExtensionAPI): void {
             footer.render(width),
             width,
             theme,
-            balanceText,
+            balance ? formatBalance(balance) : undefined,
           ),
         dispose: () => {
           unsubscribeBranchChange();
@@ -669,7 +794,7 @@ export default function providerBalance(pi: ExtensionAPI): void {
     requestRender = undefined;
     // Drop the prior session's balance so the next footer doesn't flash a
     // stale value from a different provider before its first refresh lands.
-    balanceText = undefined;
+    balance = undefined;
     displayedProvider = undefined;
   });
 }

@@ -64,8 +64,16 @@ Coding Plan token quota for `zai` (Global) and `zai-coding-cn` (BigModel China),
 and OpenAI Codex's ChatGPT subscription quota when using `openai-codex` OAuth;
 it skips platform API-key auth because that has no ChatGPT subscription quota.
 OpenRouter uses `GET /api/v1/credits`; z.ai uses
-`GET /api/monitor/usage/quota/limit`; Codex uses `GET /wham/usage`,
-and `CODEX_API_URL` or `CHATGPT_BASE_URL` can override the Codex base URL.
+`GET /api/monitor/usage/quota/limit`; Codex uses `GET /wham/usage`. z.ai and
+Codex show both each quota's window length and its `nextResetTime`/`reset_at`
+countdown (when supplied), and `CODEX_API_URL` or `CHATGPT_BASE_URL` can
+override the Codex base URL.
+
+All providers share one renderer: every balance is projected to a list of
+segments and formatted the same way. Credits render as `$1.5k`; each usage
+window renders as `[label ]<window> <remaining>%[ ↻<countdown>]`, e.g.
+`7d 72% ↻4d4h` (`↻` = resets in). Multiple windows are joined with `·`, and
+named extra limits like Codex Spark get a label: `7d 72% ↻4d4h · Spark 7d 74% ↻5d4h`.
 The footer refreshes on session start, model
 switch, and after each completed run (`agent_settled`), so it tracks both
 consumption and external tier changes for whatever provider is active —
