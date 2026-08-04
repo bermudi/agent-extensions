@@ -290,7 +290,7 @@ export default function modelThinking(
         `model: ${model ? modelKey(model) : "none"}`,
         `managed: ${resolved === undefined ? "no" : "yes"}`,
         `file: ${store.path}`,
-        `resolved: ${resolved ?? "none — pi handles this model natively"}`,
+        `saved: ${resolved ?? "none — pi handles this model natively"}`,
         `current: ${pi.getThinkingLevel()}`,
         "",
         "run `/model-thinking set` to save this model and level; `/model-thinking reset` to clear all configured levels",
