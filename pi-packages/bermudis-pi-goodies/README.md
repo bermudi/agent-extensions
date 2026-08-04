@@ -1,7 +1,7 @@
 # bermudis-pi-goodies
 
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
-extensions. One entry point, seven independent features.
+extensions. One entry point, eight independent features.
 
 | Feature | Command / hook | What it does |
 |---------|----------------|--------------|
@@ -10,6 +10,7 @@ extensions. One entry point, seven independent features.
 | `zed` | `/z` | Open Zed editor on the current working directory. |
 | `prefer-tools` | hook (no command) | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`. |
 | `model-thinking` | hook + `/model-thinking` | Apply provider/model thinking defaults and explicitly save per-model defaults. |
+| `fixed-defaults` | hook | Keep the global startup provider, model, and thinking defaults fixed while allowing in-session model changes. |
 | `kilo` | provider | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`. |
 | `provider-balance` | footer (no command) | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 
@@ -51,6 +52,22 @@ not modify this file. All current Pi levels are accepted:
 `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 `/model-thinking` shows the active resolution and config path;
 `/model-thinking reset` deletes the whole config.
+
+## Fixed startup defaults
+
+Pi normally saves the last model and thinking level selected in the global
+settings file. The bundle pins those cross-session defaults to:
+
+```json
+{
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.6-luna",
+  "defaultThinkingLevel": "max"
+}
+```
+
+Selecting a different model still changes the active session and its transcript;
+`fixed-defaults` only restores the startup values after Pi persists a selection.
 
 ## Provider and balance details
 
