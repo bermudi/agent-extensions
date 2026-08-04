@@ -10,7 +10,7 @@ extensions. One entry point, eight independent features.
 | `zed` | `/z` | Open Zed editor on the current working directory. |
 | `prefer-tools` | hook (no command) | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`. |
 | `model-thinking` | hook + `/model-thinking` | Apply provider/model thinking defaults and explicitly save per-model defaults. |
-| `fixed-defaults` | hook | Keep the global startup provider, model, and thinking defaults fixed while allowing in-session model changes. |
+| `fixed-defaults` | hook + `/fixed-defaults` | Keep the global startup provider, model, and thinking defaults fixed while allowing in-session model changes; `/fixed-defaults set` pins the current model and thinking level. |
 | `kilo` | provider | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`. |
 | `provider-balance` | footer (no command) | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 
@@ -68,6 +68,18 @@ settings file. The bundle pins those cross-session defaults to:
 
 Selecting a different model still changes the active session and its transcript;
 `fixed-defaults` only restores the startup values after Pi persists a selection.
+
+The pinned values are the built-ins above, optionally overridden per field by
+`~/.pi/agent/fixed-defaults.json` — omit a field to keep the built-in value for
+it, and hand edits are picked up without a reload. Manage it from Pi:
+
+- `/fixed-defaults set` — pin the currently active model and thinking level as
+  the new startup defaults (written to the override file and applied to
+  `settings.json` immediately).
+- `/fixed-defaults` — show the effective pin, the active model, and the
+  override file path.
+- `/fixed-defaults reset` — delete the override file and fall back to the
+  built-in values.
 
 ## Provider and balance details
 

@@ -4,6 +4,7 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,6 +16,10 @@ import { dirname, join } from "node:path";
 import fixedDefaults from "./fixed-defaults.ts";
 
 type Handler = (event: never, ctx: ExtensionContext) => unknown;
+type CommandHandler = (
+  args: string,
+  ctx: ExtensionContext,
+) => Promise<void> | void;
 
 const temporaryDirectories: string[] = [];
 
@@ -24,16 +29,38 @@ afterEach(() => {
   }
 });
 
-function context(cwd: string): ExtensionContext {
+function model(
+  provider: string,
+  id: string,
+): NonNullable<ExtensionContext["model"]> {
+  return { provider, id } as NonNullable<ExtensionContext["model"]>;
+}
+
+function context(
+  cwd: string,
+  options: {
+    model?: NonNullable<ExtensionContext["model"]>;
+    notifications?: string[];
+  } = {},
+): ExtensionContext {
+  const notifications = options.notifications ?? [];
   return {
     cwd,
-    hasUI: false,
+    hasUI: true,
     isProjectTrusted: () => true,
+    model: options.model,
+    ui: {
+      notify: (message: string) => {
+        notifications.push(message);
+      },
+    },
   } as unknown as ExtensionContext;
 }
 
 class PiHarness {
+  level: ReturnType<ExtensionAPI["getThinkingLevel"]> = "high";
   readonly handlers = new Map<string, Handler[]>();
+  readonly commands = new Map<string, CommandHandler>();
 
   readonly api = {
     on: (event: string, handler: Handler) => {
@@ -41,6 +68,10 @@ class PiHarness {
       handlers.push(handler);
       this.handlers.set(event, handlers);
     },
+    registerCommand: (name: string, command: { handler: CommandHandler }) => {
+      this.commands.set(name, command.handler);
+    },
+    getThinkingLevel: () => this.level,
   } as unknown as ExtensionAPI;
 
   async emit(event: string, payload: object, ctx: ExtensionContext) {
@@ -50,28 +81,52 @@ class PiHarness {
   }
 }
 
-describe("fixed-defaults", () => {
-  test("restores model and thinking defaults without changing other settings", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "fixed-defaults-test-"));
-    temporaryDirectories.push(directory);
-    const cwd = join(directory, "project");
-    const agentDir = join(directory, "agent");
-    const settingsPath = join(agentDir, "settings.json");
-    const original = {
-      lastChangelogVersion: "0.83.0",
-      defaultProvider: "zai",
-      defaultModel: "glm-5.2",
-      defaultThinkingLevel: "high",
-      hideThinkingBlock: true,
-      defaultProjectTrust: "always",
-      packages: ["npm:example"],
-    };
-    mkdirForFile(settingsPath);
-    writeFileSync(settingsPath, `${JSON.stringify(original, null, 2)}\n`);
+function setup(): {
+  directory: string;
+  cwd: string;
+  agentDir: string;
+  settingsPath: string;
+  original: Record<string, unknown>;
+  pi: PiHarness;
+  ctx: ExtensionContext;
+} {
+  const directory = mkdtempSync(join(tmpdir(), "fixed-defaults-test-"));
+  temporaryDirectories.push(directory);
+  const cwd = join(directory, "project");
+  const agentDir = join(directory, "agent");
+  const settingsPath = join(agentDir, "settings.json");
+  const original = {
+    lastChangelogVersion: "0.83.0",
+    defaultProvider: "zai",
+    defaultModel: "glm-5.2",
+    defaultThinkingLevel: "high",
+    hideThinkingBlock: true,
+    defaultProjectTrust: "always",
+    packages: ["npm:example"],
+  };
+  mkdirForFile(settingsPath);
+  writeFileSync(settingsPath, `${JSON.stringify(original, null, 2)}\n`);
 
-    const pi = new PiHarness();
+  const pi = new PiHarness();
+  return {
+    directory,
+    cwd,
+    agentDir,
+    settingsPath,
+    original,
+    pi,
+    ctx: context(cwd),
+  };
+}
+
+function settingsAt(path: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+}
+
+describe("fixed-defaults", () => {
+  test("restores built-in model and thinking defaults without changing other settings", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
     fixedDefaults(pi.api, { agentDir });
-    const ctx = context(cwd);
 
     await pi.emit("session_start", { reason: "startup" }, ctx);
     await pi.emit(
@@ -89,12 +144,222 @@ describe("fixed-defaults", () => {
       ctx,
     );
 
-    expect(JSON.parse(readFileSync(settingsPath, "utf8"))).toEqual({
+    expect(settingsAt(settingsPath)).toEqual({
       ...original,
       defaultProvider: "openai-codex",
       defaultModel: "gpt-5.6-luna",
       defaultThinkingLevel: "max",
     });
+  });
+
+  test("set pins the active model and thinking level and applies them immediately", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+    const notifications: string[] = [];
+
+    pi.level = "xhigh";
+    await handler(
+      "set",
+      context(ctx.cwd, { model: model("zai", "glm-5.2"), notifications }),
+    );
+
+    // Override file written.
+    expect(
+      JSON.parse(
+        readFileSync(join(agentDir, "fixed-defaults.json"), "utf8"),
+      ) as unknown,
+    ).toEqual({
+      provider: "zai",
+      model: "glm-5.2",
+      thinkingLevel: "xhigh",
+    });
+    // Settings file updated immediately, without waiting for an event.
+    expect(settingsAt(settingsPath)).toEqual({
+      ...original,
+      defaultProvider: "zai",
+      defaultModel: "glm-5.2",
+      defaultThinkingLevel: "xhigh",
+    });
+    expect(notifications.some((n) => n.includes("zai/glm-5.2"))).toBe(true);
+  });
+
+  test("events restore the pinned override instead of built-ins", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+
+    pi.level = "xhigh";
+    await handler("set", context(ctx.cwd, { model: model("zai", "glm-5.2") }));
+
+    // Later model/thinking changes restore the NEW pin, not the built-ins.
+    await pi.emit(
+      "model_select",
+      {
+        model: { provider: "anthropic", id: "claude-sonnet-4" },
+        previousModel: { provider: "zai", id: "glm-5.2" },
+        source: "set",
+      },
+      ctx,
+    );
+    await pi.emit(
+      "thinking_level_select",
+      { level: "low", previousLevel: "xhigh" },
+      ctx,
+    );
+
+    expect(settingsAt(settingsPath)).toEqual({
+      ...original,
+      defaultProvider: "zai",
+      defaultModel: "glm-5.2",
+      defaultThinkingLevel: "xhigh",
+    });
+  });
+
+  test("reset removes the override and falls back to built-ins", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+    const notifications: string[] = [];
+
+    pi.level = "xhigh";
+    await handler("set", context(ctx.cwd, { model: model("zai", "glm-5.2") }));
+    expect(existsSync(join(agentDir, "fixed-defaults.json"))).toBe(true);
+
+    await handler("reset", context(ctx.cwd, { notifications }));
+    expect(existsSync(join(agentDir, "fixed-defaults.json"))).toBe(false);
+    expect(notifications.some((n) => n.includes("built-in"))).toBe(true);
+
+    // Next event restores the built-in defaults.
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    expect(settingsAt(settingsPath)).toEqual({
+      ...original,
+      defaultProvider: "openai-codex",
+      defaultModel: "gpt-5.6-luna",
+      defaultThinkingLevel: "max",
+    });
+  });
+
+  test("thinkingLevel-only override layers over the built-in provider/model", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    writeFileSync(
+      join(agentDir, "fixed-defaults.json"),
+      `${JSON.stringify({ thinkingLevel: "low" }, null, 2)}\n`,
+    );
+    fixedDefaults(pi.api, { agentDir });
+
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+
+    expect(settingsAt(settingsPath)).toEqual({
+      ...original,
+      defaultProvider: "openai-codex",
+      defaultModel: "gpt-5.6-luna",
+      defaultThinkingLevel: "low",
+    });
+  });
+
+  test("provider or model alone is rejected and built-ins apply", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    writeFileSync(
+      join(agentDir, "fixed-defaults.json"),
+      `${JSON.stringify({ model: "gpt-5.2-preview" }, null, 2)}\n`,
+    );
+    fixedDefaults(pi.api, { agentDir });
+
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+
+    expect(settingsAt(settingsPath)).toEqual({
+      ...original,
+      defaultProvider: "openai-codex",
+      defaultModel: "gpt-5.6-luna",
+      defaultThinkingLevel: "max",
+    });
+  });
+
+  test("status shows the effective pin, active model, and override path", async () => {
+    const { agentDir, pi, ctx } = setup();
+    writeFileSync(
+      join(agentDir, "fixed-defaults.json"),
+      `${JSON.stringify(
+        { provider: "zai", model: "glm-5.2", thinkingLevel: "high" },
+        null,
+        2,
+      )}\n`,
+    );
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+    const notifications: string[] = [];
+
+    pi.level = "xhigh";
+    await handler(
+      "",
+      context(ctx.cwd, { model: model("zai", "glm-5.2"), notifications }),
+    );
+
+    const message = notifications[0];
+    expect(message).toContain("pinned provider: zai");
+    expect(message).toContain("pinned model: glm-5.2");
+    expect(message).toContain("pinned thinking: high");
+    expect(message).toContain(join(agentDir, "fixed-defaults.json"));
+  });
+
+  test("set without an active model warns and writes nothing", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+    const notifications: string[] = [];
+
+    await handler("set", context(ctx.cwd, { notifications }));
+
+    expect(notifications.some((n) => n.includes("active model"))).toBe(true);
+    expect(existsSync(join(agentDir, "fixed-defaults.json"))).toBe(false);
+    expect(settingsAt(settingsPath)).toEqual(original);
+  });
+
+  test("unknown subcommands show usage", async () => {
+    const { agentDir, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+    const notifications: string[] = [];
+
+    await handler("bogus", context(ctx.cwd, { notifications }));
+
+    expect(notifications.some((n) => n.includes("Usage"))).toBe(true);
+  });
+
+  test("an invalid override file is ignored and built-ins apply", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    writeFileSync(join(agentDir, "fixed-defaults.json"), "not json\n");
+    fixedDefaults(pi.api, { agentDir });
+
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+
+    expect(settingsAt(settingsPath)).toEqual({
+      ...original,
+      defaultProvider: "openai-codex",
+      defaultModel: "gpt-5.6-luna",
+      defaultThinkingLevel: "max",
+    });
+  });
+
+  test("status warns when the override file is invalid", async () => {
+    const { agentDir, pi, ctx } = setup();
+    writeFileSync(join(agentDir, "fixed-defaults.json"), "not json\n");
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+    const notifications: string[] = [];
+
+    pi.level = "high";
+    await handler(
+      "",
+      context(ctx.cwd, { model: model("zai", "glm-5.2"), notifications }),
+    );
+
+    const message = notifications[0];
+    expect(message).toContain("override invalid");
+    expect(message).toContain("using built-ins");
+    // Built-in pinned values are still shown.
+    expect(message).toContain("pinned model: gpt-5.6-luna");
   });
 });
 

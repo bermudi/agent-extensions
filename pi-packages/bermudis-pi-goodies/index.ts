@@ -8,7 +8,7 @@
  *   - zed              /z                open Zed on cwd
  *   - prefer-tools     hook              block legacy tools (use trash/rg/fd/uv)
  *   - model-thinking   hook + command    remember thinking levels by provider/model
- *   - fixed-defaults   hook              keep startup defaults stable
+ *   - fixed-defaults   hook + command    keep startup defaults stable; /fixed-defaults set pins the current model
  *   - kilo             provider          access Kilo Gateway models
  *   - provider-balance footer            show Kilo credits or Codex quota in the footer
  */
