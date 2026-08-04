@@ -1,0 +1,68 @@
+id = "layouts.pane-layouts"
+name = "Pane Layouts"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Apply common pane layouts (columns, rows, grid, main+stack) to a tab"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "picker"
+title = "Pane layout picker"
+placement = "popup"
+width = "46%"
+height = "58%"
+command = ["python3", "picker.py"]
+
+[[actions]]
+id = "columns-2"
+title = "Layout: 2 columns"
+contexts = ["workspace", "tab"]
+command = ["python3", "layouts.py", "columns", "--count", "2"]
+
+[[actions]]
+id = "columns-3"
+title = "Layout: 3 columns"
+contexts = ["workspace", "tab"]
+command = ["python3", "layouts.py", "columns", "--count", "3"]
+
+[[actions]]
+id = "rows-2"
+title = "Layout: 2 rows"
+contexts = ["workspace", "tab"]
+command = ["python3", "layouts.py", "rows", "--count", "2"]
+
+[[actions]]
+id = "rows-3"
+title = "Layout: 3 rows"
+contexts = ["workspace", "tab"]
+command = ["python3", "layouts.py", "rows", "--count", "3"]
+
+[[actions]]
+id = "quad"
+title = "Layout: 2x2 grid"
+contexts = ["workspace", "tab"]
+command = ["python3", "layouts.py", "quad"]
+
+[[actions]]
+id = "main-left"
+title = "Layout: main left + stack"
+contexts = ["workspace", "tab"]
+command = ["python3", "layouts.py", "main-left", "--count", "2"]
+
+[[actions]]
+id = "main-right"
+title = "Layout: stack + main right"
+contexts = ["workspace", "tab"]
+command = ["python3", "layouts.py", "main-right", "--count", "2"]
+
+[[actions]]
+id = "main-top"
+title = "Layout: main top + row"
+contexts = ["workspace", "tab"]
+command = ["python3", "layouts.py", "main-top", "--count", "2"]
+
+[[actions]]
+id = "main-bottom"
+title = "Layout: row + main bottom"
+contexts = ["workspace", "tab"]
+command = ["python3", "layouts.py", "main-bottom", "--count", "2"]
