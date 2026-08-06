@@ -48,7 +48,9 @@ price of true isolation and is intentional.
 - Active extensions live at `pi-packages/<name>/`. New keepers go there; experiments go in `pi-packages/experiments/`.
 - Multi-file extensions symlinked globally must ship a **bundle** (esbuild, `--packages=external`) — pi's Node loader resolves relative imports against the symlink path, breaking unbundled multi-file exts. Single-file extensions without package-local runtime dependencies can be symlinked directly. Dependency-owning packages such as `critique` should be loaded by their real path (`pi -e ...`) or installed as a local Pi package so their `node_modules` remains resolvable. See `bermudis-pi-goodies` `build` script for the bundle pattern.
 
-- **The bundle is a build artifact, not tracked in git.** After a fresh clone, run `bun install && bun run build` in the extension directory before symlinking. The `.gitignore` covers `*.bundle.{mjs,ts}`.
+- **Production installation rule:** Install maintained extensions into Pi from a pinned Git commit or release tag. Never point a running Pi at an agent's working tree or at a bundle that agents build in place. Build bundles only as disposable verification artifacts outside any live extension path; push/tag only when the extension is ready, then update the installed Pi package explicitly. Treat the current global goodies-bundle trial as legacy until this migration is complete.
+
+- **The bundle is a build artifact, not tracked in git.** After a fresh clone, run `bun install && bun run build` in the extension directory before testing it. The `.gitignore` covers `*.bundle.{mjs,ts}`.
 - Test your work: `bun run typecheck` and `bun run test` inside the extension dir.
 - Do not symlink/install globally without bermudi's explicit request. The current WIP trial has only the goodies bundle installed globally; the standalone Kilo and provider-balance links are retired (both features ship in the goodies bundle).
 - Extensions load at session start. Use `/reload` to pick up changes mid-session.
