@@ -124,7 +124,7 @@ function settingsAt(path: string): Record<string, unknown> {
 }
 
 describe("fixed-defaults", () => {
-  test("restores built-in model and thinking defaults without changing other settings", async () => {
+  test("with no override, events leave settings untouched", async () => {
     const { agentDir, settingsPath, original, pi, ctx } = setup();
     fixedDefaults(pi.api, { agentDir });
 
@@ -144,12 +144,7 @@ describe("fixed-defaults", () => {
       ctx,
     );
 
-    expect(settingsAt(settingsPath)).toEqual({
-      ...original,
-      defaultProvider: "openai-codex",
-      defaultModel: "gpt-5.6-luna",
-      defaultThinkingLevel: "max",
-    });
+    expect(settingsAt(settingsPath)).toEqual(original);
   });
 
   test("set pins the active model and thinking level and applies them immediately", async () => {
@@ -216,7 +211,7 @@ describe("fixed-defaults", () => {
     });
   });
 
-  test("reset removes the override and falls back to built-ins", async () => {
+  test("reset removes the override and stops pinning", async () => {
     const { agentDir, settingsPath, original, pi, ctx } = setup();
     fixedDefaults(pi.api, { agentDir });
     const handler = pi.commands.get("fixed-defaults")!;
@@ -228,19 +223,20 @@ describe("fixed-defaults", () => {
 
     await handler("reset", context(ctx.cwd, { notifications }));
     expect(existsSync(join(agentDir, "fixed-defaults.json"))).toBe(false);
-    expect(notifications.some((n) => n.includes("built-in"))).toBe(true);
+    expect(notifications.some((n) => n.includes("pin removed"))).toBe(true);
 
-    // Next event restores the built-in defaults.
+    // With no override, the next event is a no-op: settings hold the last
+    // applied pin rather than reverting to an earlier state.
     await pi.emit("session_start", { reason: "startup" }, ctx);
     expect(settingsAt(settingsPath)).toEqual({
       ...original,
-      defaultProvider: "openai-codex",
-      defaultModel: "gpt-5.6-luna",
-      defaultThinkingLevel: "max",
+      defaultProvider: "zai",
+      defaultModel: "glm-5.2",
+      defaultThinkingLevel: "xhigh",
     });
   });
 
-  test("thinkingLevel-only override layers over the built-in provider/model", async () => {
+  test("thinkingLevel-only override pins thinking and leaves the model alone", async () => {
     const { agentDir, settingsPath, original, pi, ctx } = setup();
     writeFileSync(
       join(agentDir, "fixed-defaults.json"),
@@ -252,13 +248,11 @@ describe("fixed-defaults", () => {
 
     expect(settingsAt(settingsPath)).toEqual({
       ...original,
-      defaultProvider: "openai-codex",
-      defaultModel: "gpt-5.6-luna",
       defaultThinkingLevel: "low",
     });
   });
 
-  test("provider or model alone is rejected and built-ins apply", async () => {
+  test("provider or model alone is rejected and nothing is applied", async () => {
     const { agentDir, settingsPath, original, pi, ctx } = setup();
     writeFileSync(
       join(agentDir, "fixed-defaults.json"),
@@ -268,12 +262,7 @@ describe("fixed-defaults", () => {
 
     await pi.emit("session_start", { reason: "startup" }, ctx);
 
-    expect(settingsAt(settingsPath)).toEqual({
-      ...original,
-      defaultProvider: "openai-codex",
-      defaultModel: "gpt-5.6-luna",
-      defaultThinkingLevel: "max",
-    });
+    expect(settingsAt(settingsPath)).toEqual(original);
   });
 
   test("status shows the effective pin, active model, and override path", async () => {
@@ -327,19 +316,14 @@ describe("fixed-defaults", () => {
     expect(notifications.some((n) => n.includes("Usage"))).toBe(true);
   });
 
-  test("an invalid override file is ignored and built-ins apply", async () => {
+  test("an invalid override file is ignored and nothing is applied", async () => {
     const { agentDir, settingsPath, original, pi, ctx } = setup();
     writeFileSync(join(agentDir, "fixed-defaults.json"), "not json\n");
     fixedDefaults(pi.api, { agentDir });
 
     await pi.emit("session_start", { reason: "startup" }, ctx);
 
-    expect(settingsAt(settingsPath)).toEqual({
-      ...original,
-      defaultProvider: "openai-codex",
-      defaultModel: "gpt-5.6-luna",
-      defaultThinkingLevel: "max",
-    });
+    expect(settingsAt(settingsPath)).toEqual(original);
   });
 
   test("status warns when the override file is invalid", async () => {
@@ -356,10 +340,9 @@ describe("fixed-defaults", () => {
     );
 
     const message = notifications[0];
-    expect(message).toContain("override invalid");
-    expect(message).toContain("using built-ins");
-    // Built-in pinned values are still shown.
-    expect(message).toContain("pinned model: gpt-5.6-luna");
+    expect(message).toContain("override file invalid");
+    expect(message).toContain("no pin active");
+    expect(message).not.toContain("pinned model");
   });
 });
 

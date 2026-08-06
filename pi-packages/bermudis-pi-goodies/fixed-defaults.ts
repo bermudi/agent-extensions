@@ -26,20 +26,6 @@ const ALL_LEVELS = [
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
-/** Startup defaults compiled into the extension. */
-const BUILTIN_DEFAULTS = {
-  provider: "openai-codex",
-  model: "gpt-5.6-luna",
-  thinkingLevel: "max",
-} as const;
-
-/** A fully resolved pin: built-in values, possibly overridden per field. */
-interface FixedDefaults {
-  provider: string;
-  model: string;
-  thinkingLevel: ThinkingLevel;
-}
-
 /**
  * Values read from the override file. `thinkingLevel` may layer independently;
  * `provider` and `model` are a coupled pair — a model id is meaningless without
@@ -197,33 +183,19 @@ interface LoadResult {
   error: string | null;
 }
 
-/** Built-ins, overridden per field by the override file when present. */
-function effectiveDefaults(store: DefaultsStore): {
-  defaults: FixedDefaults;
-  error: string | null;
-} {
-  const { override, error } = store.load();
-  return {
-    defaults: {
-      provider: override.provider ?? BUILTIN_DEFAULTS.provider,
-      model: override.model ?? BUILTIN_DEFAULTS.model,
-      thinkingLevel: override.thinkingLevel ?? BUILTIN_DEFAULTS.thinkingLevel,
-    },
-    error,
-  };
-}
-
 /**
  * Keep Pi's cross-session defaults stable while still allowing model changes in
  * the current session. Pi intentionally saves the last selected model and
  * thinking level, so this runs after those notifications and restores the
  * configured startup defaults in the global settings file.
  *
- * The pinned defaults are the built-in constants, optionally overridden by
- * `<agentDir>/fixed-defaults.json` (`thinkingLevel` may layer independently;
- * `provider` and `model` are a coupled pair). `/fixed-defaults set` pins the
- * currently active model and thinking level there; `/fixed-defaults reset`
- * removes the override; `/fixed-defaults` shows the effective pin.
+ * The pin lives in `<agentDir>/fixed-defaults.json` and is the sole source of
+ * truth — there are no built-in defaults, so with no override file the
+ * extension is dormant and Pi's native last-selection behavior is preserved.
+ * `thinkingLevel` may layer independently; `provider` and `model` are a
+ * coupled pair. `/fixed-defaults set` pins the currently active model and
+ * thinking level; `/fixed-defaults reset` stops pinning; `/fixed-defaults`
+ * shows the active pin.
  */
 export default function fixedDefaults(
   pi: ExtensionAPI,
@@ -236,12 +208,24 @@ export default function fixedDefaults(
   let pending = Promise.resolve();
 
   async function restore(ctx: ExtensionContext): Promise<void> {
-    const { defaults } = effectiveDefaults(store);
+    const { override, error } = store.load();
+    // A broken or absent override means no pin: leave settings untouched so
+    // Pi's native last-selection behavior is preserved rather than guessed at.
+    if (error) return;
+    const hasModelPin =
+      override.provider !== undefined && override.model !== undefined;
+    const hasThinkingPin = override.thinkingLevel !== undefined;
+    if (!hasModelPin && !hasThinkingPin) return;
+
     const settings = SettingsManager.create(ctx.cwd, agentDir, {
       projectTrusted: ctx.isProjectTrusted(),
     });
-    settings.setDefaultModelAndProvider(defaults.provider, defaults.model);
-    settings.setDefaultThinkingLevel(defaults.thinkingLevel);
+    if (hasModelPin) {
+      settings.setDefaultModelAndProvider(override.provider!, override.model!);
+    }
+    if (hasThinkingPin) {
+      settings.setDefaultThinkingLevel(override.thinkingLevel!);
+    }
     await settings.flush();
 
     const errors = settings.drainErrors();
@@ -327,20 +311,12 @@ export default function fixedDefaults(
           return;
         }
 
-        try {
-          await schedule(ctx);
-        } catch (error) {
-          console.error("[fixed-defaults] failed to apply reset:", error);
-          ctx.ui.notify(
-            "Override removed, but applying the built-in defaults failed.",
-            "warning",
-          );
-          return;
-        }
-
+        // Removing the override makes future events no-ops; there is nothing
+        // to apply to settings.json now. Existing defaults are left as-is so
+        // reset means "stop pinning," not "revert to an earlier state."
         ctx.ui.notify(
           removed
-            ? "Fixed defaults reset to built-in values."
+            ? "Fixed-defaults pin removed. Pi will use your last selection."
             : "No fixed-defaults override file to reset.",
           "info",
         );
@@ -352,23 +328,30 @@ export default function fixedDefaults(
         return;
       }
 
-      const { defaults, error } = effectiveDefaults(store);
+      const { override, error } = store.load();
       const model = ctx.model;
       const lines = [
         `model: ${model ? `${model.provider}/${model.id}` : "none"}`,
         `thinking: ${pi.getThinkingLevel()}`,
         "",
-        `pinned provider: ${defaults.provider}`,
-        `pinned model: ${defaults.model}`,
-        `pinned thinking: ${defaults.thinkingLevel}`,
-        `override file: ${store.path}`,
       ];
       if (error) {
-        lines.push("", `⚠ override invalid, using built-ins: ${error}`);
+        lines.push(`⚠ override file invalid — no pin active: ${error}`);
+      } else if (Object.keys(override).length === 0) {
+        lines.push("No pin active. Pi will use your last selection.");
+      } else {
+        if (override.provider !== undefined && override.model !== undefined) {
+          lines.push(`pinned provider: ${override.provider}`);
+          lines.push(`pinned model: ${override.model}`);
+        }
+        if (override.thinkingLevel !== undefined) {
+          lines.push(`pinned thinking: ${override.thinkingLevel}`);
+        }
       }
+      lines.push("", `override file: ${store.path}`);
       lines.push(
         "",
-        "run `/fixed-defaults set` to pin the current model and thinking level; `/fixed-defaults reset` to restore the built-in defaults",
+        "run `/fixed-defaults set` to pin the current model and thinking level; `/fixed-defaults reset` to stop pinning",
       );
       const message = lines.join("\n");
 
