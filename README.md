@@ -153,15 +153,13 @@ The commands below assume they are run from the repository root.
 
 ### Global goodies bundle
 
-`bermudis-pi-goodies` is a multi-file extension. Pi loads it through a symlink,
-so the symlink must point to the committed bundle rather than `index.ts` or one
-of the individual feature modules:
+After the package is published to npm:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-ln -sf "$PWD/pi-packages/bermudis-pi-goodies/bermudis-pi-goodies.bundle.ts" \
-  ~/.pi/agent/extensions/bermudis-pi-goodies.ts
+pi install npm:bermudis-pi-goodies@0.1.0
 ```
+
+Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi.
 
 ### Project-local extensions
 

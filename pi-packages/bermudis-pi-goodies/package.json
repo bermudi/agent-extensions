@@ -1,7 +1,19 @@
 {
   "name": "bermudis-pi-goodies",
-  "private": true,
+  "version": "0.1.0",
+  "private": false,
+  "description": "A bundle of small, frequently-used Pi extensions.",
+  "keywords": ["pi-package"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bermudi/agent-extensions.git",
+    "directory": "pi-packages/bermudis-pi-goodies"
+  },
   "type": "module",
+  "files": ["*.ts", "!*.test.ts", "!*.bundle.ts", "README.md"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
   "scripts": {
     "build": "esbuild index.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=bermudis-pi-goodies.bundle.ts",
     "typecheck": "tsc --noEmit",

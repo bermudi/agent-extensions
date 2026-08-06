@@ -16,15 +16,15 @@ extensions. One entry point, eight independent features.
 
 ## Install
 
+After publishing the package to npm:
+
 ```bash
-# Multi-file extension: symlink the BUNDLE, not index.ts — pi's Node loader
-# resolves relative imports against the symlink path, which would otherwise
-# break the per-module imports.
-ln -s "$PWD/bermudis-pi-goodies.bundle.ts" ~/.pi/agent/extensions/bermudis-pi-goodies.ts
+pi install npm:bermudis-pi-goodies@0.1.0
 ```
 
-Then `/reload` in Pi. Each feature is independent — disabling one is a one-line
-edit in `index.ts`. Kilo's provider and its balance footer are bundled here.
+Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
+feature is independent — disabling one is a one-line edit in `index.ts`.
+Kilo's provider and its balance footer are bundled here.
 
 ## Model-specific thinking
 
