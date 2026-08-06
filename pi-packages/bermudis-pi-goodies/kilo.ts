@@ -8,7 +8,7 @@
  * KILO_API_KEY after installing the goodies bundle; do not install this file
  * separately alongside the bundle.
  *
- * Design notes (pi 0.82.x):
+ * Design notes (pi 0.84.x; the refresh adapter also accepts Pi 0.80–0.83):
  *  - Reads auth via the public ModelRegistry API (getApiKeyForProvider /
  *    getProviderAuthStatus). The older `authStorage` map was removed upstream.
  *  - Dynamic model catalog uses the modern ProviderConfig.refreshModels(context)
@@ -50,6 +50,60 @@ const LOGIN_REQUEST_TIMEOUT_MS = 15_000;
 const TOKEN_EXPIRATION_MS = 365 * 24 * 60 * 60 * 1000; // 1 year
 
 const KILO_PROVIDER_ID = "kilo";
+
+/**
+ * The refresh-models persistence API changed in Pi 0.84:
+ *
+ *   old: context.store.read()/write()
+ *   new: context.stored + context.publish()
+ *
+ * Keep the adapter structural so one bundled extension can survive both host
+ * versions. The new shape is deliberately preferred when both are present.
+ */
+interface StoredModelCatalog {
+  models: readonly Model<Api>[];
+  checkedAt?: number;
+}
+
+interface LegacyModelStore {
+  read(): Promise<StoredModelCatalog | undefined>;
+  write(entry: StoredModelCatalog): Promise<void>;
+}
+
+interface CompatibleRefreshContext {
+  stored?: Readonly<StoredModelCatalog>;
+  store?: LegacyModelStore;
+  publish?: (publication: {
+    persist?: StoredModelCatalog | null;
+  }) => Promise<boolean>;
+}
+
+function compatibleRefreshContext(context: unknown): CompatibleRefreshContext {
+  return context as CompatibleRefreshContext;
+}
+
+async function readStoredCatalog(
+  context: unknown,
+): Promise<StoredModelCatalog | undefined> {
+  const compatible = compatibleRefreshContext(context);
+  if (compatible.stored) return compatible.stored;
+  if (compatible.store) return compatible.store.read();
+  return undefined;
+}
+
+async function publishStoredCatalog(
+  context: unknown,
+  entry: StoredModelCatalog,
+): Promise<boolean> {
+  const compatible = compatibleRefreshContext(context);
+  if (typeof compatible.publish === "function") {
+    return compatible.publish({ persist: entry });
+  }
+  if (compatible.store) {
+    await compatible.store.write(entry);
+  }
+  return true;
+}
 
 // =============================================================================
 // Device authorization flow
@@ -186,7 +240,9 @@ async function loginKilo(
 
 async function refreshKiloToken(
   credentials: OAuthCredentials,
+  signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
+  signal?.throwIfAborted();
   // Kilo device-auth tokens are long-lived and not refreshable; if one has
   // expired past our 1-year horizon the user must re-run /login kilo.
   if (credentials.expires > Date.now()) return credentials;
@@ -603,7 +659,7 @@ export default function kilo(pi: ExtensionAPI): void {
 
       if (!lastFullCatalog) {
         try {
-          const stored = await context.store.read();
+          const stored = await readStoredCatalog(context);
           const restored = (stored?.models ?? []).flatMap((model) => {
             const config = storedModelToConfig(model);
             return config ? [config] : [];
@@ -637,19 +693,22 @@ export default function kilo(pi: ExtensionAPI): void {
             signal: context.signal,
           });
           const checkedAt = Date.now();
-          lastFullCatalog = models;
-          lastFullCatalogCheckedAt = checkedAt;
           try {
-            await context.store.write({
+            const published = await publishStoredCatalog(context, {
               models: models.map(modelConfigToStoredModel),
               checkedAt,
             });
+            if (!published) {
+              return lastFullCatalog ?? KILO_FREE_MODELS;
+            }
           } catch (error) {
             console.warn(
               "[kilo] Failed to persist refreshed models:",
               error instanceof Error ? error.message : error,
             );
           }
+          lastFullCatalog = models;
+          lastFullCatalogCheckedAt = checkedAt;
           return models;
         } catch (error) {
           console.warn(

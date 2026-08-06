@@ -546,6 +546,43 @@ type FooterTheme = Parameters<FooterFactory>[1];
 type FooterLines = string[];
 type ActiveThinkingLevel = "off" | ThinkingLevel;
 
+/**
+ * Pi 0.84 split "OAuth" from "subscription" for the built-in footer. Keep
+ * this structural so the bundle remains loadable with older Pi versions too.
+ */
+interface CompatibleModelRegistry {
+  getProvider?: (provider: string) => unknown;
+  getRegisteredProviderConfig?: (provider: string) => unknown;
+}
+
+function hasSubscriptionAuth(value: unknown): boolean {
+  const record = asRecord(value);
+  const auth = asRecord(record?.auth);
+  const oauth = asRecord(auth?.oauth);
+  if (oauth?.isSubscription === true) return true;
+
+  const configOauth = asRecord(record?.oauth);
+  return configOauth?.isSubscription === true;
+}
+
+function providerUsesSubscription(
+  registry: ExtensionContext["modelRegistry"],
+  provider: string,
+): boolean {
+  const compatible = registry as unknown as CompatibleModelRegistry;
+  if (
+    typeof compatible.getProvider === "function" &&
+    hasSubscriptionAuth(compatible.getProvider(provider))
+  ) {
+    return true;
+  }
+
+  return (
+    typeof compatible.getRegisteredProviderConfig === "function" &&
+    hasSubscriptionAuth(compatible.getRegisteredProviderConfig(provider))
+  );
+}
+
 const THINKING_LEVELS: ReadonlySet<string> = new Set([
   "minimal",
   "low",
@@ -594,10 +631,21 @@ function createFooterSession(
     },
     modelRuntime: {
       isUsingOAuth(provider: string): boolean {
-        const model = getContext().model;
+        const ctx = getContext();
+        const model = ctx.model;
         return model?.provider === provider && model !== undefined
-          ? getContext().modelRegistry.isUsingOAuth(model)
+          ? ctx.modelRegistry.isUsingOAuth(model)
           : false;
+      },
+      isUsingSubscription(provider: string): boolean {
+        const ctx = getContext();
+        const model = ctx.model;
+        return (
+          model?.provider === provider &&
+          model !== undefined &&
+          ctx.modelRegistry.isUsingOAuth(model) &&
+          providerUsesSubscription(ctx.modelRegistry, provider)
+        );
       },
     },
     getContextUsage() {

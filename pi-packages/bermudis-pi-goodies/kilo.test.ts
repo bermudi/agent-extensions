@@ -82,15 +82,15 @@ describe("catalog refresh", () => {
         throw new Error("Kilo refresh hook was not registered");
 
       let stored:
-        | Awaited<
-            ReturnType<Parameters<typeof refreshModels>[0]["store"]["read"]>
-          >
-        | undefined;
-      const context: Parameters<typeof refreshModels>[0] = {
+        { models: readonly unknown[]; checkedAt?: number } | undefined;
+      const context = {
         credential: { type: "api_key", key: "test-key" },
         store: {
           read: async () => stored,
-          write: async (entry) => {
+          write: async (entry: {
+            models: readonly unknown[];
+            checkedAt?: number;
+          }) => {
             stored = entry;
           },
           delete: async () => {
@@ -98,7 +98,7 @@ describe("catalog refresh", () => {
           },
         },
         allowNetwork: true,
-      };
+      } as unknown as Parameters<typeof refreshModels>[0];
 
       const first = await refreshModels(context);
       const second = await refreshModels(context);
@@ -113,6 +113,73 @@ describe("catalog refresh", () => {
       expect(second.map(({ id }) => id)).toEqual(["example/model"]);
       expect(restored.map(({ id }) => id)).toEqual(["example/model"]);
       expect(fetchCount).toBe(1);
+      expect(stored?.models).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("uses the Pi 0.84 stored snapshot and publication API", async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCount = 0;
+    globalThis.fetch = (async () => {
+      fetchCount++;
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: "example/model",
+              name: "Example Model",
+              context_length: 32_000,
+              architecture: {
+                input_modalities: ["text"],
+                output_modalities: ["text"],
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    try {
+      const provider = captureKiloProvider();
+      const refreshModels = provider.refreshModels;
+      if (!refreshModels)
+        throw new Error("Kilo refresh hook was not registered");
+
+      let stored:
+        { models: readonly unknown[]; checkedAt?: number } | undefined;
+      let publishCount = 0;
+      const context = {
+        credential: { type: "api_key", key: "test-key" },
+        stored: undefined,
+        allowNetwork: true,
+        signal: new AbortController().signal,
+        publish: async (publication: {
+          persist?: { models: readonly unknown[]; checkedAt?: number } | null;
+        }) => {
+          publishCount++;
+          if (publication.persist) stored = publication.persist;
+          return true;
+        },
+      } as unknown as Parameters<typeof refreshModels>[0];
+
+      const first = await refreshModels(context);
+      const reloadedProvider = captureKiloProvider();
+      const reloadRefresh = reloadedProvider.refreshModels;
+      if (!reloadRefresh)
+        throw new Error("Reloaded Kilo refresh hook was not registered");
+      const restored = await reloadRefresh({
+        ...context,
+        stored,
+        allowNetwork: false,
+      });
+
+      expect(first.map(({ id }) => id)).toEqual(["example/model"]);
+      expect(restored.map(({ id }) => id)).toEqual(["example/model"]);
+      expect(fetchCount).toBe(1);
+      expect(publishCount).toBe(1);
       expect(stored?.models).toHaveLength(1);
     } finally {
       globalThis.fetch = originalFetch;
