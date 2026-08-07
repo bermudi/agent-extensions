@@ -6,7 +6,7 @@ Personal repo for Pi coding agent extensions.
 
 ```
 pi-packages/
-  bermudis-pi-goodies/   # ACTIVE (global): commands/hooks + bundled Kilo provider & balance footer
+  bermudis-pi-goodies/   # ACTIVE (npm/global): commands/hooks + Kilo provider & balance footer
   critique/               # ACTIVE (opt-in): launch the Bun-only Critique TUI from Pi
   diff/                   # ACTIVE (project-local)
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
@@ -32,7 +32,6 @@ bun install        # first time only
 bun run typecheck  # active extensions only (experiments has no typecheck script)
 bun run test       # extensions that have tests
 bun run format     # prettier on that extension's .ts files
-bun run build      # bermudis-pi-goodies only (esbuild bundle)
 ```
 
 Do not run `bun install` / `bun add` at the repo root — there is no root
@@ -46,13 +45,12 @@ price of true isolation and is intentional.
 
 - `pi-packages/experiments/` — archive of unused/exploratory extensions. Excluded from typecheck; tests run via `bun run test` inside `pi-packages/experiments/` but the dir is not gated as maintained code.
 - Active extensions live at `pi-packages/<name>/`. New keepers go there; experiments go in `pi-packages/experiments/`.
-- Multi-file extensions symlinked globally must ship a **bundle** (esbuild, `--packages=external`) — pi's Node loader resolves relative imports against the symlink path, breaking unbundled multi-file exts. Single-file extensions without package-local runtime dependencies can be symlinked directly. Dependency-owning packages such as `critique` should be loaded by their real path (`pi -e ...`) or installed as a local Pi package so their `node_modules` remains resolvable. See `bermudis-pi-goodies` `build` script for the bundle pattern.
+- Load multi-file extensions as Pi packages (prefer the published npm package) or from their real path with `pi -e ...`; do not use source-file symlinks as a production install. This keeps relative imports and package-local dependencies resolving against the intended package.
 
-- **Production installation rule:** Install maintained extensions into Pi from a pinned Git commit or release tag. Never point a running Pi at an agent's working tree or at a bundle that agents build in place. Build bundles only as disposable verification artifacts outside any live extension path; push/tag only when the extension is ready, then update the installed Pi package explicitly. Treat the current global goodies-bundle trial as legacy until this migration is complete.
+- **Production installation rule:** Install maintained extensions into Pi from a published, pinned npm version (for example, `pi install npm:bermudis-pi-goodies@0.2.0`) or another pinned release/commit. Never point a running Pi at an agent's mutable working tree. Source changes take effect in the installed extension only after publishing/updating the package, or when deliberately using a local development load.
 
-- **The bundle is a build artifact, not tracked in git.** After a fresh clone, run `bun install && bun run build` in the extension directory before testing it. The `.gitignore` covers `*.bundle.{mjs,ts}`.
 - Test your work: `bun run typecheck` and `bun run test` inside the extension dir.
-- Do not symlink/install globally without bermudi's explicit request. The current WIP trial has only the goodies bundle installed globally; the standalone Kilo and provider-balance links are retired (both features ship in the goodies bundle).
+- Do not symlink/install globally without bermudi's explicit request. The maintained goodies installation is the published npm package, not this working tree.
 - Extensions load at session start. Use `/reload` to pick up changes mid-session.
 
 ## Extension install locations

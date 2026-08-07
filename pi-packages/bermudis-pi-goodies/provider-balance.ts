@@ -5,6 +5,8 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { readFileSync, renameSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 const KILO_API_BASE = process.env.KILO_API_URL || "https://api.kilo.ai";
 const KILO_BALANCE_ENDPOINT = `${KILO_API_BASE}/api/profile/balance`;
@@ -22,6 +24,23 @@ const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
 const BALANCE_FETCH_TIMEOUT_MS = 5_000;
 /** Refresh the footer balance every Nth turn end during a run. See turn_end handler. */
 const REFRESH_EVERY_N_TURNS = 5;
+
+/**
+ * Balance cache shared across every pi process on the machine, keyed by
+ * provider. Two motivations:
+ *
+ * 1. The user runs several pi instances against the same metered account
+ *    (quota/credits are per-account, not per-session), so every session may
+ *    show the freshest reading any instance fetched.
+ * 2. On session switch pi tears this runtime down and reloads the extension
+ *    for the new session (session_shutdown reason "resume" -> session_start
+ *    reason "resume"), wiping in-memory state. Without a shared cache the new
+ *    session's footer is blank/stale until its own first fetch lands, which
+ *    can be agent_settled or the 5th turn_end.
+ */
+const BALANCE_CACHE_FILE = `${process.env.HOME ?? ""}/.pi/agent/cache/provider-balance.json`;
+/** Ignore cache entries older than this; stale balances mislead. */
+const BALANCE_CACHE_TTL_MS = 30 * 60 * 1000;
 
 interface BalanceAdapter {
   fetch(token: string, signal: AbortSignal): Promise<Balance>;
@@ -538,6 +557,100 @@ const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
   "openai-codex": { fetch: fetchCodexQuota, requiresOAuth: true },
 };
 
+// --- Shared balance cache ---------------------------------------------------
+
+interface BalanceCacheEntry {
+  fetchedAt: number;
+  balance: Balance;
+}
+
+type BalanceCache = Record<string, BalanceCacheEntry>;
+
+function parseCachedBalance(value: unknown): Balance | null {
+  if (!Array.isArray(value)) return null;
+  const segments: BalanceSegment[] = [];
+  for (const candidate of value) {
+    const segment = asRecord(candidate);
+    if (!segment) return null;
+    const credits = numericProperty(segment, "credits");
+    const quotaRecord = asRecord(segment.quota);
+    const remainingPercent = numericProperty(quotaRecord, "remainingPercent");
+    if (
+      credits === null &&
+      (quotaRecord === null || remainingPercent === null)
+    ) {
+      return null;
+    }
+    const label = stringProperty(segment, "label") ?? undefined;
+    const windowSeconds = numericProperty(quotaRecord, "windowSeconds");
+    const resetAt = numericProperty(quotaRecord, "resetAt");
+    segments.push({
+      ...(label !== undefined ? { label } : {}),
+      ...(credits !== null ? { credits } : {}),
+      ...(quotaRecord !== null && remainingPercent !== null
+        ? {
+            quota: {
+              remainingPercent,
+              ...(windowSeconds !== null ? { windowSeconds } : {}),
+              ...(resetAt !== null ? { resetAt } : {}),
+            },
+          }
+        : {}),
+    });
+  }
+  return segments;
+}
+
+/** Read the freshest non-expired cached balance for a provider. */
+export function readCachedBalance(
+  provider: string,
+  nowMs = Date.now(),
+): Balance | null {
+  let raw: string;
+  try {
+    raw = readFileSync(BALANCE_CACHE_FILE, "utf8");
+  } catch {
+    return null; // Missing/unreadable cache is a normal cold start.
+  }
+
+  try {
+    const entry = asRecord(asRecord(JSON.parse(raw))?.[provider]);
+    const fetchedAt = numericProperty(entry, "fetchedAt");
+    if (entry === null || fetchedAt === null) return null;
+    if (nowMs - fetchedAt >= BALANCE_CACHE_TTL_MS) return null;
+    return parseCachedBalance(entry.balance);
+  } catch {
+    return null; // Corrupt cache must never break the footer.
+  }
+}
+
+/**
+ * Persist a fresh reading so other live sessions and future freshly-loaded
+ * sessions render it instantly. Write is atomic (tmp + rename) because
+ * several pi processes can fetch concurrently.
+ */
+function writeCachedBalance(provider: string, balance: Balance): void {
+  let cache: BalanceCache = {};
+  try {
+    const existing = asRecord(
+      JSON.parse(readFileSync(BALANCE_CACHE_FILE, "utf8")),
+    );
+    if (existing) cache = existing as BalanceCache;
+  } catch {
+    // Missing or corrupt cache: start fresh rather than failing the write.
+  }
+  cache[provider] = { fetchedAt: Date.now(), balance };
+
+  try {
+    mkdirSync(dirname(BALANCE_CACHE_FILE), { recursive: true });
+    const tempFile = `${BALANCE_CACHE_FILE}.${process.pid}.tmp`;
+    writeFileSync(tempFile, JSON.stringify(cache));
+    renameSync(tempFile, BALANCE_CACHE_FILE);
+  } catch {
+    // The cache is an accelerator only; the footer works without it.
+  }
+}
+
 type FooterSession = ConstructorParameters<typeof FooterComponent>[0];
 type FooterFactory = NonNullable<
   Parameters<ExtensionContext["ui"]["setFooter"]>[0]
@@ -726,6 +839,16 @@ export default function providerBalance(pi: ExtensionAPI): void {
     const providerId = provider;
     const adapter = providerId ? BALANCE_ADAPTERS[providerId] : undefined;
     if (!adapter || !providerId) return;
+
+    // Paint the freshest known value for this account immediately: another
+    // live pi instance may have fetched seconds ago, and on session switch
+    // this is what keeps the new session's footer warm instead of blank until
+    // its own first fetch lands.
+    const cached = readCachedBalance(providerId);
+    if (cached) {
+      balance = cached;
+      requestRender?.();
+    }
     if (
       adapter.requiresOAuth &&
       (!model ||
@@ -739,7 +862,10 @@ export default function providerBalance(pi: ExtensionAPI): void {
       const token = await ctx.modelRegistry.getApiKeyForProvider(providerId);
       if (!token || generation !== refreshGeneration) return;
       balance = await adapter.fetch(token, controller.signal);
-      if (generation === refreshGeneration) requestRender?.();
+      if (generation === refreshGeneration) {
+        writeCachedBalance(providerId, balance);
+        requestRender?.();
+      }
     } catch (error) {
       if (generation !== refreshGeneration || controller.signal.aborted) return;
       // This is a best-effort background refresh. Writing to stdout/stderr while
@@ -793,6 +919,12 @@ export default function providerBalance(pi: ExtensionAPI): void {
     });
   }
 
+  // Fires for startup, reload, and every session switch/new/fork: pi tears
+  // the old runtime down (session_shutdown) and starts a fresh one, so this
+  // is both our initializer and our "user switched sessions" signal.
+  // refreshBalance seeds from the shared cache first, so a session resumed
+  // mid-run elsewhere shows the other instance's last reading immediately
+  // instead of going stale until agent_settled or the 5th turn_end.
   pi.on("session_start", (_event, ctx) => {
     activeContext = ctx;
     activeThinkingLevel = restoredThinkingLevel(ctx);
