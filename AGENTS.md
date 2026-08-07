@@ -64,4 +64,14 @@ Both are auto-discovered by pi at session start. Symlink source files into the d
 | `.pi/extensions/*.ts` | Project-local (only this repo) | `ln -s pi-packages/<ext>/<file>.ts .pi/extensions/<file>.ts` |
 | `~/.pi/agent/extensions/*.ts` | Global (all projects) | `ln -s pi-packages/<ext>/<file>.ts ~/.pi/agent/extensions/<file>.ts` |
 
+## Releasing bermudis-pi-goodies
+
+Release = tag push → GitHub Actions publishes to npm via OIDC trusted publishing (no npm token in CI). Steps:
+
+1. Bump `version` in `pi-packages/bermudis-pi-goodies/package.json` (keep compact JSON style; `npm version` rewrites arrays to multiline — avoid), update the `pi install npm:bermudis-pi-goodies@X.Y.Z` line in its README, commit.
+2. Push to `main`, then `git tag bermudis-pi-goodies-vX.Y.Z && git push origin bermudis-pi-goodies-vX.Y.Z`.
+3. The workflow `.github/workflows/publish-bermudis-pi-goodies.yml` verifies tag == package version, typechecks, tests, publishes. Watch with `gh run watch <run-id> --exit-status`.
+
+Known blocker: npm-side **trusted publisher must be configured on the package page** (npmjs.com/package/bermudis-pi-goodies → Trusted Publisher → GitHub Actions): repo `bermudi/agent-extensions`, workflow filename `publish-bermudis-pi-goodies.yml`, allowed action `npm publish`. Fields are exact-match/case-sensitive and npm does not validate on save — a mismatch surfaces only as `404 Not Found - PUT` at publish time (identity authenticated but not authorized). 0.1.0 was published manually; the CI pipeline had never run until the 0.2.0 attempt.
+
 if you install again globally without me telling you to, I WILL FUCKING END YOU
