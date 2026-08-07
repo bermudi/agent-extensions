@@ -69,9 +69,9 @@ Both are auto-discovered by pi at session start. Symlink source files into the d
 Release = tag push → GitHub Actions publishes to npm via OIDC trusted publishing (no npm token in CI). Steps:
 
 1. Bump `version` in `pi-packages/bermudis-pi-goodies/package.json` (keep compact JSON style; `npm version` rewrites arrays to multiline — avoid), update the `pi install npm:bermudis-pi-goodies@X.Y.Z` line in its README, commit.
-2. Push to `main`, then `git tag bermudis-pi-goodies-vX.Y.Z && git push origin bermudis-pi-goodies-vX.Y.Z`.
-3. The workflow `.github/workflows/publish-bermudis-pi-goodies.yml` verifies tag == package version, typechecks, tests, publishes. Watch with `gh run watch <run-id> --exit-status`.
+2. Push to `main`, then `git tag bermudis-pi-goodies-vX.Y.Z && git push origin bermudis-pi-goodies-vX.Y.Z`. (Or use the workflow's manual `Run workflow` dispatch to re-publish the current main without tag churn.)
+3. The workflow `.github/workflows/publish-bermudis-pi-goodies.yml` verifies tag == package version (tag pushes only), typechecks, tests, publishes. Watch with `gh run watch <run-id> --exit-status`.
 
-Known blocker: npm-side **trusted publisher must be configured on the package page** (npmjs.com/package/bermudis-pi-goodies → Trusted Publisher → GitHub Actions): repo `bermudi/agent-extensions`, workflow filename `publish-bermudis-pi-goodies.yml`, allowed action `npm publish`. Fields are exact-match/case-sensitive and npm does not validate on save — a mismatch surfaces only as `404 Not Found - PUT` at publish time (identity authenticated but not authorized). 0.1.0 was published manually; the CI pipeline had never run until the 0.2.0 attempt.
+Known blocker: npm-side **trusted publisher must be configured on the package page** (npmjs.com/package/bermudis-pi-goodies → Trusted Publisher → GitHub Actions): repo `bermudi/agent-extensions`, workflow filename `publish-bermudis-pi-goodies.yml`, **Environment name `npm-publish`** (must match the job's `environment:` in the workflow — GitHub's OIDC token only carries the environment claim when the job declares it), allowed action `npm publish`. Fields are exact-match/case-sensitive and npm does not validate on save — a mismatch surfaces only as `404 Not Found - PUT` at publish time (identity authenticated but not authorized). 0.1.0 was published manually; the CI pipeline had never run until the 0.2.0 attempt.
 
 if you install again globally without me telling you to, I WILL FUCKING END YOU
