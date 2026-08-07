@@ -1,7 +1,7 @@
 # bermudis-pi-goodies
 
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
-extensions. One entry point, eight independent features.
+extensions. One entry point, nine independent features.
 
 | Feature | Command / hook | What it does |
 |---------|----------------|--------------|
@@ -13,13 +13,14 @@ extensions. One entry point, eight independent features.
 | `fixed-defaults` | hook + `/fixed-defaults` | Keep the global startup provider, model, and thinking defaults fixed while allowing in-session model changes; `/fixed-defaults set` pins the current model and thinking level. |
 | `kilo` | provider | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`. |
 | `provider-balance` | footer (no command) | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
+| `tps` | hook (no command) | Notify tokens/sec and in/out/cache token usage at the end of each agent turn. |
 
 ## Install
 
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.1.0
+pi install npm:bermudis-pi-goodies@0.2.0
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each

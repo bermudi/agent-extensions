@@ -11,6 +11,7 @@
  *   - fixed-defaults   hook + command    keep startup defaults stable; /fixed-defaults set pins the current model
  *   - kilo             provider          access Kilo Gateway models
  *   - provider-balance footer            show Kilo credits or Codex quota in the footer
+ *   - tps              hook              notify tokens/sec and usage at each agent turn end
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import copyWithModel from "./copy-with-model.ts";
@@ -18,6 +19,7 @@ import fixedDefaults from "./fixed-defaults.ts";
 import kilo from "./kilo.ts";
 import modelThinking from "./model-thinking.ts";
 import providerBalance from "./provider-balance.ts";
+import tps from "./tps.ts";
 import nameWithAi from "./name-with-ai.ts";
 import zed from "./zed.ts";
 import preferTools from "./prefer-tools.ts";
@@ -31,4 +33,5 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   fixedDefaults(pi);
   providerBalance(pi);
   kilo(pi);
+  tps(pi);
 }
