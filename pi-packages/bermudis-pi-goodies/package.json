@@ -1,6 +1,6 @@
 {
   "name": "bermudis-pi-goodies",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": false,
   "description": "A bundle of small, frequently-used Pi extensions.",
   "keywords": ["pi-package"],

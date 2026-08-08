@@ -1,11 +1,12 @@
 # bermudis-pi-goodies
 
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
-extensions. One entry point, nine independent features.
+extensions. One entry point, ten independent features.
 
 | Feature | Command / hook | What it does |
 |---------|----------------|--------------|
 | `copy-with-model` | `/copy-with-model` | Copy last assistant message to the clipboard in a code fence tagged with the model name. |
+| `copy-trajectory` | `/copy-trajectory [thinking]` | Copy the whole conversation (user + assistant text, tool calls stripped) to the clipboard; `thinking` also includes assistant thinking blocks. |
 | `name-with-ai` | `/name-with-ai [name]` | Generate a short session name from the first user message (or set one manually). |
 | `zed` | `/z` | Open Zed editor on the current working directory. |
 | `prefer-tools` | hook (no command) | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`. |
@@ -20,7 +21,7 @@ extensions. One entry point, nine independent features.
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.2.0
+pi install npm:bermudis-pi-goodies@0.3.0
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
