@@ -10,6 +10,7 @@ pi-packages/
   critique/               # ACTIVE (opt-in): launch the Bun-only Critique TUI from Pi
   diff/                   # ACTIVE (project-local)
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
+  ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
   session-summarizer/     # ACTIVE (project-local)
   experiments/            # ARCHIVE — unused/exploratory. Not typechecked, not in default test run.
 ```
