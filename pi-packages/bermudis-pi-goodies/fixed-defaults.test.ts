@@ -184,8 +184,22 @@ describe("fixed-defaults", () => {
 
     await handler("set", context(ctx.cwd, { model: model("zai", "glm-5.2") }));
 
-    // Later model changes restore the NEW pin. Thinking changes are not
-    // handled by fixed-defaults.
+    // Pi persists the selected model and thinking level before it emits the
+    // model event. Reproduce that ordering rather than asking the extension to
+    // restore against stale settings.
+    writeFileSync(
+      settingsPath,
+      `${JSON.stringify(
+        {
+          ...original,
+          defaultProvider: "anthropic",
+          defaultModel: "claude-sonnet-4",
+          defaultThinkingLevel: "low",
+        },
+        null,
+        2,
+      )}\n`,
+    );
     await pi.emit(
       "model_select",
       {
@@ -205,7 +219,9 @@ describe("fixed-defaults", () => {
       ...original,
       defaultProvider: "zai",
       defaultModel: "glm-5.2",
+      defaultThinkingLevel: "low",
     });
+    expect(pi.handlers.has("thinking_level_select")).toBe(false);
   });
 
   test("reset removes the override and stops pinning", async () => {
@@ -322,6 +338,9 @@ describe("fixed-defaults", () => {
     expect(message).toContain("pinned provider: zai");
     expect(message).toContain("pinned model: glm-5.2");
     expect(message).not.toContain("pinned thinking");
+    expect(message).not.toContain("\nthinking:");
+    expect(message).toContain("legacy thinkingLevel is present but ignored");
+    expect(message).toContain("/model-thinking");
     expect(message).toContain(join(agentDir, "fixed-defaults.json"));
   });
 

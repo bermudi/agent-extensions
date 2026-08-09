@@ -76,18 +76,21 @@ Selecting a different model still changes the active session and its transcript;
 `fixed-defaults` restores the startup model after Pi persists a selection. Pi
 chooses the initial model before extensions receive `session_start`, so if you
 manually create or edit a pin for B while settings still name A, the current
-session remains on A and B starts with the following session.
+session remains on A and B starts with the next fresh session. Resuming an
+existing session restores that session's model instead.
 
 Older config files may contain `thinkingLevel`; that field is accepted for
 compatibility but ignored and should be managed in `model-thinking.json` instead.
-`fixed-defaults` logs a warning when it finds the legacy field. The
-`/fixed-defaults set` command rewrites the file in the provider/model-only format.
+`fixed-defaults` logs a warning and shows the migration in its status when it
+finds the legacy field. The `/fixed-defaults set` command rewrites the file in
+the provider/model-only format.
 
 Manage the pin from Pi:
 
 - `/fixed-defaults set` — pin the currently active model as the startup model
   (written to the override file and applied to `settings.json` immediately).
-- `/fixed-defaults` — show the active model, thinking level, and override path.
+- `/fixed-defaults` — show the active model, pinned startup model, and override
+  path.
 - `/fixed-defaults reset` — save the currently active model as Pi's last
   selection, then delete the override file and stop pinning. With no active
   model, it refuses to remove the pin.

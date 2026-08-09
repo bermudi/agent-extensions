@@ -4,15 +4,13 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+  describeError,
+  unlinkIfPresent,
+  writeJsonFileAtomic,
+} from "./json-file.ts";
 
 const CONFIG_FILENAME = "fixed-defaults.json";
 /**
@@ -34,10 +32,6 @@ interface FixedDefaultsOptions {
   agentDir?: string;
   /** Internal seam used by tests; defaults to <agentDir>/fixed-defaults.json. */
   configPath?: string;
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function parseOverride(value: unknown): FixedDefaultsOverride {
@@ -105,55 +99,53 @@ class DefaultsStore {
     this.path = path;
   }
 
-  /** Load the override; returns { override: {}, error: null } when missing. */
+  /** Load the override; an absent file is a valid, inactive configuration. */
   load(): LoadResult {
     let raw: string;
     try {
       raw = readFileSync(this.path, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return { override: {}, error: null };
+        return {
+          override: {},
+          error: null,
+          legacyThinkingLevel: false,
+        };
       }
       throw error;
     }
 
     try {
       const value = JSON.parse(raw) as unknown;
-      if (hasLegacyThinkingLevel(value) && !this.warnedLegacyThinkingLevel) {
+      const legacyThinkingLevel = hasLegacyThinkingLevel(value);
+      if (legacyThinkingLevel && !this.warnedLegacyThinkingLevel) {
         console.warn(
           `[fixed-defaults] legacy thinkingLevel found in ${this.path}; it is ignored. Add the policy to model-thinking.json instead.`,
         );
         this.warnedLegacyThinkingLevel = true;
       }
-      return { override: parseOverride(value), error: null };
+      return {
+        override: parseOverride(value),
+        error: null,
+        legacyThinkingLevel,
+      };
     } catch (error) {
       const message = describeError(error);
       console.error(
         `[fixed-defaults] invalid config at ${this.path}:`,
         message,
       );
-      return { override: {}, error: message };
+      return {
+        override: {},
+        error: message,
+        legacyThinkingLevel: false,
+      };
     }
   }
 
   save(override: FixedDefaultsOverride): void {
-    mkdirSync(dirname(this.path), { recursive: true });
-    const temporaryPath = `${this.path}.${process.pid}.${Date.now()}.tmp`;
-
-    try {
-      writeFileSync(temporaryPath, `${JSON.stringify(override, null, 2)}\n`, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-      renameSync(temporaryPath, this.path);
-    } catch (error) {
-      try {
-        unlinkSync(temporaryPath);
-      } catch {
-        // The temporary file usually does not exist when the initial write failed.
-      }
-      throw error;
-    }
+    writeJsonFileAtomic(this.path, override);
+    this.warnedLegacyThinkingLevel = false;
   }
 
   exists(): boolean {
@@ -166,15 +158,11 @@ class DefaultsStore {
     }
   }
 
-  reset(): boolean {
-    try {
-      unlinkSync(this.path);
-      this.warnedLegacyThinkingLevel = false;
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw error;
-    }
+  reset(): void {
+    // Deletion is intentionally idempotent: if another process removes the
+    // pin after exists(), reset has still reached the requested end state.
+    unlinkIfPresent(this.path);
+    this.warnedLegacyThinkingLevel = false;
   }
 }
 
@@ -183,6 +171,8 @@ interface LoadResult {
   override: FixedDefaultsOverride;
   /** Non-null when the file existed but failed to parse or validate. */
   error: string | null;
+  /** True when an old, ignored thinkingLevel field should be migrated. */
+  legacyThinkingLevel: boolean;
 }
 
 /**
@@ -240,24 +230,28 @@ export default function fixedDefaults(
     await persistModel(ctx, override.provider!, override.model!);
   }
 
-  function enqueue(
-    operation: () => Promise<void>,
-    label: string,
-  ): Promise<void> {
+  function enqueue<T>(
+    operation: () => Promise<T>,
+    failureMessage: string,
+  ): Promise<T> {
     const queued = pending.then(operation);
-    // Keep later notifications serviceable after one failed write. The
-    // original operation is still returned so the caller can report failure.
-    pending = queued.catch((error: unknown) => {
-      console.error(label, error);
-    });
+    // Log once at the queue boundary, then recover only the internal tail so a
+    // failed write does not prevent later operations. The returned promise
+    // still rejects, allowing commands to notify the user.
+    pending = queued.then(
+      () => undefined,
+      (error: unknown) => {
+        console.error(failureMessage, error);
+      },
+    );
     return queued;
   }
 
-  function schedule(ctx: ExtensionContext): Promise<void> {
-    return enqueue(
-      () => restore(ctx),
-      "[fixed-defaults] failed to restore defaults:",
-    );
+  function schedule(
+    ctx: ExtensionContext,
+    failureMessage = "[fixed-defaults] failed to restore defaults:",
+  ): Promise<void> {
+    return enqueue(() => restore(ctx), failureMessage);
   }
 
   pi.on("session_start", (_event, ctx) => schedule(ctx));
@@ -293,9 +287,8 @@ export default function fixedDefaults(
         try {
           // Bring settings.json in line with the new pin right away instead
           // of waiting for the next model/session event.
-          await schedule(ctx);
-        } catch (error) {
-          console.error("[fixed-defaults] failed to apply override:", error);
+          await schedule(ctx, "[fixed-defaults] failed to apply override:");
+        } catch {
           ctx.ui.notify(
             "Defaults saved, but applying them to settings.json failed.",
             "warning",
@@ -311,44 +304,45 @@ export default function fixedDefaults(
       }
 
       if (command === "reset") {
-        let found = false;
-        let removed = false;
-        let activeModel: NonNullable<ExtensionContext["model"]> | undefined;
+        type ResetResult =
+          | { status: "missing" }
+          | { status: "no-active-model" }
+          | {
+              status: "removed";
+              model: NonNullable<ExtensionContext["model"]>;
+            };
+
         try {
-          await enqueue(async () => {
-            if (!store.exists()) return;
-            found = true;
+          const result = await enqueue<ResetResult>(async () => {
+            if (!store.exists()) return { status: "missing" };
 
             const model = ctx.model;
-            if (!model) return;
+            if (!model) return { status: "no-active-model" };
 
             // Save the active model before removing the pin. Otherwise the
             // old pinned model remains in settings.json and wins at the next
-            // start.
+            // fresh start.
             await persistModel(ctx, model.provider, model.id);
-            removed = store.reset();
-            activeModel = model;
+            store.reset();
+            return { status: "removed", model };
           }, "[fixed-defaults] failed to reset override:");
 
-          if (!found) {
+          if (result.status === "missing") {
             ctx.ui.notify("No fixed-defaults override file to reset.", "info");
-          } else if (!activeModel) {
+          } else if (result.status === "no-active-model") {
             ctx.ui.notify(
               "Cannot reset fixed defaults without an active model; the pin was left in place.",
               "warning",
             );
           } else {
             ctx.ui.notify(
-              removed
-                ? `Fixed-defaults pin removed. Pi will use ${activeModel.provider}/${activeModel.id} as its last selection.`
-                : "No fixed-defaults override file to reset.",
+              `Fixed-defaults pin removed. Pi will use ${result.model.provider}/${result.model.id} as its last selection.`,
               "info",
             );
           }
-        } catch (error) {
-          console.error("[fixed-defaults] failed to reset override:", error);
+        } catch {
           ctx.ui.notify(
-            "Failed to reset fixed defaults; the pin was left in place.",
+            "Failed to reset fixed defaults. Pin removal could not be confirmed; settings may already reflect the active model.",
             "error",
           );
         }
@@ -360,11 +354,10 @@ export default function fixedDefaults(
         return;
       }
 
-      const { override, error } = store.load();
+      const { override, error, legacyThinkingLevel } = store.load();
       const model = ctx.model;
       const lines = [
         `model: ${model ? `${model.provider}/${model.id}` : "none"}`,
-        `thinking: ${pi.getThinkingLevel()} (managed by model-thinking or Pi)`,
         "",
       ];
       if (error) {
@@ -376,6 +369,12 @@ export default function fixedDefaults(
           lines.push(`pinned provider: ${override.provider}`);
           lines.push(`pinned model: ${override.model}`);
         }
+      }
+      if (legacyThinkingLevel) {
+        lines.push(
+          "",
+          "⚠ legacy thinkingLevel is present but ignored; manage it with /model-thinking",
+        );
       }
       lines.push("", `override file: ${store.path}`);
       lines.push(

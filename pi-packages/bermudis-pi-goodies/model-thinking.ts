@@ -3,15 +3,13 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+  describeError,
+  unlinkIfPresent,
+  writeJsonFileAtomic,
+} from "./json-file.ts";
 
 const CONFIG_FILENAME = "model-thinking.json";
 const ALL_LEVELS = [
@@ -39,10 +37,6 @@ interface ModelRef {
 interface ModelThinkingOptions {
   /** Internal seam used by tests; normal callers use Pi's global agent dir. */
   configPath?: string;
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function isThinkingLevel(value: unknown): value is ThinkingLevel {
@@ -159,46 +153,18 @@ class ConfigStore {
   }
 
   save(config: ModelThinkingConfig): void {
-    mkdirSync(dirname(this.path), { recursive: true });
-    const temporaryPath = `${this.path}.${process.pid}.${Date.now()}.tmp`;
-
-    try {
-      writeFileSync(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-      renameSync(temporaryPath, this.path);
-    } catch (error) {
-      try {
-        unlinkSync(temporaryPath);
-      } catch {
-        // The temporary file usually does not exist when the initial write failed.
-      }
-      throw error;
-    }
-
+    writeJsonFileAtomic(this.path, config);
     this.cachedResult = { config, error: null };
     this.cachedStamp = fileStamp(this.path);
     this.initialized = true;
   }
 
   reset(): boolean {
-    try {
-      unlinkSync(this.path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        this.initialized = true;
-        this.cachedStamp = undefined;
-        this.cachedResult = { config: {}, error: null };
-        return false;
-      }
-      throw error;
-    }
-
+    const removed = unlinkIfPresent(this.path);
     this.initialized = true;
     this.cachedStamp = undefined;
     this.cachedResult = { config: {}, error: null };
-    return true;
+    return removed;
   }
 }
 
