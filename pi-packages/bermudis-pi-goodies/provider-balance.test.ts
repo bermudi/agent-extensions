@@ -661,7 +661,10 @@ describe("shared balance cache", () => {
     // test runs, without touching the real cache file (the fixture key below
     // cannot collide with a real provider id).
     expect(
-      readCachedBalance("kilo", new Date("2024-01-01T00:31:00Z").getTime()),
+      readCachedBalance(
+        "fixture",
+        new Date("2024-01-01T00:31:00Z").getTime(),
+      ),
     ).toBeNull();
   });
 
