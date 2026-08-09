@@ -11,7 +11,7 @@ extensions. One entry point, ten independent features.
 | `zed` | `/z` | Open Zed editor on the current working directory. |
 | `prefer-tools` | hook (no command) | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`. |
 | `model-thinking` | hook + `/model-thinking` | Apply provider/model thinking defaults and explicitly save per-model defaults. |
-| `fixed-defaults` | hook + `/fixed-defaults` | Keep the global startup provider, model, and thinking defaults fixed while allowing in-session model changes; `/fixed-defaults set` pins the current model and thinking level. |
+| `fixed-defaults` | hook + `/fixed-defaults` | Keep the global startup provider and model fixed while allowing in-session model changes; `/fixed-defaults set` pins the current model. |
 | `kilo` | provider | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`. |
 | `provider-balance` | footer (no command) | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 | `tps` | hook (no command) | Notify tokens/sec and in/out/cache token usage at the end of each agent turn. |
@@ -53,35 +53,44 @@ config and overwrites an existing entry. Manual thinking-level changes in Pi do
 not modify this file. All current Pi levels are accepted:
 `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 `/model-thinking` shows the active resolution and config path;
-`/model-thinking reset` deletes the whole config.
+`/model-thinking reset` deletes the whole config. A malformed config is reported
+and ignored; `/model-thinking set` refuses to overwrite it until you repair the
+file or reset it.
 
-## Fixed startup defaults
+## Fixed startup model
 
 Pi normally saves the last model and thinking level selected in the global
-settings file. The bundle pins those cross-session defaults to:
+settings file. `fixed-defaults` pins only the cross-session provider and model;
+`model-thinking` is the sole owner of model-specific thinking levels.
+
+Create `~/.pi/agent/fixed-defaults.json` to pin a startup model:
 
 ```json
 {
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.6-luna",
-  "defaultThinkingLevel": "max"
+  "provider": "openai-codex",
+  "model": "gpt-5.6-luna"
 }
 ```
 
 Selecting a different model still changes the active session and its transcript;
-`fixed-defaults` only restores the startup values after Pi persists a selection.
+`fixed-defaults` restores the startup model after Pi persists a selection. Pi
+chooses the initial model before extensions receive `session_start`, so if you
+manually create or edit a pin for B while settings still name A, the current
+session remains on A and B starts with the following session.
 
-The pinned values are the built-ins above, optionally overridden per field by
-`~/.pi/agent/fixed-defaults.json` — omit a field to keep the built-in value for
-it, and hand edits are picked up without a reload. Manage it from Pi:
+Older config files may contain `thinkingLevel`; that field is accepted for
+compatibility but ignored and should be managed in `model-thinking.json` instead.
+`fixed-defaults` logs a warning when it finds the legacy field. The
+`/fixed-defaults set` command rewrites the file in the provider/model-only format.
 
-- `/fixed-defaults set` — pin the currently active model and thinking level as
-  the new startup defaults (written to the override file and applied to
-  `settings.json` immediately).
-- `/fixed-defaults` — show the effective pin, the active model, and the
-  override file path.
-- `/fixed-defaults reset` — delete the override file and fall back to the
-  built-in values.
+Manage the pin from Pi:
+
+- `/fixed-defaults set` — pin the currently active model as the startup model
+  (written to the override file and applied to `settings.json` immediately).
+- `/fixed-defaults` — show the active model, thinking level, and override path.
+- `/fixed-defaults reset` — save the currently active model as Pi's last
+  selection, then delete the override file and stop pinning. With no active
+  model, it refuses to remove the pin.
 
 ## Provider and balance details
 

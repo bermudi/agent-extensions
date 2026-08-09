@@ -41,6 +41,10 @@ interface ModelThinkingOptions {
   configPath?: string;
 }
 
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function isThinkingLevel(value: unknown): value is ThinkingLevel {
   return (
     typeof value === "string" &&
@@ -99,48 +103,59 @@ function fileStamp(path: string): string | undefined {
   }
 }
 
+interface ConfigLoadResult {
+  config: ModelThinkingConfig;
+  /** Non-null when the file exists but could not be read or validated. */
+  error: string | null;
+}
+
 class ConfigStore {
   readonly path: string;
   private initialized = false;
   private cachedStamp: string | undefined;
-  private cachedConfig: ModelThinkingConfig = {};
+  private cachedResult: ConfigLoadResult = { config: {}, error: null };
 
   constructor(path: string) {
     this.path = path;
   }
 
-  load(): ModelThinkingConfig {
+  load(): ConfigLoadResult {
     let stamp: string | undefined;
     try {
       stamp = fileStamp(this.path);
     } catch (error) {
-      console.error(`[model-thinking] failed to stat ${this.path}:`, error);
-      return {};
+      const message = describeError(error);
+      console.error(`[model-thinking] failed to stat ${this.path}:`, message);
+      return { config: {}, error: message };
     }
 
     if (this.initialized && stamp === this.cachedStamp) {
-      return this.cachedConfig;
+      return this.cachedResult;
     }
 
     this.initialized = true;
     this.cachedStamp = stamp;
     if (stamp === undefined) {
-      this.cachedConfig = {};
-      return this.cachedConfig;
+      this.cachedResult = { config: {}, error: null };
+      return this.cachedResult;
     }
 
     try {
-      this.cachedConfig = parseConfig(
-        JSON.parse(readFileSync(this.path, "utf8")) as unknown,
-      );
+      this.cachedResult = {
+        config: parseConfig(
+          JSON.parse(readFileSync(this.path, "utf8")) as unknown,
+        ),
+        error: null,
+      };
     } catch (error) {
+      const message = describeError(error);
       console.error(
         `[model-thinking] invalid config at ${this.path}:`,
-        error instanceof Error ? error.message : error,
+        message,
       );
-      this.cachedConfig = {};
+      this.cachedResult = { config: {}, error: message };
     }
-    return this.cachedConfig;
+    return this.cachedResult;
   }
 
   save(config: ModelThinkingConfig): void {
@@ -162,7 +177,7 @@ class ConfigStore {
       throw error;
     }
 
-    this.cachedConfig = config;
+    this.cachedResult = { config, error: null };
     this.cachedStamp = fileStamp(this.path);
     this.initialized = true;
   }
@@ -171,13 +186,18 @@ class ConfigStore {
     try {
       unlinkSync(this.path);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        this.initialized = true;
+        this.cachedStamp = undefined;
+        this.cachedResult = { config: {}, error: null };
+        return false;
+      }
       throw error;
     }
 
     this.initialized = true;
     this.cachedStamp = undefined;
-    this.cachedConfig = {};
+    this.cachedResult = { config: {}, error: null };
     return true;
   }
 }
@@ -207,8 +227,13 @@ export default function modelThinking(
   );
   function apply(ctx: ExtensionContext, silent: boolean): void {
     const model = ctx.model;
-    const level = resolveThinkingLevel(store.load(), model);
-    if (!model || level === undefined) return;
+    const loaded = store.load();
+    // Never treat a broken file as an empty policy: doing so would hide the
+    // error and make a later `/model-thinking set` overwrite it.
+    if (loaded.error || !model) return;
+
+    const level = resolveThinkingLevel(loaded.config, model);
+    if (level === undefined) return;
 
     const before = pi.getThinkingLevel();
     pi.setThinkingLevel(level);
@@ -246,10 +271,18 @@ export default function modelThinking(
         const key = modelKey(model);
         const level = pi.getThinkingLevel();
         try {
-          const config = store.load();
+          const loaded = store.load();
+          if (loaded.error) {
+            ctx.ui.notify(
+              `Cannot save model-thinking config: ${loaded.error}. Repair ${store.path} or run /model-thinking reset first.`,
+              "error",
+            );
+            return;
+          }
+
           store.save({
-            ...config,
-            models: { ...config.models, [key]: level },
+            ...loaded.config,
+            models: { ...loaded.config.models, [key]: level },
           });
           ctx.ui.notify(`Saved ${key}: ${level}`, "info");
         } catch (error) {
@@ -284,14 +317,19 @@ export default function modelThinking(
       }
 
       const model = ctx.model;
-      const config = store.load();
-      const resolved = resolveThinkingLevel(config, model);
+      const loaded = store.load();
+      const resolved = loaded.error
+        ? undefined
+        : resolveThinkingLevel(loaded.config, model);
       const lines = [
         `model: ${model ? modelKey(model) : "none"}`,
         `managed: ${resolved === undefined ? "no" : "yes"}`,
         `file: ${store.path}`,
         `saved: ${resolved ?? "none — pi handles this model natively"}`,
         `current: ${pi.getThinkingLevel()}`,
+        ...(loaded.error
+          ? [`⚠ config invalid — no policy applied: ${loaded.error}`]
+          : []),
         "",
         "run `/model-thinking set` to save this model and level; `/model-thinking reset` to clear all configured levels",
       ];

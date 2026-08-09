@@ -42,12 +42,15 @@ function model(
 
 function context(
   activeModel: NonNullable<ExtensionContext["model"]>,
+  notifications: string[] = [],
 ): ExtensionContext {
   return {
     model: activeModel,
     hasUI: true,
     ui: {
-      notify() {},
+      notify(message: string) {
+        notifications.push(message);
+      },
     },
   } as unknown as ExtensionContext;
 }
@@ -233,6 +236,48 @@ describe("model-thinking", () => {
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
       models: { "unmanaged/model": "xhigh" },
     });
+  });
+
+  test("set refuses to overwrite malformed config", async () => {
+    const path = temporaryConfig();
+    writeFileSync(path, "{ not valid json\n");
+    const pi = new PiHarness();
+    modelThinking(pi.api, { configPath: path });
+    const notifications: string[] = [];
+    const ctx = context(model("unmanaged", "model"), notifications);
+
+    await pi.commands.get("model-thinking")!("set", ctx);
+
+    expect(readFileSync(path, "utf8")).toBe("{ not valid json\n");
+    expect(notifications.some((message) => message.includes("Repair"))).toBe(
+      true,
+    );
+  });
+
+  test("status reports malformed config instead of treating it as empty", async () => {
+    const path = temporaryConfig();
+    writeFileSync(path, "{ not valid json\n");
+    const pi = new PiHarness();
+    modelThinking(pi.api, { configPath: path });
+    const notifications: string[] = [];
+    const ctx = context(model("unmanaged", "model"), notifications);
+
+    await pi.commands.get("model-thinking")!("", ctx);
+
+    expect(notifications[0]).toContain("config invalid");
+    expect(notifications[0]).toContain("no policy applied");
+  });
+
+  test("reset explicitly clears malformed config", async () => {
+    const path = temporaryConfig();
+    writeFileSync(path, "{ not valid json\n");
+    const pi = new PiHarness();
+    modelThinking(pi.api, { configPath: path });
+    const ctx = context(model("unmanaged", "model"));
+
+    await pi.commands.get("model-thinking")!("reset", ctx);
+
+    expect(() => readFileSync(path, "utf8")).toThrow();
   });
 
   test("leaves unmanaged models to Pi and does not create a config", () => {

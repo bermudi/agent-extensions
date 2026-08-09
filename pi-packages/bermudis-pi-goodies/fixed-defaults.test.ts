@@ -147,13 +147,12 @@ describe("fixed-defaults", () => {
     expect(settingsAt(settingsPath)).toEqual(original);
   });
 
-  test("set pins the active model and thinking level and applies them immediately", async () => {
+  test("set pins the active model and applies it immediately", async () => {
     const { agentDir, settingsPath, original, pi, ctx } = setup();
     fixedDefaults(pi.api, { agentDir });
     const handler = pi.commands.get("fixed-defaults")!;
     const notifications: string[] = [];
 
-    pi.level = "xhigh";
     await handler(
       "set",
       context(ctx.cwd, { model: model("zai", "glm-5.2"), notifications }),
@@ -167,27 +166,26 @@ describe("fixed-defaults", () => {
     ).toEqual({
       provider: "zai",
       model: "glm-5.2",
-      thinkingLevel: "xhigh",
     });
-    // Settings file updated immediately, without waiting for an event.
+    // Settings file updated immediately, without waiting for an event. The
+    // thinking default remains owned by Pi/model-thinking.
     expect(settingsAt(settingsPath)).toEqual({
       ...original,
       defaultProvider: "zai",
       defaultModel: "glm-5.2",
-      defaultThinkingLevel: "xhigh",
     });
     expect(notifications.some((n) => n.includes("zai/glm-5.2"))).toBe(true);
   });
 
-  test("events restore the pinned override instead of built-ins", async () => {
+  test("model events restore the pinned override without changing thinking", async () => {
     const { agentDir, settingsPath, original, pi, ctx } = setup();
     fixedDefaults(pi.api, { agentDir });
     const handler = pi.commands.get("fixed-defaults")!;
 
-    pi.level = "xhigh";
     await handler("set", context(ctx.cwd, { model: model("zai", "glm-5.2") }));
 
-    // Later model/thinking changes restore the NEW pin, not the built-ins.
+    // Later model changes restore the NEW pin. Thinking changes are not
+    // handled by fixed-defaults.
     await pi.emit(
       "model_select",
       {
@@ -207,7 +205,6 @@ describe("fixed-defaults", () => {
       ...original,
       defaultProvider: "zai",
       defaultModel: "glm-5.2",
-      defaultThinkingLevel: "xhigh",
     });
   });
 
@@ -217,38 +214,75 @@ describe("fixed-defaults", () => {
     const handler = pi.commands.get("fixed-defaults")!;
     const notifications: string[] = [];
 
-    pi.level = "xhigh";
     await handler("set", context(ctx.cwd, { model: model("zai", "glm-5.2") }));
     expect(existsSync(join(agentDir, "fixed-defaults.json"))).toBe(true);
 
-    await handler("reset", context(ctx.cwd, { notifications }));
+    const activeModel = model("anthropic", "claude-sonnet-4");
+    await handler(
+      "reset",
+      context(ctx.cwd, { model: activeModel, notifications }),
+    );
     expect(existsSync(join(agentDir, "fixed-defaults.json"))).toBe(false);
-    expect(notifications.some((n) => n.includes("pin removed"))).toBe(true);
+    expect(
+      notifications.some((n) =>
+        n.includes("anthropic/claude-sonnet-4 as its last selection"),
+      ),
+    ).toBe(true);
 
-    // With no override, the next event is a no-op: settings hold the last
-    // applied pin rather than reverting to an earlier state.
+    // Reset persists the model that is active now, so the former pin cannot
+    // remain in settings.json and win the next startup.
+    expect(settingsAt(settingsPath)).toEqual({
+      ...original,
+      defaultProvider: "anthropic",
+      defaultModel: "claude-sonnet-4",
+    });
+
     await pi.emit("session_start", { reason: "startup" }, ctx);
     expect(settingsAt(settingsPath)).toEqual({
       ...original,
-      defaultProvider: "zai",
-      defaultModel: "glm-5.2",
-      defaultThinkingLevel: "xhigh",
+      defaultProvider: "anthropic",
+      defaultModel: "claude-sonnet-4",
     });
   });
 
-  test("thinkingLevel-only override pins thinking and leaves the model alone", async () => {
+  test("reset without an active model leaves the pin in place", async () => {
+    const { agentDir, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+    const notifications: string[] = [];
+
+    await handler("set", context(ctx.cwd, { model: model("zai", "glm-5.2") }));
+    await handler("reset", context(ctx.cwd, { notifications }));
+
+    expect(existsSync(join(agentDir, "fixed-defaults.json"))).toBe(true);
+    expect(
+      notifications.some((message) => message.includes("active model")),
+    ).toBe(true);
+  });
+
+  test("legacy thinkingLevel is ignored and does not pin thinking", async () => {
     const { agentDir, settingsPath, original, pi, ctx } = setup();
     writeFileSync(
       join(agentDir, "fixed-defaults.json"),
-      `${JSON.stringify({ thinkingLevel: "low" }, null, 2)}\n`,
+      `${JSON.stringify(
+        { provider: "zai", model: "glm-5.2", thinkingLevel: "max" },
+        null,
+        2,
+      )}\n`,
     );
     fixedDefaults(pi.api, { agentDir });
 
     await pi.emit("session_start", { reason: "startup" }, ctx);
+    await pi.emit(
+      "thinking_level_select",
+      { level: "low", previousLevel: "high" },
+      ctx,
+    );
 
     expect(settingsAt(settingsPath)).toEqual({
       ...original,
-      defaultThinkingLevel: "low",
+      defaultProvider: "zai",
+      defaultModel: "glm-5.2",
     });
   });
 
@@ -270,7 +304,7 @@ describe("fixed-defaults", () => {
     writeFileSync(
       join(agentDir, "fixed-defaults.json"),
       `${JSON.stringify(
-        { provider: "zai", model: "glm-5.2", thinkingLevel: "high" },
+        { provider: "zai", model: "glm-5.2", thinkingLevel: "max" },
         null,
         2,
       )}\n`,
@@ -279,7 +313,6 @@ describe("fixed-defaults", () => {
     const handler = pi.commands.get("fixed-defaults")!;
     const notifications: string[] = [];
 
-    pi.level = "xhigh";
     await handler(
       "",
       context(ctx.cwd, { model: model("zai", "glm-5.2"), notifications }),
@@ -288,7 +321,7 @@ describe("fixed-defaults", () => {
     const message = notifications[0];
     expect(message).toContain("pinned provider: zai");
     expect(message).toContain("pinned model: glm-5.2");
-    expect(message).toContain("pinned thinking: high");
+    expect(message).not.toContain("pinned thinking");
     expect(message).toContain(join(agentDir, "fixed-defaults.json"));
   });
 
