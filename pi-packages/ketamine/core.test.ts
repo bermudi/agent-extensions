@@ -143,7 +143,10 @@ test("trajectory grouping keeps a tool call and result in one turn", () => {
 });
 
 test("effective-context regrouping cannot resurrect previously dropped text", () => {
-  const effective = [user("kept", 1), user("new", 2)];
+  // The dropped message exists in the original trajectory, but not in the
+  // effective context handed to the regrouper.
+  const original = [user("kept", 1), user("dropped secret", 2), user("new", 3)];
+  const effective = [original[0]!, original[2]!];
   const regrouped = buildTrajectoryUnitsFromMessages(effective);
   expect(JSON.stringify(regrouped)).not.toContain("dropped secret");
   expect(regrouped.flatMap((unit) => unit.messages)).toEqual(effective);
@@ -191,6 +194,29 @@ test("curation budget rejects keep-all plans", () => {
   );
   expect(() => assertCurationFits(plan, units, 1)).toThrow(
     "Summarize or drop more",
+  );
+});
+
+test("10,001 curated messages are rejected at creation", () => {
+  const manyUnits: TrajectoryUnit[] = Array.from(
+    { length: 10_001 },
+    (_, i) => ({
+      id: `turn:${i}`,
+      entryIds: [`${i}`],
+      messages: [user(`msg-${i}`, i)],
+    }),
+  );
+  const plan = validatePlan(
+    {
+      rationale: "keep every unit",
+      decisions: [
+        { action: "keep", unitIds: manyUnits.map((unit) => unit.id) },
+      ],
+    },
+    manyUnits,
+  );
+  expect(() => assertCurationFits(plan, manyUnits, 1_000_000_000)).toThrow(
+    /10,000/,
   );
 });
 

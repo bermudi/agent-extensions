@@ -188,8 +188,17 @@ export function buildTrajectoryUnits(
 ): TrajectoryUnit[] {
   const units: TrajectoryUnit[] = [];
   for (const entry of entries) {
+    let messageIndex = 0;
     for (const message of sessionEntryToContextMessages(entry)) {
-      appendMessageToUnit(units, message, entry.id, `turn:${entry.id}`);
+      appendMessageToUnit(
+        units,
+        message,
+        entry.id,
+        messageIndex === 0
+          ? `turn:${entry.id}`
+          : `turn:${entry.id}#${messageIndex}`,
+      );
+      messageIndex += 1;
     }
   }
   return units;
@@ -279,6 +288,8 @@ export function materializePlan(
   return messages;
 }
 
+const MAX_CURATED_MESSAGES = 10_000;
+
 export function isKetamineCheckpoint(
   value: unknown,
 ): value is KetamineCheckpoint {
@@ -290,6 +301,7 @@ export function isKetamineCheckpoint(
     typeof candidate.runId !== "string" ||
     typeof candidate.observerSessionDir !== "string" ||
     !Array.isArray(candidate.curatedMessages) ||
+    candidate.curatedMessages.length > MAX_CURATED_MESSAGES ||
     !curationPlanSchema.safeParse(candidate.plan).success
   ) {
     return false;
@@ -553,6 +565,11 @@ export function assertCurationFits(
   maxCuratedTokens: number,
 ): AgentMessage[] {
   const messages = materializePlan(plan, units);
+  if (messages.length > MAX_CURATED_MESSAGES) {
+    throw new Error(
+      `Curated context contains ${messages.length.toLocaleString()} messages; it must be at most ${MAX_CURATED_MESSAGES.toLocaleString()} messages. Summarize or drop more units.`,
+    );
+  }
   const estimatedTokens = estimateMessageTokens(messages);
   if (estimatedTokens > maxCuratedTokens) {
     throw new Error(

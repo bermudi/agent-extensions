@@ -45,7 +45,7 @@ Run checks from this package directory:
 
 ```bash
 bun run typecheck
-bun test
+bun run test
 bun run format
 ```
 
@@ -72,7 +72,34 @@ KETAMINE_MODEL=anthropic/claude-sonnet-4-6 pi --extension ./pi-packages/ketamine
 - Observer failure blocks compaction instead of silently falling back to Pi's
   native summarizer.
 - `drop` removes material from the model context; it is not secure deletion.
-  Target and observer session artifacts remain on disk with private permissions.
+  The snapshot is deleted after a successful run, and old run directories are
+  pruned according to the configured retention. Diagnostics from failed or
+  interrupted runs may remain on disk with private permissions until they age
+  out.
 - Pi decides whether there is anything to compact before firing the extension
   hook. A future Pi API that directly accepts replacement messages would remove
   this remaining lifecycle edge case.
+
+## Data retention
+
+Ketamine stores observer runs under `~/.pi/agent/ketamine/runs/<run-id>/`. Each
+run contains a `trajectory.json` snapshot, an observer session directory, and an
+`observer.stderr.log` diagnostics file.
+
+- The `trajectory.json` snapshot is removed only after the checkpoint has been
+  committed, in the post-commit `session_compact` event.
+- Old run directories are pruned after each successful compaction. The number of
+  retained run directories is controlled by `KETAMINE_RUN_RETENTION` and
+  defaults to `5`.
+- Pruning skips runs whose `active.lock` marker contains a live owning PID, so
+  concurrent Pi sessions are not cleaned up prematurely. Malformed or unreadable
+  markers are treated conservatively and may delay cleanup of that run.
+- Failed or interrupted runs are not deleted so their diagnostics can be
+  inspected, and are removed once they fall outside the retention window.
+
+`KETAMINE_TIMEOUT_MS` must be a finite positive safe integer no greater than
+`3,600,000` milliseconds (1 hour); invalid, zero, negative, fractional, or
+overflowing values fall back to the default of `600,000` milliseconds.
+`KETAMINE_RUN_RETENTION` must be a finite positive safe integer between `1` and
+`100`; invalid values fall back to `5`, and values above `100` clamp to `100`.
+The observer run is bounded by `KETAMINE_TIMEOUT_MS`.

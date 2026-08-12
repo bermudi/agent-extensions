@@ -3,9 +3,16 @@ import {
   getLatestCompactionEntry,
   sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, normalize, sep } from "node:path";
 import { z } from "zod";
 import {
   KETAMINE_STRATEGY,
@@ -24,10 +31,174 @@ import {
 } from "./core.ts";
 import { runObserver } from "./observer-process.ts";
 
-const RUNS_DIR = join(homedir(), ".pi", "agent", "ketamine", "runs");
+const HOME_DIR = process.env.HOME ?? homedir();
+const RUNS_DIR = join(HOME_DIR, ".pi", "agent", "ketamine", "runs");
+const ACTIVE_MARKER_FILE = "active.lock";
+const SNAPSHOT_FILE = "trajectory.json";
+const DEFAULT_RUN_RETENTION = 5;
+const MAX_RUN_RETENTION = 100;
+const DEFAULT_TIMEOUT_MS = 600_000;
+const MAX_TIMEOUT_MS = 3_600_000; // 1 hour
 
 function makeRunId(): string {
   return `${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function isRunIdSafe(runId: string): boolean {
+  if (typeof runId !== "string" || runId.length === 0 || runId.length > 256) {
+    return false;
+  }
+  if (runId === "." || runId === "..") return false;
+  if (/[\\/\x00]/.test(runId)) return false;
+  return true;
+}
+
+function resolveRunDir(runsDir: string, runId: string): string | undefined {
+  if (!isRunIdSafe(runId)) return undefined;
+  const resolved = normalize(join(runsDir, runId));
+  const normalizedRunsDir = normalize(runsDir);
+  const prefix = normalizedRunsDir.endsWith(sep)
+    ? normalizedRunsDir
+    : normalizedRunsDir + sep;
+  if (!resolved.startsWith(prefix) || resolved.length <= prefix.length) {
+    return undefined;
+  }
+  return resolved;
+}
+
+export function getRunDirectory(
+  runsDir: string,
+  runId: string,
+): string | undefined {
+  return resolveRunDir(runsDir, runId);
+}
+
+export function getActiveMarkerPath(runDir: string): string {
+  return join(runDir, ACTIVE_MARKER_FILE);
+}
+
+export async function writeActiveMarker(runDir: string): Promise<void> {
+  const marker = { pid: process.pid, startedAt: new Date().toISOString() };
+  await writeFile(getActiveMarkerPath(runDir), JSON.stringify(marker), {
+    mode: 0o600,
+  });
+}
+
+export async function removeActiveMarker(runDir: string): Promise<void> {
+  await rm(getActiveMarkerPath(runDir), { force: true });
+}
+
+export function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: unknown) {
+    if (error && typeof error === "object" && "code" in error) {
+      const code = (error as { code: string }).code;
+      // The process no longer exists.
+      if (code === "ESRCH") return false;
+      // The pid is invalid or out of range.
+      if (code === "EINVAL") return false;
+      // EPERM means a process exists but we cannot signal it.
+      if (code === "EPERM") return true;
+    }
+    // Any other error is treated conservatively as live.
+    return true;
+  }
+}
+
+async function isRunActive(runsDir: string, runId: string): Promise<boolean> {
+  const runDir = resolveRunDir(runsDir, runId);
+  if (!runDir) return true;
+  const markerPath = join(runDir, ACTIVE_MARKER_FILE);
+  let content: string;
+  try {
+    content = await readFile(markerPath, "utf8");
+  } catch (error: unknown) {
+    // No marker means the run is not active.
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code: string }).code === "ENOENT"
+    ) {
+      return false;
+    }
+    return true;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return true;
+  }
+  if (!parsed || typeof parsed !== "object") return true;
+  const pid = (parsed as Record<string, unknown>).pid;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
+    return true;
+  }
+  return isProcessAlive(pid);
+}
+
+export function parseKetamineTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (
+    !Number.isFinite(parsed) ||
+    !Number.isSafeInteger(parsed) ||
+    parsed <= 0 ||
+    parsed > MAX_TIMEOUT_MS
+  ) {
+    return DEFAULT_TIMEOUT_MS;
+  }
+  return parsed;
+}
+
+export function parseRunRetention(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_RUN_RETENTION;
+  const parsed = Number(raw);
+  if (
+    !Number.isFinite(parsed) ||
+    !Number.isSafeInteger(parsed) ||
+    parsed <= 0
+  ) {
+    return DEFAULT_RUN_RETENTION;
+  }
+  return Math.min(parsed, MAX_RUN_RETENTION);
+}
+
+export async function pruneRunDirectories(
+  runsDir: string,
+  retention: number,
+): Promise<void> {
+  const entries = await readdir(runsDir, { withFileTypes: true }).catch(
+    (error: unknown) => {
+      if (
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        (error as { code: string }).code === "ENOENT"
+      ) {
+        return [];
+      }
+      throw error;
+    },
+  );
+  const directories = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+  if (directories.length <= retention) return;
+  directories.sort((a, b) => b.localeCompare(a));
+  const toRemove: string[] = [];
+  const candidates = directories.slice(retention);
+  for (const name of candidates) {
+    if (await isRunActive(runsDir, name)) continue;
+    const runDir = resolveRunDir(runsDir, name);
+    if (runDir) toRemove.push(runDir);
+  }
+  await Promise.all(
+    toRemove.map((runDir) => rm(runDir, { recursive: true, force: true })),
+  );
 }
 
 const observerModelSchema = z.string().regex(/^[^/\s]+\/\S+$/, {
@@ -69,8 +240,9 @@ export default function ketamineExtension(pi: ExtensionAPI) {
 
     const runId = makeRunId();
     const runDir = join(RUNS_DIR, runId);
-    const snapshotPath = join(runDir, "trajectory.json");
+    const snapshotPath = join(runDir, SNAPSHOT_FILE);
     const observerSessionDir = join(runDir, "observer-session");
+    let activeMarkerPath: string | undefined;
 
     try {
       if (!ctx.model) {
@@ -137,6 +309,9 @@ export default function ketamineExtension(pi: ExtensionAPI) {
         chmod(observerSessionDir, 0o700),
       ]);
 
+      activeMarkerPath = getActiveMarkerPath(runDir);
+      await writeActiveMarker(runDir);
+
       const snapshot: TrajectorySnapshot = {
         version: 1,
         targetSessionFile: ctx.sessionManager.getSessionFile(),
@@ -163,15 +338,29 @@ export default function ketamineExtension(pi: ExtensionAPI) {
           `Ketamine requires a non-OpenAI observer model; received ${observerModel.provider}/${observerModel.id}`,
         );
       }
-      const observer = await runObserver({
-        cwd: ctx.cwd,
-        runDir,
-        snapshotPath,
-        observerSessionDir,
-        model: observerModel,
-        thinkingLevel: ctx.thinkingLevel,
-        signal: event.signal,
-      });
+      const timeoutMs = parseKetamineTimeoutMs(process.env.KETAMINE_TIMEOUT_MS);
+      const timeoutController = new AbortController();
+      const timer = setTimeout(
+        () => timeoutController.abort(new Error("Ketamine observer timed out")),
+        timeoutMs,
+      );
+      const runSignal = (
+        AbortSignal as unknown as { any(signals: AbortSignal[]): AbortSignal }
+      ).any([event.signal, timeoutController.signal]);
+      let observer: Awaited<ReturnType<typeof runObserver>>;
+      try {
+        observer = await runObserver({
+          cwd: ctx.cwd,
+          runDir,
+          snapshotPath,
+          observerSessionDir,
+          model: observerModel,
+          thinkingLevel: ctx.thinkingLevel,
+          signal: runSignal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       const plan = validatePlan(observer.plan, units);
       const curatedMessages = assertCurationFits(plan, units, maxCuratedTokens);
       if (curatedMessages.length === 0) {
@@ -236,6 +425,14 @@ export default function ketamineExtension(pi: ExtensionAPI) {
     } finally {
       activeCompactions.delete(sessionId);
       ctx.ui.setStatus("ketamine", undefined);
+      if (activeMarkerPath) {
+        await rm(activeMarkerPath, { force: true }).catch((error: unknown) => {
+          ctx.ui.notify(
+            `Ketamine could not remove active marker: ${error instanceof Error ? error.message : String(error)}`,
+            "warning",
+          );
+        });
+      }
     }
   });
 
@@ -253,11 +450,38 @@ export default function ketamineExtension(pi: ExtensionAPI) {
     };
   });
 
-  pi.on("session_compact", (event, ctx) => {
-    if (isKetamineCheckpoint(event.compactionEntry.details)) {
+  pi.on("session_compact", async (event, ctx) => {
+    const details = event.compactionEntry.details;
+    if (!isKetamineCheckpoint(details)) return;
+
+    const runDir = getRunDirectory(RUNS_DIR, details.runId);
+    if (!runDir) {
       ctx.ui.notify(
-        `Returned from Ketamine observer ${event.compactionEntry.details.runId}`,
-        "info",
+        `Ketamine could not locate run directory for ${details.runId}`,
+        "warning",
+      );
+      return;
+    }
+
+    ctx.ui.notify(`Returned from Ketamine observer ${details.runId}`, "info");
+
+    try {
+      await rm(join(runDir, SNAPSHOT_FILE), { force: true });
+    } catch (error: unknown) {
+      ctx.ui.notify(
+        `Ketamine could not remove snapshot: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
+    try {
+      await pruneRunDirectories(
+        RUNS_DIR,
+        parseRunRetention(process.env.KETAMINE_RUN_RETENTION),
+      );
+    } catch (error: unknown) {
+      ctx.ui.notify(
+        `Ketamine could not prune old run directories: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
       );
     }
   });
