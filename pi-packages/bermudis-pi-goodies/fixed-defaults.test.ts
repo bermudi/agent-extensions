@@ -315,6 +315,41 @@ describe("fixed-defaults", () => {
     expect(settingsAt(settingsPath)).toEqual(original);
   });
 
+  test("reset removes an invalid override without changing settings", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    const overridePath = join(agentDir, "fixed-defaults.json");
+    writeFileSync(overridePath, "not json\n");
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+
+    await handler(
+      "reset",
+      context(ctx.cwd, { model: model("zai", "glm-5.2") }),
+    );
+
+    expect(existsSync(overridePath)).toBe(false);
+    expect(settingsAt(settingsPath)).toEqual(original);
+  });
+
+  test("reset removes a legacy thinkingLevel-only override without changing settings", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    const overridePath = join(agentDir, "fixed-defaults.json");
+    writeFileSync(
+      overridePath,
+      `${JSON.stringify({ thinkingLevel: "max" })}\n`,
+    );
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+
+    await handler(
+      "reset",
+      context(ctx.cwd, { model: model("zai", "glm-5.2") }),
+    );
+
+    expect(existsSync(overridePath)).toBe(false);
+    expect(settingsAt(settingsPath)).toEqual(original);
+  });
+
   test("status shows the effective pin, active model, and override path", async () => {
     const { agentDir, pi, ctx } = setup();
     writeFileSync(

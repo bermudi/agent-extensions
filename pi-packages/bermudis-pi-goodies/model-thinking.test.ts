@@ -3,7 +3,14 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import modelThinking from "./model-thinking.ts";
@@ -252,6 +259,31 @@ describe("model-thinking", () => {
     expect(notifications.some((message) => message.includes("Repair"))).toBe(
       true,
     );
+  });
+
+  test("reloads a repaired config even when size and mtime are unchanged", () => {
+    const path = temporaryConfig();
+    const unchangedMtime = 1_700_000_000;
+    const invalid = '{"providers":{"a":"????"}}\n';
+    const repaired = '{"providers":{"a":"high"}}\n';
+    expect(Buffer.byteLength(invalid)).toBe(Buffer.byteLength(repaired));
+    writeFileSync(path, invalid);
+    utimesSync(path, unchangedMtime, unchangedMtime);
+
+    const pi = new PiHarness();
+    modelThinking(pi.api, { configPath: path });
+    const ctx = context(model("a", "model"));
+
+    pi.emit("session_start", { reason: "startup" }, ctx);
+    expect(pi.level).toBe("off");
+
+    writeFileSync(path, repaired);
+    utimesSync(path, unchangedMtime, unchangedMtime);
+    expect(statSync(path).size).toBe(Buffer.byteLength(invalid));
+
+    pi.emit("session_start", { reason: "reload" }, ctx);
+
+    expect(pi.level).toBe("high");
   });
 
   test("status reports malformed config instead of treating it as empty", async () => {

@@ -123,7 +123,14 @@ class ConfigStore {
       return { config: {}, error: message };
     }
 
-    if (this.initialized && stamp === this.cachedStamp) {
+    // Keep retrying a file that previously failed to load. A repair can leave
+    // its size and mtime unchanged, so an error result must not be cached by
+    // the same stamp as a successful read.
+    if (
+      this.initialized &&
+      stamp === this.cachedStamp &&
+      this.cachedResult.error === null
+    ) {
       return this.cachedResult;
     }
 

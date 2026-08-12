@@ -4,7 +4,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   describeError,
@@ -107,6 +107,7 @@ class DefaultsStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         return {
+          present: false,
           override: {},
           error: null,
           legacyThinkingLevel: false,
@@ -125,6 +126,7 @@ class DefaultsStore {
         this.warnedLegacyThinkingLevel = true;
       }
       return {
+        present: true,
         override: parseOverride(value),
         error: null,
         legacyThinkingLevel,
@@ -136,6 +138,7 @@ class DefaultsStore {
         message,
       );
       return {
+        present: true,
         override: {},
         error: message,
         legacyThinkingLevel: false,
@@ -148,19 +151,9 @@ class DefaultsStore {
     this.warnedLegacyThinkingLevel = false;
   }
 
-  exists(): boolean {
-    try {
-      statSync(this.path);
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw error;
-    }
-  }
-
   reset(): void {
     // Deletion is intentionally idempotent: if another process removes the
-    // pin after exists(), reset has still reached the requested end state.
+    // pin after it was loaded, reset has still reached the requested end state.
     unlinkIfPresent(this.path);
     this.warnedLegacyThinkingLevel = false;
   }
@@ -168,6 +161,8 @@ class DefaultsStore {
 
 /** Result of reading the override file: the parsed values plus any error. */
 interface LoadResult {
+  /** Whether the override file existed when it was read. */
+  present: boolean;
   override: FixedDefaultsOverride;
   /** Non-null when the file existed but failed to parse or validate. */
   error: string | null;
@@ -306,6 +301,7 @@ export default function fixedDefaults(
       if (command === "reset") {
         type ResetResult =
           | { status: "missing" }
+          | { status: "removed-inactive" }
           | { status: "no-active-model" }
           | {
               status: "removed";
@@ -314,14 +310,27 @@ export default function fixedDefaults(
 
         try {
           const result = await enqueue<ResetResult>(async () => {
-            if (!store.exists()) return { status: "missing" };
+            // Load and validate before touching settings. Invalid, legacy-only,
+            // and partial files are inactive, so remove them without replacing
+            // Pi's last selection with the currently active model.
+            const loaded = store.load();
+            if (!loaded.present) return { status: "missing" };
+
+            const hasModelPin =
+              loaded.error === null &&
+              loaded.override.provider !== undefined &&
+              loaded.override.model !== undefined;
+            if (!hasModelPin) {
+              store.reset();
+              return { status: "removed-inactive" };
+            }
 
             const model = ctx.model;
             if (!model) return { status: "no-active-model" };
 
-            // Save the active model before removing the pin. Otherwise the
-            // old pinned model remains in settings.json and wins at the next
-            // fresh start.
+            // Save the active model before removing the valid pin. Otherwise
+            // the old pinned model remains in settings.json and wins at the
+            // next fresh start.
             await persistModel(ctx, model.provider, model.id);
             store.reset();
             return { status: "removed", model };
@@ -329,6 +338,11 @@ export default function fixedDefaults(
 
           if (result.status === "missing") {
             ctx.ui.notify("No fixed-defaults override file to reset.", "info");
+          } else if (result.status === "removed-inactive") {
+            ctx.ui.notify(
+              "Inactive or invalid fixed-defaults override removed; settings were left unchanged.",
+              "info",
+            );
           } else if (result.status === "no-active-model") {
             ctx.ui.notify(
               "Cannot reset fixed defaults without an active model; the pin was left in place.",
