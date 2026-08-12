@@ -148,7 +148,9 @@ or sensitive workspaces without checking the prompt construction first.
   It requires `GEMINI_API_KEY` or matching Pi auth configuration. Caching reduces repeat
   processing but still sends video URLs and incurs provider-side usage.
 - **`xonsh`** adds a `xonsh` tool. Its `deps` parameter passes Python packages to
-  `uv run`, which resolves and caches them. It executes commands in the session cwd and
+  `uv run`, which resolves and caches them. Use `$()` for captured subprocess output and
+  `@(expr)` to expand Python values in shell commands. Output is streamed, bounded, and
+  saved to a temporary file when truncated. It executes commands in the session cwd and
   inherits the process environment, so it has the same trust boundary as a shell tool.
 - **`pi-telegram`** is a full Telegram bridge. Use `/telegram-setup`,
   `/telegram-status`, `/telegram-connect`, and `/telegram-disconnect`; the
