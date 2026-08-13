@@ -1,4 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -6,6 +20,7 @@ import type {
   TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import providerBalance, {
+  balanceCacheKey,
   codexQuotaToBalance,
   formatBalance,
   formatCodexQuota,
@@ -17,6 +32,7 @@ import providerBalance, {
   parseOpenRouterCredits,
   parseZaiQuota,
   readCachedBalance,
+  writeCachedBalance,
   zaiQuotaToBalance,
 } from "./provider-balance.ts";
 
@@ -48,54 +64,206 @@ describe("event latency", () => {
     let modelSelectHandler:
       ((event: ModelSelectEvent, ctx: ExtensionContext) => unknown) | undefined;
     const emitted: Array<{ channel: string; data: unknown }> = [];
-    const warnings: unknown[][] = [];
-    const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => warnings.push(args);
+    providerBalance({
+      on(event, handler) {
+        if (event === "model_select") {
+          modelSelectHandler = handler as typeof modelSelectHandler;
+        }
+      },
+      events: {
+        emit(channel, data) {
+          emitted.push({ channel, data });
+        },
+        on() {
+          return () => {};
+        },
+      },
+    } as unknown as ExtensionAPI);
+    if (!modelSelectHandler) {
+      throw new Error("provider-balance did not register model_select");
+    }
 
-    try {
-      providerBalance({
+    const model = { provider: "openai-codex" };
+    const context = {
+      model,
+      modelRegistry: {
+        isUsingOAuth: () => true,
+        getApiKeyForProvider: async () => "not-a-jwt",
+      },
+    } as unknown as ExtensionContext;
+    modelSelectHandler({ model } as ModelSelectEvent, context);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(emitted).toEqual([
+      {
+        channel: "provider-balance:refresh-error",
+        data: {
+          provider: "openai-codex",
+          message: "Codex access token did not contain an account ID",
+        },
+      },
+    ]);
+  });
+});
+
+describe("idle refresh lifecycle", () => {
+  test("refreshes only while idle and clears the recurring timer on shutdown", async () => {
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: ExtensionContext) => unknown
+    >();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const cleared: unknown[] = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = ((timer: unknown) => {
+      cleared.push(timer);
+    }) as typeof globalThis.clearTimeout;
+
+    providerBalance(
+      {
         on(event, handler) {
-          if (event === "model_select") {
-            modelSelectHandler = handler as typeof modelSelectHandler;
-          }
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: ExtensionContext) => unknown,
+          );
         },
         events: {
-          emit(channel, data) {
-            emitted.push({ channel, data });
-          },
+          emit() {},
           on() {
             return () => {};
           },
         },
-      } as unknown as ExtensionAPI);
-      if (!modelSelectHandler) {
-        throw new Error("provider-balance did not register model_select");
-      }
+      } as unknown as ExtensionAPI,
+      { setTimeout, clearTimeout, random: () => 0.5 },
+    );
 
-      const model = { provider: "openai-codex" };
-      const context = {
-        model,
-        modelRegistry: {
-          isUsingOAuth: () => true,
-          getApiKeyForProvider: async () => "not-a-jwt",
+    let idle = false;
+    let apiKeyCalls = 0;
+    const ctx = {
+      mode: "tui",
+      model: { provider: "kilo" },
+      isIdle: () => idle,
+      ui: { setFooter() {} },
+      sessionManager: { getBranch: () => [] },
+      modelRegistry: {
+        isUsingOAuth: () => false,
+        getApiKeyForProvider: async () => {
+          apiKeyCalls++;
+          return null;
         },
-      } as unknown as ExtensionContext;
-      modelSelectHandler({ model } as ModelSelectEvent, context);
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      },
+    } as unknown as ExtensionContext;
+    const start = handlers.get("session_start");
+    const shutdown = handlers.get("session_shutdown");
+    if (!start || !shutdown) throw new Error("missing lifecycle handlers");
 
-      expect(warnings).toEqual([]);
-      expect(emitted).toEqual([
-        {
-          channel: "provider-balance:refresh-error",
-          data: {
-            provider: "openai-codex",
-            message: "Codex access token did not contain an account ID",
+    start({}, ctx);
+    expect(scheduled[0]?.delay).toBe(67_500);
+    expect(apiKeyCalls).toBe(1);
+    await Promise.resolve();
+
+    scheduled[0]?.callback();
+    expect(apiKeyCalls).toBe(1);
+    expect(scheduled).toHaveLength(2);
+
+    idle = true;
+    scheduled[1]?.callback();
+    expect(apiKeyCalls).toBe(2);
+    await Promise.resolve();
+    expect(scheduled).toHaveLength(3);
+
+    shutdown({}, ctx);
+    expect(cleared).toContain(3);
+  });
+});
+
+describe("auth transition", () => {
+  test("stops polling after 10 failed lookups instead of running forever", async () => {
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: ExtensionContext) => unknown
+    >();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const cleared: unknown[] = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = ((timer: unknown) => {
+      cleared.push(timer);
+    }) as typeof globalThis.clearTimeout;
+
+    providerBalance(
+      {
+        on(event, handler) {
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: ExtensionContext) => unknown,
+          );
+        },
+        events: {
+          emit() {},
+          on() {
+            return () => {};
           },
         },
-      ]);
-    } finally {
-      console.warn = originalWarn;
+      } as unknown as ExtensionAPI,
+      { setTimeout, clearTimeout, random: () => 0.5 },
+    );
+
+    let apiKeyCalls = 0;
+    const ctx = {
+      mode: "tui",
+      model: { provider: "kilo" },
+      isIdle: () => false,
+      ui: { setFooter() {} },
+      sessionManager: { getBranch: () => [] },
+      modelRegistry: {
+        isUsingOAuth: () => false,
+        getApiKeyForProvider: async () => {
+          apiKeyCalls++;
+          throw new Error("keychain unavailable");
+        },
+      },
+    } as unknown as ExtensionContext;
+
+    const start = handlers.get("session_start");
+    const input = handlers.get("input");
+    if (!start || !input) throw new Error("missing lifecycle handlers");
+
+    // session_start schedules the idle timer (index 0) and kicks a refresh
+    // that calls getApiKeyForProvider once.
+    start({}, ctx);
+    const refreshCallsAtStart = apiKeyCalls;
+    await Promise.resolve();
+
+    // /login for the active provider arms the auth-transition poller.
+    input({ text: "/login kilo" }, ctx);
+
+    // The poller is the most recently scheduled timer.
+    let pollerIndex = scheduled.length - 1;
+    for (let attempt = 1; attempt <= 10; attempt++) {
+      scheduled[pollerIndex]?.callback();
+      await Promise.resolve();
+      // Each failed lookup reschedules (attempts < 10) or stops (attempt 10).
+      if (attempt < 10) {
+        expect(scheduled.length).toBe(pollerIndex + 2);
+        pollerIndex = scheduled.length - 1;
+      } else {
+        // After the 10th failure the timer must not reschedule.
+        expect(scheduled.length).toBe(pollerIndex + 1);
+      }
     }
+
+    // Exactly 10 polling lookups, plus the initial session_start refresh.
+    expect(apiKeyCalls - refreshCallsAtStart).toBe(10);
   });
 });
 
@@ -656,47 +824,118 @@ describe("formatBalance", () => {
 });
 
 describe("shared balance cache", () => {
-  test("returns null for entries older than the TTL", () => {
-    // Jan 2024 is comfortably past the 30-minute TTL regardless of when the
-    // test runs, without touching the real cache file (the fixture key below
-    // cannot collide with a real provider id).
-    expect(
-      readCachedBalance(
-        "fixture",
-        new Date("2024-01-01T00:31:00Z").getTime(),
-      ),
-    ).toBeNull();
-  });
+  async function withCacheDirectory<T>(
+    callback: (directory: string) => T | Promise<T>,
+  ): Promise<T> {
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    try {
+      return await callback(directory);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
 
-  test("returns null for a provider with no cache entry", () => {
-    expect(readCachedBalance("no-such-provider")).toBeNull();
-  });
+  test("round-trips a valid account-scoped entry with private permissions", () =>
+    withCacheDirectory((directory) => {
+      const balance = [
+        { credits: 3.5 },
+        { quota: { remainingPercent: 72, windowSeconds: 604_800 } },
+      ];
 
-  test("parses a well-formed cache entry", () => {
-    const json = JSON.stringify({
-      fixture: {
-        fetchedAt: 1_000,
-        balance: [
-          { credits: 3.5 },
-          { quota: { remainingPercent: 72, windowSeconds: 604_800 } },
-          {
-            label: "Spark",
-            quota: { remainingPercent: 10, resetAt: 1_800_000_000 },
-          },
-        ],
-      },
-    });
-    // Parse through the same unknown pipeline the file read uses, then verify
-    // the shape the module's own parser accepts and rejects. The file path is
-    // exercised indirectly: these expectations mirror readCachedBalance's
-    // structural validation (exported parse keeps the test FS-free).
-    const entry = (
-      JSON.parse(json) as Record<
-        string,
-        { fetchedAt: number; balance: unknown }
-      >
-    ).fixture;
-    expect(entry.fetchedAt).toBe(1_000);
-    expect(Array.isArray(entry.balance)).toBe(true);
+      writeCachedBalance("account-a", balance, 1_000, directory);
+
+      expect(readCachedBalance("account-a", 1_001, directory)).toEqual(balance);
+      expect(readCachedBalance("account-b", 1_001, directory)).toBeNull();
+      const [filename] = Array.from(
+        new Bun.Glob("*/*.json").scanSync(directory),
+      );
+      expect(filename).toBeDefined();
+      expect(statSync(join(directory, filename!)).mode & 0o777).toBe(0o600);
+      expect(readFileSync(join(directory, filename!), "utf8")).not.toContain(
+        "account-a",
+      );
+    }));
+
+  test("rejects expired and future-dated entries at the boundaries", () =>
+    withCacheDirectory((directory) => {
+      writeCachedBalance("expired", [{ credits: 1 }], 1_000, directory);
+      writeCachedBalance("future", [{ credits: 2 }], 2_000, directory);
+
+      expect(readCachedBalance("expired", 1_801_000, directory)).toBeNull();
+      expect(readCachedBalance("future", 1_999, directory)).toBeNull();
+    }));
+
+  test("separate accounts and older observations cannot overwrite newer data", () =>
+    withCacheDirectory((directory) => {
+      writeCachedBalance("account-a", [{ credits: 3 }], 1_003, directory);
+      writeCachedBalance("account-b", [{ credits: 2 }], 1_002, directory);
+      writeCachedBalance("account-a", [{ credits: 1 }], 1_001, directory);
+
+      expect(
+        Array.from(new Bun.Glob("*/*.json").scanSync(directory)),
+      ).toHaveLength(3);
+      expect(readCachedBalance("account-a", 1_004, directory)).toEqual([
+        { credits: 3 },
+      ]);
+      expect(readCachedBalance("account-b", 1_004, directory)).toEqual([
+        { credits: 2 },
+      ]);
+    }));
+
+  test("hardens an existing cache directory", () =>
+    withCacheDirectory((parent) => {
+      const directory = join(parent, "existing");
+      mkdirSync(directory, { mode: 0o755 });
+      chmodSync(directory, 0o755);
+
+      writeCachedBalance("account-a", [{ credits: 1 }], 1_000, directory);
+
+      expect(statSync(directory).mode & 0o777).toBe(0o700);
+    }));
+
+  test("rejects symlinked cache entries", () =>
+    withCacheDirectory((directory) => {
+      writeCachedBalance("account-a", [{ credits: 1 }], 1_000, directory);
+      writeCachedBalance("account-b", [{ credits: 2 }], 1_000, directory);
+      const outside = join(directory, "outside.json");
+      writeFileSync(
+        outside,
+        JSON.stringify({ fetchedAt: 1_000, balance: [{ credits: 99 }] }),
+      );
+      const accountBDir = join(
+        directory,
+        createHash("sha256").update("account-b").digest("hex"),
+      );
+      const accountBJson = join(
+        accountBDir,
+        Array.from(new Bun.Glob("*.json").scanSync(accountBDir))[0]!,
+      );
+      unlinkSync(accountBJson);
+      symlinkSync(outside, accountBJson);
+
+      expect(readCachedBalance("account-b", 1_001, directory)).toBeNull();
+      expect(readCachedBalance("account-a", 1_001, directory)).toEqual([
+        { credits: 1 },
+      ]);
+    }));
+
+  test("isolates ordinary tokens but shares rotating Codex account tokens", () => {
+    expect(balanceCacheKey("kilo", "token-a")).not.toBe(
+      balanceCacheKey("kilo", "token-b"),
+    );
+    const token = (account: string, suffix: string) => {
+      const payload = btoa(
+        JSON.stringify({
+          "https://api.openai.com/auth": { chatgpt_account_id: account },
+        }),
+      );
+      return `header.${payload}.${suffix}`;
+    };
+    expect(balanceCacheKey("openai-codex", token("a", "one"))).toBe(
+      balanceCacheKey("openai-codex", token("a", "two")),
+    );
+    expect(balanceCacheKey("openai-codex", token("a", "one"))).not.toBe(
+      balanceCacheKey("openai-codex", token("b", "one")),
+    );
   });
 });

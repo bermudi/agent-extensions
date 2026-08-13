@@ -1,12 +1,26 @@
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
-import { FooterComponent } from "@earendil-works/pi-coding-agent";
+import { FooterComponent, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { readFileSync, renameSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  rmdirSync,
+  unlinkSync,
+} from "node:fs";
+import { join } from "node:path";
+import { writeJsonFileAtomic } from "./json-file.ts";
 
 const KILO_API_BASE = process.env.KILO_API_URL || "https://api.kilo.ai";
 const KILO_BALANCE_ENDPOINT = `${KILO_API_BASE}/api/profile/balance`;
@@ -22,12 +36,19 @@ const CODEX_API_BASE = (
 const CODEX_USAGE_ENDPOINT = `${CODEX_API_BASE}/wham/usage`;
 const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
 const BALANCE_FETCH_TIMEOUT_MS = 5_000;
+/**
+ * While Pi is waiting for input, periodically adopt another session's fresh
+ * cache entry or fetch one ourselves. Jitter prevents a row of idle Pi
+ * processes from hitting the provider at exactly the same instant.
+ */
+const IDLE_REFRESH_INTERVAL_MS = 60_000;
+const IDLE_REFRESH_JITTER_MS = 15_000;
 /** Refresh the footer balance every Nth turn end during a run. See turn_end handler. */
 const REFRESH_EVERY_N_TURNS = 5;
 
 /**
  * Balance cache shared across every pi process on the machine, keyed by
- * provider. Two motivations:
+ * provider and a one-way credential fingerprint. Two motivations:
  *
  * 1. The user runs several pi instances against the same metered account
  *    (quota/credits are per-account, not per-session), so every session may
@@ -38,11 +59,15 @@ const REFRESH_EVERY_N_TURNS = 5;
  *    session's footer is blank/stale until its own first fetch lands, which
  *    can be agent_settled or the 5th turn_end.
  */
-const BALANCE_CACHE_FILE = `${process.env.HOME ?? ""}/.pi/agent/cache/provider-balance.json`;
+const BALANCE_CACHE_DIR = join(getAgentDir(), "cache", "provider-balances");
 /** Ignore cache entries older than this; stale balances mislead. */
 const BALANCE_CACHE_TTL_MS = 30 * 60 * 1000;
+/** Keep abandoned accounts and crash leftovers from growing without bound. */
+const BALANCE_CACHE_MAX_ENTRIES = 256;
+const BALANCE_CACHE_MAX_BYTES = 1_000_000;
+const BALANCE_CACHE_ACCOUNT_DIR_PATTERN = /^[a-f0-9]{64}$/;
 
-interface BalanceAdapter {
+export interface BalanceAdapter {
   fetch(token: string, signal: AbortSignal): Promise<Balance>;
   requiresOAuth?: boolean;
 }
@@ -564,7 +589,32 @@ interface BalanceCacheEntry {
   balance: Balance;
 }
 
-type BalanceCache = Record<string, BalanceCacheEntry>;
+/**
+ * Keep accounts isolated without persisting the credential itself. Sessions
+ * using the same credential get the same cache key and can share a reading.
+ */
+export function balanceCacheKey(provider: string, token: string): string {
+  // Codex access tokens rotate, but their account ID is stable. Other
+  // providers expose no account identifier here, so the token is the best
+  // available identity. Include the endpoint because custom backends can use
+  // overlapping account IDs while reporting unrelated balances.
+  const identity =
+    provider === "openai-codex" ? (parseCodexAccountId(token) ?? token) : token;
+  const endpoint =
+    provider === "kilo"
+      ? KILO_BALANCE_ENDPOINT
+      : provider === "openai-codex"
+        ? CODEX_USAGE_ENDPOINT
+        : provider === "openrouter"
+          ? OPENROUTER_CREDITS_ENDPOINT
+          : provider === "zai-coding-cn"
+            ? ZAI_CODING_CN_QUOTA_ENDPOINT
+            : provider === "zai"
+              ? ZAI_QUOTA_ENDPOINT
+              : provider;
+  const fingerprint = createHash("sha256").update(identity).digest("hex");
+  return `v2:${provider}:${endpoint}:${fingerprint}`;
+}
 
 function parseCachedBalance(value: unknown): Balance | null {
   if (!Array.isArray(value)) return null;
@@ -601,54 +651,259 @@ function parseCachedBalance(value: unknown): Balance | null {
   return segments;
 }
 
-/** Read the freshest non-expired cached balance for a provider. */
-export function readCachedBalance(
-  provider: string,
-  nowMs = Date.now(),
-): Balance | null {
-  let raw: string;
-  try {
-    raw = readFileSync(BALANCE_CACHE_FILE, "utf8");
-  } catch {
-    return null; // Missing/unreadable cache is a normal cold start.
-  }
+function balanceCacheAccountDir(cacheKey: string, cacheDir: string): string {
+  // Hash the already one-way key again so neither account identifiers nor
+  // credential fingerprints are exposed in directory listings.
+  const directory = createHash("sha256").update(cacheKey).digest("hex");
+  return join(cacheDir, directory);
+}
 
+function readRegularJsonFile(path: string): string | null {
+  let fd: number | undefined;
   try {
-    const entry = asRecord(asRecord(JSON.parse(raw))?.[provider]);
-    const fetchedAt = numericProperty(entry, "fetchedAt");
-    if (entry === null || fetchedAt === null) return null;
-    if (nowMs - fetchedAt >= BALANCE_CACHE_TTL_MS) return null;
-    return parseCachedBalance(entry.balance);
+    const link = lstatSync(path);
+    if (!link.isFile()) return null;
+    fd = openSync(
+      path,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
+    if (!fstatSync(fd).isFile()) return null;
+    return readFileSync(fd, "utf8");
   } catch {
-    return null; // Corrupt cache must never break the footer.
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The descriptor is already unusable; there is nothing useful to do.
+      }
+    }
   }
 }
 
-/**
- * Persist a fresh reading so other live sessions and future freshly-loaded
- * sessions render it instantly. Write is atomic (tmp + rename) because
- * several pi processes can fetch concurrently.
- */
-function writeCachedBalance(provider: string, balance: Balance): void {
-  let cache: BalanceCache = {};
+function isSafeDirectory(path: string): boolean {
   try {
-    const existing = asRecord(
-      JSON.parse(readFileSync(BALANCE_CACHE_FILE, "utf8")),
-    );
-    if (existing) cache = existing as BalanceCache;
+    const directory = lstatSync(path);
+    return directory.isDirectory() && !directory.isSymbolicLink();
   } catch {
-    // Missing or corrupt cache: start fresh rather than failing the write.
+    return false;
   }
-  cache[provider] = { fetchedAt: Date.now(), balance };
+}
 
+function compareCachePaths(
+  left: { fetchedAt: number; path: string },
+  right: { fetchedAt: number; path: string },
+): number {
+  return (
+    left.fetchedAt - right.fetchedAt || left.path.localeCompare(right.path)
+  );
+}
+
+interface CacheObservation {
+  accountDir: string;
+  filename: string;
+  path: string;
+  fetchedAt: number;
+  bytes: number;
+}
+
+/**
+ * Remove stale, malformed, and excess observations across every account. This
+ * is deliberately best effort: cache maintenance must never hide a provider
+ * response or make the footer fail.
+ */
+function cleanupBalanceCache(
+  cacheDir: string,
+  nowMs = Date.now(),
+  protectedPath?: string,
+): void {
   try {
-    mkdirSync(dirname(BALANCE_CACHE_FILE), { recursive: true });
-    const tempFile = `${BALANCE_CACHE_FILE}.${process.pid}.tmp`;
-    writeFileSync(tempFile, JSON.stringify(cache));
-    renameSync(tempFile, BALANCE_CACHE_FILE);
+    if (!isSafeDirectory(cacheDir)) return;
+    const observations: CacheObservation[] = [];
+
+    for (const accountName of readdirSync(cacheDir)) {
+      const accountDir = join(cacheDir, accountName);
+      if (
+        !BALANCE_CACHE_ACCOUNT_DIR_PATTERN.test(accountName) ||
+        !isSafeDirectory(accountDir)
+      ) {
+        continue;
+      }
+      for (const filename of readdirSync(accountDir)) {
+        const path = join(accountDir, filename);
+        let file;
+        try {
+          file = lstatSync(path);
+        } catch {
+          continue;
+        }
+        if (file.isSymbolicLink() || !file.isFile()) continue;
+
+        // Atomic-write leftovers and unexpected files are safe to discard.
+        if (!filename.endsWith(".json")) {
+          try {
+            unlinkSync(path);
+          } catch {
+            // Best effort.
+          }
+          continue;
+        }
+
+        try {
+          const raw = readRegularJsonFile(path);
+          const entry = raw === null ? null : asRecord(JSON.parse(raw));
+          const fetchedAt = numericProperty(entry, "fetchedAt");
+          const balance = parseCachedBalance(entry?.balance);
+          if (
+            fetchedAt === null ||
+            balance === null ||
+            balance.length === 0 ||
+            nowMs - fetchedAt >= BALANCE_CACHE_TTL_MS
+          ) {
+            unlinkSync(path);
+            continue;
+          }
+          observations.push({
+            accountDir,
+            filename,
+            path,
+            fetchedAt,
+            bytes: file.size,
+          });
+        } catch {
+          try {
+            unlinkSync(path);
+          } catch {
+            // Best effort.
+          }
+        }
+      }
+    }
+
+    observations.sort(compareCachePaths);
+    let bytes = observations.reduce((total, entry) => total + entry.bytes, 0);
+    let index = 0;
+    while (
+      index < observations.length &&
+      (observations.length > BALANCE_CACHE_MAX_ENTRIES ||
+        bytes > BALANCE_CACHE_MAX_BYTES)
+    ) {
+      const entry = observations[index];
+      if (entry.path === protectedPath) {
+        index++;
+        continue;
+      }
+      try {
+        unlinkSync(entry.path);
+        bytes -= entry.bytes;
+        observations.splice(index, 1);
+      } catch {
+        index++;
+      }
+    }
+
+    for (const accountName of readdirSync(cacheDir)) {
+      const accountDir = join(cacheDir, accountName);
+      if (BALANCE_CACHE_ACCOUNT_DIR_PATTERN.test(accountName)) {
+        try {
+          rmdirSync(accountDir);
+        } catch {
+          // Non-empty directories and races are harmless.
+        }
+      }
+    }
+  } catch {
+    // The cache is an accelerator only; maintenance is never authoritative.
+  }
+}
+
+function readCachedBalanceEntry(
+  cacheKey: string,
+  nowMs = Date.now(),
+  cacheDir = BALANCE_CACHE_DIR,
+): BalanceCacheEntry | null {
+  let freshest: (BalanceCacheEntry & { filename: string }) | null = null;
+  try {
+    if (!isSafeDirectory(cacheDir)) return null;
+    const accountDir = balanceCacheAccountDir(cacheKey, cacheDir);
+    if (!isSafeDirectory(accountDir)) return null;
+    for (const filename of readdirSync(accountDir)) {
+      if (!filename.endsWith(".json")) continue;
+      try {
+        const raw = readRegularJsonFile(join(accountDir, filename));
+        if (raw === null) continue;
+        const entry = asRecord(JSON.parse(raw));
+        const fetchedAt = numericProperty(entry, "fetchedAt");
+        if (entry === null || fetchedAt === null) continue;
+        const ageMs = nowMs - fetchedAt;
+        if (ageMs < 0 || ageMs >= BALANCE_CACHE_TTL_MS) continue;
+        const balance = parseCachedBalance(entry.balance);
+        if (
+          balance &&
+          balance.length > 0 &&
+          (!freshest ||
+            fetchedAt > freshest.fetchedAt ||
+            (fetchedAt === freshest.fetchedAt && filename > freshest.filename))
+        ) {
+          freshest = { fetchedAt, balance, filename };
+        }
+      } catch {
+        // One damaged observation must not hide another valid one.
+      }
+    }
+  } catch {
+    return null; // Missing/unreadable cache is a cold start.
+  }
+  return freshest
+    ? { fetchedAt: freshest.fetchedAt, balance: freshest.balance }
+    : null;
+}
+
+/** Read a non-expired cache entry. The key must include account identity. */
+export function readCachedBalance(
+  cacheKey: string,
+  nowMs = Date.now(),
+  cacheDir = BALANCE_CACHE_DIR,
+): Balance | null {
+  return readCachedBalanceEntry(cacheKey, nowMs, cacheDir)?.balance ?? null;
+}
+
+/**
+ * Persist one account's reading in its own atomic file. Separate files avoid
+ * the lost-update race of a shared read-modify-write JSON object.
+ */
+export function writeCachedBalance(
+  cacheKey: string,
+  balance: Balance,
+  observedAtMs = Date.now(),
+  cacheDir = BALANCE_CACHE_DIR,
+): boolean {
+  const accountDir = balanceCacheAccountDir(cacheKey, cacheDir);
+  const path = join(
+    accountDir,
+    `${observedAtMs}.${process.pid}.${randomUUID()}.json`,
+  );
+  try {
+    mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+    const directory = lstatSync(cacheDir);
+    if (!directory.isDirectory() || directory.isSymbolicLink()) return false;
+    chmodSync(cacheDir, 0o700);
+
+    mkdirSync(accountDir, { recursive: true, mode: 0o700 });
+    const accountDirectory = lstatSync(accountDir);
+    if (!accountDirectory.isDirectory() || accountDirectory.isSymbolicLink()) {
+      return false;
+    }
+    chmodSync(accountDir, 0o700);
+    writeJsonFileAtomic(path, { fetchedAt: observedAtMs, balance });
   } catch {
     // The cache is an accelerator only; the footer works without it.
+    return false;
   }
+
+  cleanupBalanceCache(cacheDir, observedAtMs, path);
+  return true;
 }
 
 type FooterSession = ConstructorParameters<typeof FooterComponent>[0];
@@ -791,19 +1046,97 @@ function addBalanceToWorkingDirectoryLine(
   return [`${left}${padding}${right}`, ...lines.slice(1)];
 }
 
-export default function providerBalance(pi: ExtensionAPI): void {
+export interface ProviderBalanceDependencies {
+  adapters?: Readonly<Record<string, BalanceAdapter>>;
+  cacheDir?: string;
+  now?: () => number;
+  random?: () => number;
+  setTimeout?: typeof setTimeout;
+  clearTimeout?: typeof clearTimeout;
+}
+
+export default function providerBalance(
+  pi: ExtensionAPI,
+  dependencies: ProviderBalanceDependencies = {},
+): void {
+  const adapters = dependencies.adapters ?? BALANCE_ADAPTERS;
+  const cacheDir = dependencies.cacheDir ?? BALANCE_CACHE_DIR;
+  const now = dependencies.now ?? Date.now;
+  const random = dependencies.random ?? Math.random;
+  const setTimer = dependencies.setTimeout ?? setTimeout;
+  const clearTimer = dependencies.clearTimeout ?? clearTimeout;
+
   let activeContext: ExtensionContext | undefined;
   let balance: Balance | undefined;
-  /** Provider the currently-displayed balance belongs to. */
+  let balanceFetchedAt: number | undefined;
+  let identityPending = false;
+  /** Provider and account the currently displayed balance belongs to. */
   let displayedProvider: string | undefined;
+  let displayedCacheKey: string | undefined;
   let refreshGeneration = 0;
+  let refreshInFlight = false;
   let refreshController: AbortController | undefined;
+  let idleRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let authTransitionTimer: ReturnType<typeof setTimeout> | undefined;
   let requestRender: (() => void) | undefined;
   let activeThinkingLevel: ActiveThinkingLevel = "off";
 
   function clearBalance(): void {
     balance = undefined;
+    balanceFetchedAt = undefined;
+    identityPending = false;
     requestRender?.();
+  }
+
+  /** Login/logout is delivered as input before the command changes auth. */
+  function invalidateAuthTransition(provider: string): void {
+    if (provider !== displayedProvider) return;
+    refreshGeneration++;
+    refreshInFlight = false;
+    refreshController?.abort();
+    refreshController = undefined;
+    displayedCacheKey = undefined;
+    clearBalance();
+  }
+
+  function scheduleAuthTransitionCheck(
+    ctx: ExtensionContext,
+    provider: string,
+    previousCacheKey: string | undefined,
+  ): void {
+    if (authTransitionTimer !== undefined) clearTimer(authTransitionTimer);
+    const generation = refreshGeneration;
+    let attempts = 0;
+    const check = async (): Promise<void> => {
+      attempts++;
+      if (generation !== refreshGeneration || activeContext !== ctx) return;
+      let token: string | undefined;
+      try {
+        token = await ctx.modelRegistry.getApiKeyForProvider(provider);
+      } catch {
+        if (attempts < 10) {
+          authTransitionTimer = setTimer(() => void check(), 1_000);
+        } else {
+          authTransitionTimer = undefined;
+        }
+        return;
+      }
+      if (generation !== refreshGeneration || activeContext !== ctx) return;
+      const currentCacheKey = token
+        ? balanceCacheKey(provider, token)
+        : undefined;
+      if (currentCacheKey === previousCacheKey) {
+        if (attempts < 10) {
+          authTransitionTimer = setTimer(() => void check(), 1_000);
+        } else {
+          authTransitionTimer = undefined;
+        }
+        return;
+      }
+      authTransitionTimer = undefined;
+      void refreshForModel(ctx, ctx.model);
+    };
+    authTransitionTimer = setTimer(() => void check(), 250);
   }
 
   /** Refresh the balance for whatever model is active. Provider-agnostic: the
@@ -812,62 +1145,172 @@ export default function providerBalance(pi: ExtensionAPI): void {
   function refreshForModel(
     ctx: ExtensionContext,
     model: ExtensionContext["model"],
+    maxCacheAgeMs?: number,
   ): Promise<void> {
-    return refreshBalance(ctx, model?.provider, model);
+    return refreshBalance(ctx, model?.provider, model, maxCacheAgeMs);
   }
 
   async function refreshBalance(
     ctx: ExtensionContext,
     provider: string | undefined,
     model: ExtensionContext["model"],
+    maxCacheAgeMs?: number,
   ): Promise<void> {
+    const isIdleRefresh = maxCacheAgeMs !== undefined;
+    // An idle poll is opportunistic. It must never cancel the post-run or
+    // model-change refresh that provides the authoritative new reading.
+    if (isIdleRefresh && refreshInFlight) return;
+
     const generation = ++refreshGeneration;
-    refreshController?.abort();
+    refreshInFlight = true;
+    if (!isIdleRefresh) refreshController?.abort();
     const controller = new AbortController();
     refreshController = controller;
 
     // Only blank the footer when the displayed value is for a different
     // provider than the one we're about to fetch. A same-provider refresh
-    // keeps the last known value on screen until the fresh one lands (an
-    // atomic swap), which matters now that we refresh mid-turn rather than
-    // once per run — otherwise the number would flicker off on every refresh.
+    // keeps the last known value on screen until the fresh one lands.
     if (provider !== displayedProvider) {
       displayedProvider = provider;
+      displayedCacheKey = undefined;
       clearBalance();
     }
 
     const providerId = provider;
-    const adapter = providerId ? BALANCE_ADAPTERS[providerId] : undefined;
-    if (!adapter || !providerId) return;
-
-    // Paint the freshest known value for this account immediately: another
-    // live pi instance may have fetched seconds ago, and on session switch
-    // this is what keeps the new session's footer warm instead of blank until
-    // its own first fetch lands.
-    const cached = readCachedBalance(providerId);
-    if (cached) {
-      balance = cached;
-      requestRender?.();
-    }
-    if (
-      adapter.requiresOAuth &&
-      (!model ||
-        model.provider !== providerId ||
-        !ctx.modelRegistry.isUsingOAuth(model))
-    ) {
-      return;
-    }
+    const adapter = providerId ? adapters[providerId] : undefined;
 
     try {
-      const token = await ctx.modelRegistry.getApiKeyForProvider(providerId);
-      if (!token || generation !== refreshGeneration) return;
-      balance = await adapter.fetch(token, controller.signal);
-      if (generation === refreshGeneration) {
-        writeCachedBalance(providerId, balance);
-        requestRender?.();
+      if (!adapter || !providerId) return;
+      // Codex balances describe OAuth subscription quota. Never adopt or fetch
+      // one while this model is using ordinary API-key authentication.
+      if (
+        adapter.requiresOAuth &&
+        (!model ||
+          model.provider !== providerId ||
+          !ctx.modelRegistry.isUsingOAuth(model))
+      ) {
+        displayedCacheKey = undefined;
+        clearBalance();
+        return;
       }
+
+      // Do not render a cached value while credentials are being resolved. The
+      // same provider can represent a different account after login/logout.
+      identityPending = true;
+      requestRender?.();
+
+      // Preserve a known same-account value during routine credential refresh,
+      // but clear it if identity resolution fails or reveals another account.
+      let token: string | undefined;
+      try {
+        token = await ctx.modelRegistry.getApiKeyForProvider(providerId);
+      } catch (error) {
+        if (generation === refreshGeneration) {
+          displayedCacheKey = undefined;
+          clearBalance();
+        }
+        throw error;
+      }
+      if (generation !== refreshGeneration) return;
+      if (!token) {
+        displayedCacheKey = undefined;
+        identityPending = false;
+        clearBalance();
+        return;
+      }
+      const cacheKey = balanceCacheKey(providerId, token);
+      if (displayedCacheKey !== cacheKey) clearBalance();
+      displayedCacheKey = cacheKey;
+      identityPending = false;
+
+      // Paint the freshest known value for this account immediately. The
+      // credential fingerprint prevents sessions for different accounts from
+      // showing or suppressing one another's readings.
+      const cached = readCachedBalanceEntry(cacheKey, now(), cacheDir);
+      if (cached && generation === refreshGeneration) {
+        balance = cached.balance;
+        balanceFetchedAt = cached.fetchedAt;
+        requestRender?.();
+        if (
+          maxCacheAgeMs !== undefined &&
+          now() - cached.fetchedAt < maxCacheAgeMs
+        ) {
+          return;
+        }
+      }
+
+      const nextBalance = await adapter.fetch(token, controller.signal);
+      const observedAtMs = now();
+      if (generation !== refreshGeneration) return;
+
+      // Login/logout does not emit model_select. Re-resolve identity before
+      // committing so an account switch during the request cannot paint the
+      // previous account's result.
+      if (
+        adapter.requiresOAuth &&
+        (!model || !ctx.modelRegistry.isUsingOAuth(model))
+      ) {
+        displayedCacheKey = undefined;
+        clearBalance();
+        return;
+      }
+      identityPending = true;
+      requestRender?.();
+      let currentToken: string | undefined;
+      let confirmedToken: string | undefined;
+      try {
+        currentToken = await ctx.modelRegistry.getApiKeyForProvider(providerId);
+        // A credential can change while the first final lookup is pending.
+        // Resolve it once more before accepting the provider response.
+        confirmedToken =
+          await ctx.modelRegistry.getApiKeyForProvider(providerId);
+      } catch (error) {
+        if (generation === refreshGeneration) {
+          displayedCacheKey = undefined;
+          clearBalance();
+        }
+        throw error;
+      }
+      const currentModel = activeContext === ctx ? ctx.model : undefined;
+      if (
+        generation !== refreshGeneration ||
+        currentModel?.provider !== providerId ||
+        (adapter.requiresOAuth &&
+          (!currentModel || !ctx.modelRegistry.isUsingOAuth(currentModel))) ||
+        !currentToken ||
+        !confirmedToken ||
+        balanceCacheKey(providerId, currentToken) !== cacheKey ||
+        balanceCacheKey(providerId, confirmedToken) !== cacheKey
+      ) {
+        if (generation === refreshGeneration) {
+          displayedCacheKey = undefined;
+          clearBalance();
+          if (currentToken || confirmedToken) {
+            void refreshForModel(ctx, currentModel);
+          }
+        }
+        return;
+      }
+
+      identityPending = false;
+      const persisted = writeCachedBalance(
+        cacheKey,
+        nextBalance,
+        observedAtMs,
+        cacheDir,
+      );
+      const freshest = persisted
+        ? readCachedBalanceEntry(cacheKey, observedAtMs, cacheDir)
+        : null;
+      balance = freshest?.balance ?? nextBalance;
+      balanceFetchedAt = freshest?.fetchedAt ?? observedAtMs;
+      requestRender?.();
     } catch (error) {
-      if (generation !== refreshGeneration || controller.signal.aborted) return;
+      if (generation !== refreshGeneration || controller.signal.aborted) {
+        return;
+      }
+      identityPending = false;
+      clearBalance();
       // This is a best-effort background refresh. Writing to stdout/stderr while
       // Pi owns the terminal corrupts the TUI (the text appears in the editor),
       // so expose failures to other extensions without producing terminal output.
@@ -876,8 +1319,28 @@ export default function providerBalance(pi: ExtensionAPI): void {
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      if (generation === refreshGeneration) refreshController = undefined;
+      if (generation === refreshGeneration) {
+        refreshInFlight = false;
+        refreshController = undefined;
+      }
     }
+  }
+
+  function scheduleIdleRefresh(): void {
+    if (idleRefreshTimer !== undefined) clearTimer(idleRefreshTimer);
+    const delay =
+      IDLE_REFRESH_INTERVAL_MS + Math.floor(random() * IDLE_REFRESH_JITTER_MS);
+    idleRefreshTimer = setTimer(() => {
+      idleRefreshTimer = undefined;
+      const ctx = activeContext;
+      if (ctx?.mode === "tui" && ctx.isIdle()) {
+        // Countdown text is derived at render time, so repaint even when the
+        // cache is stale or the provider request fails.
+        requestRender?.();
+        void refreshForModel(ctx, ctx.model, IDLE_REFRESH_INTERVAL_MS);
+      }
+      scheduleIdleRefresh();
+    }, delay);
   }
 
   function installFooter(ctx: ExtensionContext): void {
@@ -908,7 +1371,12 @@ export default function providerBalance(pi: ExtensionAPI): void {
             footer.render(width),
             width,
             theme,
-            balance ? formatBalance(balance) : undefined,
+            !identityPending &&
+              balance &&
+              balanceFetchedAt !== undefined &&
+              now() - balanceFetchedAt < BALANCE_CACHE_TTL_MS
+              ? formatBalance(balance, now())
+              : undefined,
           ),
         dispose: () => {
           unsubscribeBranchChange();
@@ -929,8 +1397,20 @@ export default function providerBalance(pi: ExtensionAPI): void {
     activeContext = ctx;
     activeThinkingLevel = restoredThinkingLevel(ctx);
     installFooter(ctx);
+    cleanupBalanceCache(cacheDir, now());
+    if (ctx.mode === "tui") scheduleIdleRefresh();
     // Footer data is supplemental. Never hold up session readiness on network.
     void refreshForModel(ctx, ctx.model);
+  });
+
+  pi.on("input", (event, ctx) => {
+    const match = /^\/(login|logout)(?:\s+(\S+))?/.exec(event.text.trim());
+    if (!match) return;
+    const provider = match[2] ?? ctx.model?.provider;
+    if (!provider || provider !== ctx.model?.provider) return;
+    const previousCacheKey = displayedCacheKey;
+    invalidateAuthTransition(provider);
+    scheduleAuthTransitionCheck(ctx, provider, previousCacheKey);
   });
 
   pi.on("model_select", (event, ctx) => {
@@ -967,14 +1447,22 @@ export default function providerBalance(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", () => {
+    refreshGeneration++;
+    refreshInFlight = false;
     refreshController?.abort();
     refreshController = undefined;
+    if (idleRefreshTimer !== undefined) clearTimer(idleRefreshTimer);
+    idleRefreshTimer = undefined;
+    if (authTransitionTimer !== undefined) clearTimer(authTransitionTimer);
+    authTransitionTimer = undefined;
     activeContext = undefined;
     activeThinkingLevel = "off";
     requestRender = undefined;
     // Drop the prior session's balance so the next footer doesn't flash a
     // stale value from a different provider before its first refresh lands.
     balance = undefined;
+    balanceFetchedAt = undefined;
     displayedProvider = undefined;
+    displayedCacheKey = undefined;
   });
 }

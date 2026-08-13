@@ -21,7 +21,7 @@ extensions. One entry point, ten independent features.
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.4.2
+pi install npm:bermudis-pi-goodies@0.5.0
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
@@ -78,6 +78,9 @@ chooses the initial model before extensions receive `session_start`, so if you
 manually create or edit a pin for B while settings still name A, the current
 session remains on A and B starts with the next fresh session. Resuming an
 existing session restores that session's model instead.
+
+`/new` keeps the model from the session you were just in, rather than switching
+to the pinned default. The pin still applies to a fresh `pi` launch.
 
 Older config files may contain `thinkingLevel`; that field is accepted for
 compatibility but ignored and should be managed in `model-thinking.json` instead.

@@ -13,6 +13,13 @@ import {
 } from "./json-file.ts";
 
 const CONFIG_FILENAME = "fixed-defaults.json";
+
+/**
+ * Model active in the session being replaced by `/new`, captured during
+ * `session_before_switch`. The factory is re-invoked per session, so this must
+ * live at module scope to survive the switch to the new extension instance.
+ */
+let previousModelForNewSession: { provider: string; id: string } | null = null;
 /**
  * Values read from the override file. `provider` and `model` are a coupled
  * pair — a model id is meaningless without its provider, so both must be
@@ -213,7 +220,7 @@ export default function fixedDefaults(
     }
   }
 
-  async function restore(ctx: ExtensionContext): Promise<void> {
+  async function restorePinnedModel(ctx: ExtensionContext): Promise<void> {
     const { override, error } = store.load();
     // A broken or absent override means no pin: leave settings untouched so
     // Pi's native last-selection behavior is preserved rather than guessed at.
@@ -223,6 +230,24 @@ export default function fixedDefaults(
     if (!hasModelPin) return;
 
     await persistModel(ctx, override.provider!, override.model!);
+  }
+
+  /**
+   * Restore the model that was active before `/new`. Unlike the pin, this only
+   * applies to the session being created, so the next fresh `pi` still starts
+   * from the pin.
+   */
+  async function restorePreviousModel(
+    ctx: ExtensionContext,
+    previous: { provider: string; id: string } | null,
+  ): Promise<void> {
+    if (!previous) return;
+    const model = ctx.modelRegistry.find(previous.provider, previous.id);
+    if (!model) return;
+    // setModel writes the restored model to settings.json, then its model_select
+    // notification re-applies the pin afterwards (see restorePinnedModel), so
+    // the active session keeps the previous model while the pin survives.
+    await pi.setModel(model);
   }
 
   function enqueue<T>(
@@ -246,11 +271,39 @@ export default function fixedDefaults(
     ctx: ExtensionContext,
     failureMessage = "[fixed-defaults] failed to restore defaults:",
   ): Promise<void> {
-    return enqueue(() => restore(ctx), failureMessage);
+    return enqueue(() => restorePinnedModel(ctx), failureMessage);
   }
 
-  pi.on("session_start", (_event, ctx) => schedule(ctx));
+  pi.on("session_start", (event, ctx) => {
+    // `/new` has already selected a model (the pinned default) by the time this
+    // fires, so set the model that was active before the switch here. The
+    // resulting model_select notification re-applies the pin in settings.json.
+    if (event.reason === "new") {
+      const previous = previousModelForNewSession;
+      previousModelForNewSession = null;
+      if (!previous) return;
+      // Run outside the shared queue: pi.setModel emits model_select, whose
+      // handler enqueues the pin restore. Enqueuing this operation too would
+      // deadlock that handler by making it wait on this operation to finish.
+      return restorePreviousModel(ctx, previous).catch((error: unknown) => {
+        console.error(
+          "[fixed-defaults] failed to restore the previous session model after /new:",
+          error,
+        );
+      });
+    }
+    return schedule(ctx);
+  });
   pi.on("model_select", (_event, ctx) => schedule(ctx));
+
+  pi.on("session_before_switch", (event, ctx) => {
+    if (event.reason === "new") {
+      const model = ctx.model;
+      previousModelForNewSession = model
+        ? { provider: model.provider, id: model.id }
+        : null;
+    }
+  });
 
   pi.registerCommand("fixed-defaults", {
     description: "Show, set, or reset the pinned startup model",

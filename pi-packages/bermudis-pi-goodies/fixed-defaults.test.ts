@@ -41,6 +41,7 @@ function context(
   options: {
     model?: NonNullable<ExtensionContext["model"]>;
     notifications?: string[];
+    modelRegistry?: ExtensionContext["modelRegistry"];
   } = {},
 ): ExtensionContext {
   const notifications = options.notifications ?? [];
@@ -49,6 +50,9 @@ function context(
     hasUI: true,
     isProjectTrusted: () => true,
     model: options.model,
+    modelRegistry: options.modelRegistry ?? {
+      find: (provider: string, id: string) => model(provider, id),
+    },
     ui: {
       notify: (message: string) => {
         notifications.push(message);
@@ -62,6 +66,8 @@ class PiHarness {
   readonly handlers = new Map<string, Handler[]>();
   readonly commands = new Map<string, CommandHandler>();
 
+  setModelCalls: Array<{ provider: string; id: string }> = [];
+
   readonly api = {
     on: (event: string, handler: Handler) => {
       const handlers = this.handlers.get(event) ?? [];
@@ -72,6 +78,10 @@ class PiHarness {
       this.commands.set(name, command.handler);
     },
     getThinkingLevel: () => this.level,
+    setModel: async (model: { provider: string; id: string }) => {
+      this.setModelCalls.push({ provider: model.provider, id: model.id });
+      return true;
+    },
   } as unknown as ExtensionAPI;
 
   async emit(event: string, payload: object, ctx: ExtensionContext) {
@@ -258,6 +268,77 @@ describe("fixed-defaults", () => {
       ...original,
       defaultProvider: "anthropic",
       defaultModel: "claude-sonnet-4",
+    });
+  });
+
+  test("session_start with reason new restores the previous model without dropping the pin", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+
+    // Pin zai/glm-5.2 as the startup default.
+    await handler("set", context(ctx.cwd, { model: model("zai", "glm-5.2") }));
+
+    // The active session was switched to anthropic/claude-sonnet-4.
+    const previousCtx = context(ctx.cwd, {
+      model: model("anthropic", "claude-sonnet-4"),
+    });
+    await pi.emit("session_before_switch", { reason: "new" }, previousCtx);
+
+    // The /new runtime starts on the pinned default, then fires session_start
+    // with reason "new". The extension should restore the previous session model.
+    const newCtx = context(ctx.cwd, { model: model("zai", "glm-5.2") });
+    await pi.emit(
+      "session_start",
+      { reason: "new", previousSessionFile: "/tmp/old.jsonl" },
+      newCtx,
+    );
+
+    expect(pi.setModelCalls).toEqual([
+      { provider: "anthropic", id: "claude-sonnet-4" },
+    ]);
+    // The pin file remains intact for the next fresh startup.
+    expect(
+      JSON.parse(
+        readFileSync(join(agentDir, "fixed-defaults.json"), "utf8"),
+      ) as unknown,
+    ).toEqual({ provider: "zai", model: "glm-5.2" });
+    // The model_select notification that pi.setModel triggers re-applies the pin.
+    await pi.emit(
+      "model_select",
+      {
+        model: { provider: "anthropic", id: "claude-sonnet-4" },
+        previousModel: { provider: "zai", id: "glm-5.2" },
+        source: "set",
+      },
+      newCtx,
+    );
+    expect(settingsAt(settingsPath)).toEqual({
+      ...original,
+      defaultProvider: "zai",
+      defaultModel: "glm-5.2",
+    });
+  });
+
+  test("session_start with reason new leaves the pin when no previous model was captured", async () => {
+    const { agentDir, settingsPath, original, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+    const handler = pi.commands.get("fixed-defaults")!;
+
+    await handler("set", context(ctx.cwd, { model: model("zai", "glm-5.2") }));
+
+    // No session_before_switch capture (e.g. /new from a session without a model).
+    await pi.emit(
+      "session_start",
+      { reason: "new", previousSessionFile: "/tmp/old.jsonl" },
+      context(ctx.cwd, { model: model("zai", "glm-5.2") }),
+    );
+
+    expect(pi.setModelCalls).toEqual([]);
+    expect(settingsAt(settingsPath)).toEqual({
+      ...original,
+      defaultProvider: "zai",
+      defaultModel: "glm-5.2",
     });
   });
 
