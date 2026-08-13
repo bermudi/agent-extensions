@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # deploy.sh — build the zen-relay leaf binary and install it on a gateway.
 #
-# Usage:  ./deploy.sh <user@host> [--arch auto|x64|arm64]
-# Example: ./deploy.sh root@184.75.240.17
+# Usage:  ./deploy.sh <user@host|ssh-alias> [ssh-port]
+# Examples:
+#   ./deploy.sh neon                      # ssh alias with port baked into ~/.ssh/config
+#   ./deploy.sh root@184.75.240.17 3800   # Neon, explicit port
+#   ./deploy.sh root@185.148.3.53 6700    # Lithium
+#   ./deploy.sh root@silicon.dabg.uk      # Silicon (default 22)
 #
 # Secrets are prompted (read -s), never passed as argv, never written to
 # shell history. They end up only in /srv/zen-relay/zen-relay.env (mode 600)
@@ -10,11 +14,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-TARGET="${1:?usage: ./deploy.sh <user@host> [--arch auto|x64|arm64]}"
-ARCH="${2:-auto}"
+TARGET="${1:?usage: ./deploy.sh <user@host|ssh-alias> [ssh-port]}"
+PORT="${2:-}"
 
-if [ "$ARCH" = "auto" ]; then
-  if ssh "$TARGET" 'uname -m' 2>/dev/null | grep -q aarch64; then
+SSH=(ssh); SCP=(scp)
+if [ -n "$PORT" ]; then SSH=(ssh -p "$PORT"); SCP=(scp -P "$PORT"); fi
+
+ARCH=auto
+if [ "$ARCH" = auto ]; then
+  if "${SSH[@]}" "$TARGET" 'uname -m' 2>/dev/null | grep -q aarch64; then
     ARCH=arm64
   else
     ARCH=x64
@@ -31,17 +39,17 @@ read -rsp "  SHARED_TOKEN (must match the router and every other leaf): " TOKEN;
 [ -n "$KEY" ] || { echo "empty key — aborting"; exit 1; }
 [ -n "$TOKEN" ] || { echo "empty token — aborting"; exit 1; }
 
-HOST="$(ssh "$TARGET" 'tailscale ip -4 2>/dev/null | head -1' || true)"
+HOST="$("${SSH[@]}" "$TARGET" 'tailscale ip -4 2>/dev/null | head -1' || true)"
 if [ -z "$HOST" ]; then
   read -rp "  tailscale ip -4 failed — enter this box's tailnet IP: " HOST
 fi
 echo "→ leaf will bind to tailnet IP $HOST (not reachable from the public internet)"
 
-ssh "$TARGET" 'mkdir -p /srv/zen-relay'
-scp -q /tmp/zen-relay "$TARGET:/srv/zen-relay/zen-relay"
-scp -q zen-relay.leaf.service "$TARGET:/etc/systemd/system/zen-relay-leaf.service"
+"${SSH[@]}" "$TARGET" 'mkdir -p /srv/zen-relay'
+"${SCP[@]}" -q /tmp/zen-relay "$TARGET:/srv/zen-relay/zen-relay"
+"${SCP[@]}" -q zen-relay.leaf.service "$TARGET:/etc/systemd/system/zen-relay-leaf.service"
 
-ssh "$TARGET" "cat > /srv/zen-relay/zen-relay.env <<EOF
+"${SSH[@]}" "$TARGET" "cat > /srv/zen-relay/zen-relay.env <<EOF
 ZEN_API_KEY=$KEY
 SHARED_TOKEN=$TOKEN
 HOST=$HOST
