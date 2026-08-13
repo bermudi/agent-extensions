@@ -158,6 +158,74 @@ describe("catalog refresh", () => {
     }
   });
 
+  test("a superseding refresh does not inherit the aborted request", async () => {
+    const originalFetch = globalThis.fetch;
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    let fetchCount = 0;
+    globalThis.fetch = ((_request, init) => {
+      fetchCount++;
+      if (fetchCount === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new Error("This operation was aborted")),
+            { once: true },
+          );
+        });
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: "fresh/model",
+                name: "Fresh Model",
+                context_length: 32_000,
+                architecture: {
+                  input_modalities: ["text"],
+                  output_modalities: ["text"],
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+    }) as typeof fetch;
+
+    try {
+      const provider = captureKiloProvider();
+      const refreshModels = provider.refreshModels;
+      if (!refreshModels)
+        throw new Error("Kilo refresh hook was not registered");
+
+      const baseContext = {
+        credential: { type: "api_key", key: "test-key" },
+        stored: undefined,
+        publish: async () => true,
+        allowNetwork: true,
+        force: true,
+      };
+      const first = refreshModels({
+        ...baseContext,
+        signal: firstController.signal,
+      } as unknown as Parameters<typeof refreshModels>[0]);
+      await Promise.resolve();
+      firstController.abort();
+      const second = refreshModels({
+        ...baseContext,
+        signal: secondController.signal,
+      } as unknown as Parameters<typeof refreshModels>[0]);
+
+      expect((await second).map(({ id }) => id)).toEqual(["fresh/model"]);
+      await first;
+      expect(fetchCount).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("uses the Pi 0.84 stored snapshot and publication API", async () => {
     const originalFetch = globalThis.fetch;
     let fetchCount = 0;

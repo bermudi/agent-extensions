@@ -632,7 +632,6 @@ export default function kilo(pi: ExtensionAPI): void {
   // and preserves the full authenticated catalog across pi processes.
   let lastFullCatalog: ProviderModelConfig[] | null = null;
   let lastFullCatalogCheckedAt = 0;
-  let refreshInFlight: Promise<ProviderModelConfig[]> | undefined;
 
   pi.registerProvider(KILO_PROVIDER_ID, {
     ...KILO_PROVIDER_CONFIG,
@@ -686,46 +685,41 @@ export default function kilo(pi: ExtensionAPI): void {
         return lastFullCatalog;
       }
 
-      refreshInFlight ??= (async () => {
+      try {
+        const models = await fetchKiloModels({
+          token,
+          signal: context.signal,
+        });
+        const checkedAt = Date.now();
         try {
-          const models = await fetchKiloModels({
-            token,
-            signal: context.signal,
+          const published = await publishStoredCatalog(context, {
+            models: models.map(modelConfigToStoredModel),
+            checkedAt,
           });
-          const checkedAt = Date.now();
-          try {
-            const published = await publishStoredCatalog(context, {
-              models: models.map(modelConfigToStoredModel),
-              checkedAt,
-            });
-            if (!published) {
-              return lastFullCatalog ?? KILO_FREE_MODELS;
-            }
-          } catch (error) {
-            console.warn(
-              "[kilo] Failed to persist refreshed models:",
-              error instanceof Error ? error.message : error,
-            );
+          if (!published) {
+            return lastFullCatalog ?? KILO_FREE_MODELS;
           }
-          lastFullCatalog = models;
-          lastFullCatalogCheckedAt = checkedAt;
-          return models;
         } catch (error) {
-          // Closing a picker or starting a newer refresh aborts the old request.
-          // That is expected lifecycle control, not a provider failure.
-          if (!context.signal?.aborted) {
-            console.warn(
-              "[kilo] refreshModels fetch failed:",
-              error instanceof Error ? error.message : error,
-            );
-          }
-          return lastFullCatalog ?? KILO_FREE_MODELS;
-        } finally {
-          refreshInFlight = undefined;
+          console.warn(
+            "[kilo] Failed to persist refreshed models:",
+            error instanceof Error ? error.message : error,
+          );
         }
-      })();
-
-      return refreshInFlight;
+        lastFullCatalog = models;
+        lastFullCatalogCheckedAt = checkedAt;
+        return models;
+      } catch (error) {
+        // Closing a picker or starting a newer refresh aborts the old request.
+        // Each generation owns its request so a successor never inherits an
+        // aborted promise from the generation it superseded.
+        if (!context.signal?.aborted) {
+          console.warn(
+            "[kilo] refreshModels fetch failed:",
+            error instanceof Error ? error.message : error,
+          );
+        }
+        return lastFullCatalog ?? KILO_FREE_MODELS;
+      }
     },
   });
 }
