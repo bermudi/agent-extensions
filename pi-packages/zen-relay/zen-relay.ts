@@ -114,6 +114,18 @@ function toOutgoing(h: Headers): Record<string, string> {
   return out;
 }
 
+function replaceAuth(headers: Record<string, string>, key: string): void {
+  // Pi's OpenAI/Responses clients use Authorization; its Anthropic client uses
+  // x-api-key. Preserve the incoming auth style while replacing the old pi key
+  // with this SOCKS route's account key. Never forward both unrelated keys.
+  const usedAuthorization = headers.authorization !== undefined;
+  const usedApiKey = headers["x-api-key"] !== undefined;
+  delete headers.authorization;
+  delete headers["x-api-key"];
+  if (usedApiKey) headers["x-api-key"] = key;
+  if (usedAuthorization || !usedApiKey) headers.authorization = `Bearer ${key}`;
+}
+
 function fromIncoming(h: IncomingMessage["headers"]): Headers {
   const out = new Headers();
   for (const [k, v] of Object.entries(h)) {
@@ -219,7 +231,7 @@ async function handle(req: Request): Promise<Response> {
     let resp: IncomingMessage;
     try {
       const headers = toOutgoing(req.headers);
-      headers["authorization"] = `Bearer ${route.key}`;
+      replaceAuth(headers, route.key);
       resp = await doRequest(
         route,
         req.method,

@@ -18,6 +18,7 @@ import http from "node:http";
 
 const KEYS = { A: "mock-key-A", B: "mock-key-B" };
 const counts = { A: 0, B: 0 };
+const authSeen: Array<{ authorization?: string; apiKey?: string }> = [];
 let both429 = false,
   a500 = false,
   a401 = false;
@@ -33,7 +34,19 @@ const mockApp = http.createServer((req, res) => {
     res.end(JSON.stringify({ data: [{ id: "zen" }] }));
     return;
   }
-  const key = (req.headers.authorization ?? "").slice(-5);
+  authSeen.push({
+    ...(req.headers.authorization
+      ? { authorization: req.headers.authorization }
+      : {}),
+    ...(typeof req.headers["x-api-key"] === "string"
+      ? { apiKey: req.headers["x-api-key"] }
+      : {}),
+  });
+  const key = (
+    req.headers.authorization ??
+    req.headers["x-api-key"] ??
+    ""
+  ).slice(-5);
   const which =
     key === KEYS.A.slice(-5) ? "A" : key === KEYS.B.slice(-5) ? "B" : null;
   if (which) counts[which as "A" | "B"] += 1;
@@ -244,7 +257,23 @@ test("2: cooling route is skipped; non-stream GET passes through", async () => {
   expect(await m.json()).toEqual({ data: [{ id: "zen" }] });
 });
 
-test("3: all routes cooling → waits for soonest revive, then 429 honestly", async () => {
+test("3: Anthropic x-api-key is replaced without leaking pi's old key", async () => {
+  const before = authSeen.length;
+  const r = await fetch(`http://127.0.0.1:${P_R1}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "old-pi-key" },
+    body: JSON.stringify({
+      model: "zen",
+      messages: [{ role: "user", content: "hi" }],
+    }),
+  });
+  expect(r.status).toBe(200);
+  const seen = authSeen.slice(before);
+  expect(seen.length).toBe(1);
+  expect(seen[0]).toEqual({ apiKey: KEYS.B });
+});
+
+test("4: all routes cooling → waits for soonest revive, then 429 honestly", async () => {
   await flag({ both429: true });
   const start = Date.now();
   const r = await fetch(`http://127.0.0.1:${P_R2}/v1/chat/completions`, {
@@ -260,7 +289,7 @@ test("3: all routes cooling → waits for soonest revive, then 429 honestly", as
   await flag({ both429: false });
 });
 
-test("4: 5xx → route marked down, retried elsewhere, recovers", async () => {
+test("5: 5xx → route marked down, retried elsewhere, recovers", async () => {
   await flag({ a500: true });
   const r = await fetch(`http://127.0.0.1:${P_R3}/v1/chat/completions`, {
     method: "POST",
@@ -280,7 +309,7 @@ test("4: 5xx → route marked down, retried elsewhere, recovers", async () => {
   expect(r2.status).toBe(200);
 });
 
-test("5: non-429 4xx passes through without rotation", async () => {
+test("6: non-429 4xx passes through without rotation", async () => {
   await flag({ a401: true });
   const before = { ...counts };
   const r = await fetch(`http://127.0.0.1:${P_R3}/v1/chat/completions`, {
@@ -295,7 +324,7 @@ test("5: non-429 4xx passes through without rotation", async () => {
   await flag({ a401: false });
 });
 
-test("6: /healthz reports route states", async () => {
+test("7: /healthz reports route states", async () => {
   const hz = await healthz(P_R1);
   expect(hz.role).toBe("relay");
   expect(hz.routes.length).toBe(2);
