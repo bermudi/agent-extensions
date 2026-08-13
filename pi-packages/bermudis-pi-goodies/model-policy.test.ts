@@ -214,6 +214,30 @@ describe("model policy extensions", () => {
     });
   });
 
+  test("setting a pin does not persist thinking", async () => {
+    const paths = fixture();
+    writeJson(paths.settingsPath, {
+      defaultProvider: "zai",
+      defaultModel: "glm-5.2",
+      defaultThinkingLevel: "max",
+    });
+
+    const pi = new PiHarness(paths.settingsPath, "low");
+    registerPolicies(pi, paths);
+    const activeContext = context(paths.cwd, model("anthropic", "claude-sonnet-4"));
+    await pi.commands.get("fixed-defaults")!("set", activeContext);
+
+    expect(readSettings(paths.fixedDefaultsPath)).toEqual({
+      provider: "anthropic",
+      model: "claude-sonnet-4",
+    });
+    expect(readSettings(paths.settingsPath)).toEqual({
+      defaultProvider: "zai",
+      defaultModel: "glm-5.2",
+      defaultThinkingLevel: "max",
+    });
+  });
+
   test("model selection applies thinking while restoring only the pinned model", async () => {
     const paths = fixture();
     writeJson(paths.settingsPath, {

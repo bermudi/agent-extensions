@@ -157,7 +157,7 @@ describe("fixed-defaults", () => {
     expect(settingsAt(settingsPath)).toEqual(original);
   });
 
-  test("set pins the active model and applies it immediately", async () => {
+  test("set pins only the active model without rewriting settings", async () => {
     const { agentDir, settingsPath, original, pi, ctx } = setup();
     fixedDefaults(pi.api, { agentDir });
     const handler = pi.commands.get("fixed-defaults")!;
@@ -177,13 +177,9 @@ describe("fixed-defaults", () => {
       provider: "zai",
       model: "glm-5.2",
     });
-    // Settings file updated immediately, without waiting for an event. The
-    // thinking default remains owned by Pi/model-thinking.
-    expect(settingsAt(settingsPath)).toEqual({
-      ...original,
-      defaultProvider: "zai",
-      defaultModel: "glm-5.2",
-    });
+    // The command only creates the pin. Pi owns its settings, including the
+    // default thinking level, until a model/session event needs the pin.
+    expect(settingsAt(settingsPath)).toEqual(original);
     expect(notifications.some((n) => n.includes("zai/glm-5.2"))).toBe(true);
   });
 

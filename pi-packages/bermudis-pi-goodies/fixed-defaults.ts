@@ -332,18 +332,9 @@ export default function fixedDefaults(
           return;
         }
 
-        try {
-          // Bring settings.json in line with the new pin right away instead
-          // of waiting for the next model/session event.
-          await schedule(ctx, "[fixed-defaults] failed to apply override:");
-        } catch {
-          ctx.ui.notify(
-            "Defaults saved, but applying them to settings.json failed.",
-            "warning",
-          );
-          return;
-        }
-
+        // The active model is already Pi's current selection. Do not rewrite
+        // settings here: that write is unnecessary and must not take ownership
+        // of Pi's native defaultThinkingLevel persistence.
         ctx.ui.notify(
           `Pinned ${model.provider}/${model.id} as the startup model`,
           "info",
