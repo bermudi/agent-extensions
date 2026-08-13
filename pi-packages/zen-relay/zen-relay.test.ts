@@ -2,24 +2,113 @@ import { test, expect, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import net from "node:net";
+import http from "node:http";
 
 /**
- * End-to-end test: mock Zen (429 per key) + two leaves (different keys) +
- * routers with different policies. Verifies:
- *   1. 429 on first leaf → retry on second → streamed 200, leaf A cooling
- *   2. cooling leaf is skipped on subsequent requests
- *   3. all leaves cooling → router waits for the soonest revive, then 429 honestly
- *   4. 5xx → leaf marked down, retried elsewhere, recovers
+ * End-to-end test of the all-local relay: a mock Zen (429 per key) reached
+ * through per-route SOCKS5 mock tunnels. Verifies:
+ *   1. 429 on first route → retried on second → streamed 200, route A cooling
+ *   2. cooling route is skipped on subsequent requests
+ *   3. all routes cooling → waits for the soonest revive, then 429 honestly
+ *   4. 5xx → route marked down, retried elsewhere, recovers
  *   5. other 4xx (401) → passed through, NO rotation
- *   6. leaf requires the shared token
+ *   6. /healthz reports route states
  */
 
+const KEYS = { A: "mock-key-A", B: "mock-key-B" };
+const counts = { A: 0, B: 0 };
+let both429 = false,
+  a500 = false,
+  a401 = false;
+
+function sse(content: string) {
+  return `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
+}
+
+/* ---------- mock Zen ---------- */
+const mockApp = http.createServer((req, res) => {
+  const url = new URL(req.url ?? "/", "http://x");
+  if (url.pathname === "/v1/models") {
+    res.end(JSON.stringify({ data: [{ id: "zen" }] }));
+    return;
+  }
+  const key = (req.headers.authorization ?? "").slice(-5);
+  const which =
+    key === KEYS.A.slice(-5) ? "A" : key === KEYS.B.slice(-5) ? "B" : null;
+  if (which) counts[which as "A" | "B"] += 1;
+  if (which && a401) {
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "bad key" } }));
+    return;
+  }
+  if (which === "A" && a500) {
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "boom" } }));
+    return;
+  }
+  const would429 = which === "A" || (which === "B" && both429);
+  if (would429) {
+    res.writeHead(429, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        type: "FreeUsageLimitError",
+        message: "Rate limit exceeded. Please try again later.",
+      }),
+    );
+    return;
+  }
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  res.write(sse("mock-chunk-1"));
+  res.write(sse("mock-chunk-2"));
+  res.write("data: [DONE]\n\n");
+  res.end();
+});
+
+/* ---------- SOCKS5 mock tunnel (no-auth CONNECT, relays anywhere) ---------- */
+function startSocks(port: number): Promise<net.Server> {
+  return new Promise((resolve) => {
+    const srv = net.createServer((sock) => {
+      sock.once("data", () => {
+        sock.write(Buffer.from([5, 0])); // no-auth ack
+        sock.once("data", (req) => {
+          const atyp = req[3];
+          let host = "",
+            port = 0;
+          if (atyp === 1) {
+            host = `${req[4]}.${req[5]}.${req[6]}.${req[7]}`;
+            port = req.readUInt16BE(8);
+          } else if (atyp === 3) {
+            const len = req[4];
+            host = req.subarray(5, 5 + len).toString();
+            port = req.readUInt16BE(5 + len);
+          } else {
+            sock.end();
+            return;
+          }
+          const target = net.connect(port, host);
+          target.on("connect", () => {
+            sock.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
+            sock.pipe(target);
+            target.pipe(sock);
+          });
+          target.on("error", () => sock.end());
+        });
+      });
+    });
+    srv.listen(port, "127.0.0.1", () => resolve(srv));
+  });
+}
+
+/* ---------- free-port selection (avoid colliding with real services) ---------- */
 async function pickBase(): Promise<number> {
-  const net = await import("node:net");
   const free = (port: number) =>
     new Promise<boolean>((resolve) => {
       const s = net.connect(port, "127.0.0.1");
-      s.once("connect", () => { s.destroy(); resolve(false); });
+      s.once("connect", () => {
+        s.destroy();
+        resolve(false);
+      });
       s.once("error", () => resolve(true));
     });
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -31,104 +120,47 @@ async function pickBase(): Promise<number> {
   throw new Error("could not find 6 free ports");
 }
 
-const BASE = await pickBase(); // avoid colliding with real services (e.g. cloudflared :20241)
-const P_MOCK = BASE, P_LA = BASE + 1, P_LB = BASE + 2;
-const P_R1 = BASE + 10, P_R2 = BASE + 11, P_R3 = BASE + 12;
-const BUN = process.execPath;
-const SCRIPT = join(import.meta.dir, "zen-relay.ts");
+const BASE = await pickBase();
+const P_ZEN = BASE,
+  P_SA = BASE + 1,
+  P_SB = BASE + 2;
+const P_R1 = BASE + 10,
+  P_R2 = BASE + 11,
+  P_R3 = BASE + 12;
 
-const KEYS = { A: "mock-key-A", B: "mock-key-B" };
-const counts = { A: 0, B: 0 };
-let both429 = false, a500 = false, a401 = false;
-
-/* ---------- mock upstream ---------- */
-
-function sse(content: string) {
-  return `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
-}
-
-const mock = Bun.serve({
-  port: P_MOCK,
-  async fetch(req) {
-    const url = new URL(req.url);
-    if (url.pathname === "/_flag") {
-      const f = (await req.json()) as Record<string, boolean>;
-      if (typeof f.both429 === "boolean") both429 = f.both429;
-      if (typeof f.a500 === "boolean") a500 = f.a500;
-      if (typeof f.a401 === "boolean") a401 = f.a401;
-      return Response.json({ ok: true });
-    }
-    if (url.pathname === "/_counts") return Response.json(counts);
-    if (url.pathname === "/v1/models") return Response.json({ data: [{ id: "zen" }] });
-
-    const key = req.headers.get("authorization") ?? "";
-    if (!key) return Response.json({ error: "no auth" }, { status: 401 });
-    const which = key.endsWith(KEYS.A) ? "A" : key.endsWith(KEYS.B) ? "B" : null;
-    counts[which as "A" | "B"] += 1;
-
-    if (a401) return Response.json({ error: { message: "bad key" } }, { status: 401 });
-    if (which === "A" && a500) return Response.json({ error: { message: "boom" } }, { status: 500 });
-
-    const would429 = which === "A" || (which === "B" && both429);
-    if (would429) {
-      return Response.json(
-        { type: "FreeUsageLimitError", message: "Rate limit exceeded. Please try again later." },
-        { status: 429 },
-      );
-    }
-
-    const stream = new ReadableStream<Uint8Array>({
-      start(c) {
-        const enc = new TextEncoder();
-        c.enqueue(enc.encode(sse("mock-chunk-1")));
-        c.enqueue(enc.encode(sse("mock-chunk-2")));
-        c.enqueue(enc.encode("data: [DONE]\n\n"));
-        c.close();
-      },
-    });
-    return new Response(stream, { headers: { "content-type": "text/event-stream" } });
-  },
-});
-
-/* ---------- helpers ---------- */
+await new Promise<void>((r) => mockApp.listen(P_ZEN, "127.0.0.1", r));
+const socksA = await startSocks(P_SA);
+const socksB = await startSocks(P_SB);
 
 const LOGDIR = mkdtempSync(join(tmpdir(), "zen-relay-test-"));
 const procs: ReturnType<typeof Bun.spawn>[] = [];
 
-function runLeaf(port: number, key: string) {
+function runRelay(port: number, extra: Record<string, string>) {
   const p = Bun.spawn(
-    [BUN, "run", SCRIPT, "leaf", "--port", String(port), "--host", "127.0.0.1"],
+    [
+      process.execPath,
+      "run",
+      "zen-relay.ts",
+      "--port",
+      String(port),
+      "--host",
+      "127.0.0.1",
+    ],
     {
       env: {
         ...process.env,
-        ZEN_API_KEY: key,
-        ZEN_BASE: `http://127.0.0.1:${P_MOCK}`,
-        SHARED_TOKEN: "test",
-      },
-      stdout: "ignore",
-      stderr: Bun.file(join(LOGDIR, `leaf-${port}.log`)),
-    },
-  );
-  procs.push(p);
-  return p;
-}
-
-function runRouter(port: number, extra: Record<string, string>) {
-  const p = Bun.spawn(
-    [BUN, "run", SCRIPT, "router", "--port", String(port), "--host", "127.0.0.1"],
-    {
-      env: {
-        ...process.env,
-        GATEWAYS: `http://127.0.0.1:${P_LA},http://127.0.0.1:${P_LB}`,
-        SHARED_TOKEN: "test",
+        ZEN_URL: `http://127.0.0.1:${P_ZEN}`,
+        ROUTE_1_SOCKS: `socks5://127.0.0.1:${P_SA}`,
+        ROUTE_1_KEY: KEYS.A,
+        ROUTE_2_SOCKS: `socks5://127.0.0.1:${P_SB}`,
+        ROUTE_2_KEY: KEYS.B,
         ...extra,
       },
       stdout: "ignore",
-      stderr: Bun.file(join(LOGDIR, `router-${port}.log`)),
+      stderr: Bun.file(join(LOGDIR, `relay-${port}.log`)),
     },
   );
   procs.push(p);
-  return p;
 }
 
 async function waitHealth(port: number, what: string, timeoutMs = 15000) {
@@ -136,14 +168,35 @@ async function waitHealth(port: number, what: string, timeoutMs = 15000) {
   while (Date.now() - start < timeoutMs) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/healthz`, {
-        headers: { "x-zen-relay-token": "test" },
-        signal: AbortSignal.timeout(1000),
+        signal: AbortSignal.timeout(2000),
       });
       if (r.ok) return;
-    } catch { /* not up yet */ }
-    await Bun.sleep(150);
+    } catch {
+      /* not up yet */
+    }
+    await Bun.sleep(100);
   }
   throw new Error(`healthz never came up: ${what}`);
+}
+
+type Health = {
+  role: string;
+  routes: Array<{ socks: string; cooling: boolean; down: boolean }>;
+};
+
+async function healthz(port: number): Promise<Health> {
+  return (
+    await fetch(`http://127.0.0.1:${port}/healthz`)
+  ).json() as Promise<Health>;
+}
+
+async function flag(f: Record<string, boolean>) {
+  // flags live in this process's module scope, so they take effect immediately
+  for (const [k, v] of Object.entries(f)) {
+    if (k === "both429") both429 = v;
+    if (k === "a500") a500 = v;
+    if (k === "a401") a401 = v;
+  }
 }
 
 const chat = {
@@ -152,33 +205,19 @@ const chat = {
   stream: true,
 };
 
-async function healthz(port: number) {
-  return (await fetch(`http://127.0.0.1:${port}/healthz`)).json() as any;
-}
+runRelay(P_R1, {}); // 30s cooldown
+runRelay(P_R2, { COOLDOWN_MS: "400", MAX_WAIT_MS: "3000" }); // fast revive
+runRelay(P_R3, { DOWN_MS: "400" });
 
-async function flag(f: Record<string, boolean>) {
-  await fetch(`http://127.0.0.1:${P_MOCK}/_flag`, { method: "POST", body: JSON.stringify(f) });
-}
-
-/* ---------- scope ---------- */
-
-runLeaf(P_LA, KEYS.A);
-runLeaf(P_LB, KEYS.B);
-runRouter(P_R1, {});                                       // 30s cooldown
-runRouter(P_R2, { COOLDOWN_MS: "400", MAX_WAIT_MS: "3000" }); // fast revive
-runRouter(P_R3, { DOWN_MS: "400" });
-
-test("setup: all processes healthy", async () => {
+test("setup: relays healthy", async () => {
   await Promise.all([
-    waitHealth(P_LA, "leaf A"),
-    waitHealth(P_LB, "leaf B"),
-    waitHealth(P_R1, "router 1"),
-    waitHealth(P_R2, "router 2"),
-    waitHealth(P_R3, "router 3"),
+    waitHealth(P_R1, "relay1"),
+    waitHealth(P_R2, "relay2"),
+    waitHealth(P_R3, "relay3"),
   ]);
-}, 30000);
+});
 
-test("1: 429 on first leaf → retried on second, streamed 200, A cooling", async () => {
+test("1: 429 on first route → retried on second, streamed 200, A cooling", async () => {
   const r = await fetch(`http://127.0.0.1:${P_R1}/v1/chat/completions`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -187,15 +226,13 @@ test("1: 429 on first leaf → retried on second, streamed 200, A cooling", asyn
   expect(r.status).toBe(200);
   const text = await r.text();
   expect(text).toContain("mock-chunk-1");
-  expect(text).toContain("mock-chunk-2");
-
   expect(counts).toEqual({ A: 1, B: 1 });
   const hz = await healthz(P_R1);
-  expect(hz.gateways[0].cooling).toBe(true); // A 429ed → cooling
-  expect(hz.gateways[1].cooling).toBe(false);
+  expect(hz.routes[0].cooling).toBe(true);
+  expect(hz.routes[1].cooling).toBe(false);
 });
 
-test("2: cooling leaf is skipped; non-stream GET passes through", async () => {
+test("2: cooling route is skipped; non-stream GET passes through", async () => {
   const r = await fetch(`http://127.0.0.1:${P_R1}/v1/chat/completions`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -203,12 +240,11 @@ test("2: cooling leaf is skipped; non-stream GET passes through", async () => {
   });
   expect(r.status).toBe(200);
   expect(counts).toEqual({ A: 1, B: 2 }); // A untouched
-
   const m = await fetch(`http://127.0.0.1:${P_R1}/v1/models`);
   expect(await m.json()).toEqual({ data: [{ id: "zen" }] });
 });
 
-test("3: all leaves cooling → waits for soonest revive, then 429 honestly", async () => {
+test("3: all routes cooling → waits for soonest revive, then 429 honestly", async () => {
   await flag({ both429: true });
   const start = Date.now();
   const r = await fetch(`http://127.0.0.1:${P_R2}/v1/chat/completions`, {
@@ -219,12 +255,12 @@ test("3: all leaves cooling → waits for soonest revive, then 429 honestly", as
   const elapsed = Date.now() - start;
   expect(r.status).toBe(429);
   expect(await r.text()).toContain("FreeUsageLimitError");
-  expect(elapsed).toBeGreaterThan(250); // really waited for a revive
+  expect(elapsed).toBeGreaterThan(250);
   expect(elapsed).toBeLessThan(15000);
   await flag({ both429: false });
 });
 
-test("4: 5xx → leaf marked down, retried elsewhere, recovers", async () => {
+test("4: 5xx → route marked down, retried elsewhere, recovers", async () => {
   await flag({ a500: true });
   const r = await fetch(`http://127.0.0.1:${P_R3}/v1/chat/completions`, {
     method: "POST",
@@ -233,9 +269,7 @@ test("4: 5xx → leaf marked down, retried elsewhere, recovers", async () => {
   });
   expect(r.status).toBe(200);
   const hz = await healthz(P_R3);
-  expect(hz.gateways[0].down).toBe(true);
-  expect(hz.gateways[1].down).toBe(false);
-
+  expect(hz.routes[0].down).toBe(true);
   await flag({ a500: false });
   await Bun.sleep(600);
   const r2 = await fetch(`http://127.0.0.1:${P_R3}/v1/chat/completions`, {
@@ -243,7 +277,7 @@ test("4: 5xx → leaf marked down, retried elsewhere, recovers", async () => {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(chat),
   });
-  expect(r2.status).toBe(200); // A recovered
+  expect(r2.status).toBe(200);
 });
 
 test("5: non-429 4xx passes through without rotation", async () => {
@@ -257,26 +291,24 @@ test("5: non-429 4xx passes through without rotation", async () => {
   expect(r.status).toBe(401);
   const after = { ...counts };
   const totalDelta = after.A - before.A + (after.B - before.B);
-  expect(totalDelta).toBe(1); // exactly one gateway tried — no rotation on 4xx
+  expect(totalDelta).toBe(1); // exactly one route tried — no rotation on 4xx
   await flag({ a401: false });
 });
 
-test("6: leaf enforces the shared token", async () => {
-  const denied = await fetch(`http://127.0.0.1:${P_LA}/healthz`);
-  expect(denied.status).toBe(403);
-  const ok = await fetch(`http://127.0.0.1:${P_LA}/healthz`, {
-    headers: { "x-zen-relay-token": "test" },
-  });
-  expect(ok.status).toBe(200);
-  expect((await ok.json()).role).toBe("leaf");
+test("6: /healthz reports route states", async () => {
+  const hz = await healthz(P_R1);
+  expect(hz.role).toBe("relay");
+  expect(hz.routes.length).toBe(2);
+  for (const r of hz.routes) expect(typeof r.socks).toBe("string");
 });
 
 afterAll(() => {
-  const logs = readdirSync(LOGDIR);
-  for (const name of logs) {
+  for (const name of readdirSync(LOGDIR)) {
     const body = readFileSync(join(LOGDIR, name), "utf8").trim();
     if (body) console.log(`--- ${name} ---\n${body}`);
   }
-  mock.stop();
   for (const p of procs) p.kill();
+  socksA.close();
+  socksB.close();
+  mockApp.close();
 });

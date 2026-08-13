@@ -1,154 +1,169 @@
-# zen-relay — multi-IP relay for OpenCode Zen
+# zen-relay — all-local multi-IP relay for OpenCode Zen
 
-OpenCode Zen's free tier rate-limits **per source IP** (same key works from a
-different IP — that's the observed behavior). One gateway server = one quota
-bucket. zen-relay spreads your requests across N gateway servers, each holding
-**its own Zen account key**, and hides the rotation from the client:
+zen-relay is a standalone local proxy for pi. Nothing custom runs on the gateway servers: three persistent SSH SOCKS tunnels use Neon, Lithium, and Silicon as egress routes, and one local relay chooses a route + matching Zen account key for each request.
 
-```
-pi ──► router (localhost:4096) ──┬──► leaf: Neon    (AS6939 Hurricane Electric)
-                                 ├──► leaf: Lithium (AS203003 Magna Capax)
-                                 └──► leaf: Silicon (AS36352 ColoCrossing)
-                                      each leaf ──► https://opencode.ai/zen/v1
-                                      with that server's key, from that
-                                      server's public IP
+```text
+pi ──► localhost:4096 (zen-relay)
+         ├── SOCKS :1080 ──SSH──► Neon    ──► opencode.ai/zen (key A)
+         ├── SOCKS :1081 ──SSH──► Lithium ──► opencode.ai/zen (key B)
+         └── SOCKS :1082 ──SSH──► Silicon ──► opencode.ai/zen (key C)
 ```
 
-- **leaf** — runs on each gateway. Forwards to Zen with *that server's key*,
-  so Zen sees that server's IP. Listens on the tailnet IP only.
-- **router** — runs where pi runs. Round-robins across leaves; on a clean 429
-  marks the leaf cooling (~60s) and retries the same request on the next leaf;
-  on 5xx/unreachable marks it down (~30s) and retries; other 4xx pass through
-  untouched (no rotation). If *every* leaf is cooling it waits for the soonest
-  revive (capped, default 90s) then retries once; if still exhausted it returns
-  the last 429 honestly.
+Zen sees the gateway's public IP. On a clean 429 the route cools for about 60 seconds and the same request is retried through the next route. A dead tunnel or 5xx marks the route down for about 30 seconds. Other 4xx responses pass through unchanged; errors after streaming starts cannot be retried transparently.
 
-Security model: Zen keys live **only** in `/srv/zen-relay/zen-relay.env`
-(mode 600) on each gateway — never on the pi machine, never in this repo.
-Leaves require a shared token (`x-zen-relay-token` header, env `SHARED_TOKEN`)
-that must match on the router and all leaves. No bodies or keys are logged.
+All three Zen keys live locally in one mode-600 environment file. No keys or request bodies are logged.
 
 ## Files
 
 | file | role |
 |---|---|
-| `zen-relay.ts` | the whole tool (`leaf` / `router` modes), zero deps |
-| `zen-relay.test.ts` | e2e tests: mock Zen + real leaf/router processes |
-| `zen-relay.leaf.service` | systemd unit for gateways (installed by deploy.sh) |
-| `zen-relay.router.service` | systemd **user** unit for the pi machine |
-| `deploy.sh` | build + ship + install a leaf on one gateway |
-| `tsconfig.json` | typecheck (`bunx tsc -p .`) |
+| `zen-relay.ts` | local HTTP relay: SOCKS egress, per-route keys, rotation + retry |
+| `zen-relay.test.ts` | e2e tests using a mock Zen and real SOCKS5 mock tunnels |
+| `zen-relay.service` | local user service for the relay |
+| `zen-relay-tunnel@.service` | local user service template for each SSH SOCKS tunnel |
 
-## Local dev
+## 1. Build and verify
 
-```bash
-bun run test             # e2e suite (spawns mock Zen + leaves + routers)
-bun run typecheck        # tsc --noEmit
-bun run zen-relay.ts leaf   --port 8787                 # local leaf (keyless → passes client Authorization)
-bun run zen-relay.ts router --port 4096                 # local router
-```
-
-## Deploying the leaves
-
-For each gateway, run from this directory (this machine must be on the tailnet):
+Run only inside this package:
 
 ```bash
-./deploy.sh root@184.75.240.17   # Neon    (ssh -p 3800 if key auth needs it: ./deploy.sh "root@184.75.240.17 -p 3800")
-./deploy.sh root@185.148.3.53    # Lithium (ssh -p 6700)
-./deploy.sh root@silicon.dabg.uk # Silicon
-```
-
-deploy.sh builds a static binary (`--target=bun-linux-<arch>-baseline`, built
-for the box's arch), prompts for the **ZEN_API_KEY** (that gateway's account)
-and the **SHARED_TOKEN** (same value everywhere), detects the box's tailnet IP
-and writes the env file mode-600, installs + starts `zen-relay-leaf.service`,
-then verifies `/healthz` over the tailnet and prints the public IP Zen will see.
-The leaf binds to the tailnet IP — it is **not** reachable from the internet.
-
-The three gateways must sit on **different networks** for rotation to multiply
-quota under every counting model (see "The ASN question" below).
-
-## Router on the pi machine
-
-The router holds no Zen keys — just the shared token and the leaf URLs.
-
-```bash
-# one-time: build a binary and drop it where the user unit expects it
+cd ~/build/agent-extensions/pi-packages/zen-relay
+bun install
+bun run typecheck
+bun run test
+mkdir -p ~/.local/bin ~/.config/zen-relay ~/.config/systemd/user
 bun build --compile zen-relay.ts --outfile ~/.local/bin/zen-relay
-mkdir -p ~/.config/zen-relay
-cat > ~/.config/zen-relay/router.env <<EOF
-GATEWAYS=http://100.111.190.51:8787,http://<lithium-tailnet-ip>:8787,http://100.113.160.13:8787
-SHARED_TOKEN=<same token as the leaves>
-PORT=4096
-EOF
-chmod 600 ~/.config/zen-relay/router.env
-cp zen-relay.router.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now zen-relay-router
 ```
 
-(Get Lithium's tailnet IP with `ssh root@185.148.3.53 'tailscale ip -4'`.)
+## 2. Verify SSH access over Tailscale
 
-Sanity check: `curl -s http://localhost:4096/healthz` → lists each gateway with
-`cooling`/`down` booleans.
+The tunnel services are non-interactive (`BatchMode=yes`), so test each connection once first. This also records host keys in `known_hosts`:
 
-### Pointing pi at it
+```bash
+ssh -o BatchMode=yes root@100.111.190.51 true  # Neon
+ssh -o BatchMode=yes root@100.113.1.122 true   # Lithium
+ssh -o BatchMode=yes root@100.113.160.13 true  # Silicon
+```
 
-Duplicate your existing Zen provider in pi (same model ids, e.g. `zen`) but
-change the base URL to `http://localhost:4096/v1`. The leaf strips the
-duplicate `/v1` when mapping onto `https://opencode.ai/zen/v1`. A placeholder
-API key is fine (leaves replace it with their own; if a leaf has no key, your
-client Authorization is passed through).
+If a box uses a different SSH user, use that user in both this test and its tunnel env file below.
 
-## Behavior reference
+## 3. Configure the three local SOCKS tunnels
 
-| upstream answer | router action |
-|---|---|
-| `429` (FreeUsageLimitError) | leaf cooling (~60s, ±20% jitter), retry next leaf |
-| `5xx` / unreachable | leaf down (~30s), retry next leaf |
-| other `4xx` (401/403/400) | pass through as-is — no rotation |
-| all leaves cooling | wait for soonest revive (≤90s), retry once, else return last 429 |
-| all leaves down | `502` |
-| mid-stream error | surfaces to the client (no transparent failover after the first token) |
+```bash
+cat > ~/.config/zen-relay/tunnel-neon.env <<'EOF'
+GATEWAY=root@100.111.190.51
+LOCAL_PORT=1080
+EOF
 
-Tunables (env on the router): `COOLDOWN_MS`, `DOWN_MS`, `MAX_WAIT_MS`.
+cat > ~/.config/zen-relay/tunnel-lithium.env <<'EOF'
+GATEWAY=root@100.113.1.122
+LOCAL_PORT=1081
+EOF
 
-## The ASN question
+cat > ~/.config/zen-relay/tunnel-silicon.env <<'EOF'
+GATEWAY=root@100.113.160.13
+LOCAL_PORT=1082
+EOF
 
-Quota buckets can be counted per-key, per-IP, per-(key, IP), or — the
-escalation — per-(key, ASN): all IPs inside one network share a bucket, so
-IP rotation within a single provider stops multiplying quota.
+chmod 600 ~/.config/zen-relay/tunnel-*.env
+cp zen-relay-tunnel@.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now \
+  zen-relay-tunnel@neon \
+  zen-relay-tunnel@lithium \
+  zen-relay-tunnel@silicon
+```
 
-| gateway | IP | ASN |
-|---|---|---|
-| Neon | 184.75.240.17 | AS6939 Hurricane Electric |
-| Lithium | 185.148.3.53 | AS203003 Magna Capax |
-| Silicon | 23.94.182.147 | AS36352 ColoCrossing (same ASN as the retired Dubnium!) |
+Verify each tunnel's actual egress before adding keys:
 
-Current evidence (same key + new IP works) says Zen counts per-(key, IP) —
-fine. **If it ever switches to per-ASN counting, Silicon shares its bucket
-with any other 23.94.x box, so a replacement gateway must come from a
-different provider.** Check any candidate box with
-`curl -s https://ipinfo.io/<ip>/json | rg -o 'AS[0-9]+'`.
+```bash
+curl --socks5-hostname 127.0.0.1:1080 https://api.ipify.org; echo  # expect 184.75.240.17
+curl --socks5-hostname 127.0.0.1:1081 https://api.ipify.org; echo  # expect 185.148.3.53
+curl --socks5-hostname 127.0.0.1:1082 https://api.ipify.org; echo  # expect 23.94.182.147
+```
 
-**15-minute test to learn what Zen actually counts** (once ≥2 leaves are up):
-hammer one key on leaf A until it 429s, then immediately try
+## 4. Configure and start the relay
 
-1. same key, leaf B (different ASN) — works ⇒ per-(key,IP)/per-(key,ASN);
-   also 429 ⇒ per-key or per-account cap (keys are the only lever).
-2. different key, leaf A (same IP) — works ⇒ the limit binds the key; also
-   429 ⇒ the limit binds the network (IP diversity is the only lever).
+Use one Zen key from a different account per route:
 
-## Design notes for future edits
+```bash
+cat > ~/.config/zen-relay/zen-relay.env <<'EOF'
+HOST=127.0.0.1
+PORT=4096
+ZEN_URL=https://opencode.ai/zen/v1
 
-- **Leaves buffer request bodies before replying.** Upstreams may answer early
-  (429s, fast errors) without consuming the body; responding before the
-  request is fully drained makes Bun.serve misread the *next* request on that
-  keep-alive connection as leftover body and answer spurious 400s. This was a
-  real bug, caught by the e2e suite. Don't "optimize" it back to streaming.
-- The router buffers too (it must, to replay on retry). Bodies are
-  JSON-sized; fine.
-- Only clean 429s (before any token) are retried — safe for POST chat
-  completions.
-- Logs are one line per request: method, path, gateway chain, status,
-  duration. No bodies, no keys.
+ROUTE_1_SOCKS=socks5://127.0.0.1:1080
+ROUTE_1_KEY=PASTE_NEON_ACCOUNT_KEY
+ROUTE_2_SOCKS=socks5://127.0.0.1:1081
+ROUTE_2_KEY=PASTE_LITHIUM_ACCOUNT_KEY
+ROUTE_3_SOCKS=socks5://127.0.0.1:1082
+ROUTE_3_KEY=PASTE_SILICON_ACCOUNT_KEY
+EOF
+chmod 600 ~/.config/zen-relay/zen-relay.env
+
+cp zen-relay.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now zen-relay
+curl -s http://127.0.0.1:4096/healthz
+```
+
+Expected health output lists three routes with `cooling: false` and `down: false`.
+
+## 5. Point pi's native OpenCode provider at the relay
+
+Pi's built-in provider id is `opencode`. A provider-level base URL override preserves all 60 built-in models, their OpenAI/Responses/Anthropic API types, compatibility flags, and existing auth. Add this to `~/.pi/agent/models.json` under `providers`:
+
+```json
+"opencode": {
+  "baseUrl": "http://127.0.0.1:4096"
+}
+```
+
+The base URL deliberately has **no `/v1` suffix**. Pi appends the correct path for each model API; zen-relay maps it onto Zen's canonical endpoint. The native opencode key that pi sends is ignored and replaced with the selected route's key.
+
+A safe merge command (preserves all existing providers) is:
+
+```bash
+bun -e '
+const fs = require("fs");
+const p = process.env.HOME + "/.pi/agent/models.json";
+const o = JSON.parse(fs.readFileSync(p, "utf8"));
+o.providers ??= {};
+o.providers.opencode = { ...(o.providers.opencode ?? {}), baseUrl: "http://127.0.0.1:4096" };
+fs.writeFileSync(p, JSON.stringify(o, null, 2) + "\n");
+'
+```
+
+Restart pi, then select the same `opencode/<model>` you already use. To bypass the relay temporarily, stop `zen-relay` and remove the `opencode` override from `models.json`.
+
+## Operations
+
+```bash
+# status
+systemctl --user status zen-relay 'zen-relay-tunnel@*'
+
+# logs
+journalctl --user -u zen-relay -f
+journalctl --user -u 'zen-relay-tunnel@*' -f
+
+# restart everything
+systemctl --user restart \
+  zen-relay-tunnel@neon \
+  zen-relay-tunnel@lithium \
+  zen-relay-tunnel@silicon \
+  zen-relay
+```
+
+Router tuning in `zen-relay.env`:
+
+- `COOLDOWN_MS` — 429 cooldown, default `60000`
+- `DOWN_MS` — dead tunnel / 5xx cooldown, default `30000`
+- `MAX_WAIT_MS` — longest wait when every route is cooling, default `90000`
+
+## ASN note
+
+- Neon: AS6939 Hurricane Electric
+- Lithium: AS203003 Magna Capax
+- Silicon: AS36352 ColoCrossing
+
+They are three different ASNs. Silicon shares AS36352 with the retired Dubnium; that does not matter now that Dubnium is not a route.

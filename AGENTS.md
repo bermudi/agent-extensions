@@ -12,7 +12,7 @@ pi-packages/
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
   ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
   session-summarizer/     # ACTIVE (project-local)
-  zen-relay/              # ACTIVE (standalone, not a pi extension): multi-IP relay for OpenCode Zen free-tier rate limits. Leaf per gateway + local router; deployed via deploy.sh to Neon/Lithium/Silicon.
+  zen-relay/              # ACTIVE (standalone, not a pi extension): all-local multi-IP relay for OpenCode Zen. Per-gateway SSH SOCKS tunnels + one local relay; pi uses it via models.json baseUrl override.
   experiments/            # ARCHIVE — unused/exploratory. Not typechecked, not in default test run.
 ```
 

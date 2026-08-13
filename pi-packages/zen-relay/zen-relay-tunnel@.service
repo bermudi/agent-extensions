@@ -1,0 +1,13 @@
+[Unit]
+Description=zen-relay SOCKS tunnel to %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/zen-relay/tunnel-%i.env
+ExecStart=/usr/bin/ssh -N -T -D 127.0.0.1:${LOCAL_PORT} -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 ${GATEWAY}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
