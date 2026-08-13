@@ -152,6 +152,9 @@ or sensitive workspaces without checking the prompt construction first.
   `@(expr)` to expand Python values in shell commands. Output is streamed, bounded, and
   saved to a temporary file when truncated. It executes commands in the session cwd and
   inherits the process environment, so it has the same trust boundary as a shell tool.
+  Completed invocations are recorded to a local SQLite store at
+  `~/.pi/agent/xonsh-usage.db` for usage/health inspection; set
+  `XONSH_USAGE_ENABLED=false` to disable it or `XONSH_USAGE_DB` to override the path.
 - **`pi-telegram`** is a full Telegram bridge. Use `/telegram-setup`,
   `/telegram-status`, `/telegram-connect`, and `/telegram-disconnect`; the
   `telegram_attach` tool queues local files for the next reply. Configuration is stored

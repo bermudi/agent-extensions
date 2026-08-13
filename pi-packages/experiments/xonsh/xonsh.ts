@@ -24,8 +24,15 @@ import {
   type TruncationResult,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import {
+  closeUsage,
+  getUsageGeneration,
+  prepareUsageForSession,
+  recordExecution,
+} from "./xonsh-usage.ts";
 
 const XONSH_PACKAGE = "xonsh==0.24.1";
+const XONSH_VERSION = "0.24.1";
 const MAX_ROLLING_BYTES = DEFAULT_MAX_BYTES * 2;
 const MAX_DEPENDENCIES = 32;
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -399,9 +406,8 @@ async function executeXonsh(
   const timeoutMs = validateTimeout(options.timeout);
   validateDependencies(deps);
 
-  if (options.signal?.aborted) throw new Error("aborted");
-
   const startedAt = Date.now();
+  const usageGeneration = getUsageGeneration();
   logXonsh("start", {
     dependencies: deps.length,
     timeoutSeconds: options.timeout ?? "none",
@@ -411,9 +417,9 @@ async function executeXonsh(
   for (const dep of deps) args.push("--with", dep);
   args.push("--", "xonsh", "-c", command);
 
-  const outputFile = await openOutputFile();
-  const capture = new OutputCapture();
-  const updates = makeUpdateEmitter(capture, options.onOutput);
+  let outputFile: OutputFile | undefined;
+  let capture: OutputCapture | undefined;
+  let updates: ReturnType<typeof makeUpdateEmitter> | undefined;
   let keepOutputFile = false;
   let timedOut = false;
   let aborted = false;
@@ -422,6 +428,8 @@ async function executeXonsh(
   let fileError: Error | undefined;
   let streamError: Error | undefined;
   let child: ChildProcess | undefined;
+  let exitCode: number | null | undefined;
+  let failure: Error | undefined;
 
   const requestTermination = () => {
     if (terminationRequested || !child) return;
@@ -437,9 +445,22 @@ async function executeXonsh(
     streamError ??= error;
     requestTermination();
   };
-  outputFile.stream.on("error", onFileError);
 
   try {
+    const activeOutputFile = await openOutputFile();
+    outputFile = activeOutputFile;
+    const activeCapture = new OutputCapture();
+    capture = activeCapture;
+    const activeUpdates = makeUpdateEmitter(activeCapture, options.onOutput);
+    updates = activeUpdates;
+    const stream = activeOutputFile.stream;
+    stream.on("error", onFileError);
+
+    if (options.signal?.aborted) {
+      aborted = true;
+      throw new Error("aborted");
+    }
+
     child = spawn("uv", args, {
       cwd,
       detached: process.platform !== "win32",
@@ -449,17 +470,17 @@ async function executeXonsh(
     });
 
     // Keep the complete raw output on disk without growing the JS heap.
-    child.stdout?.pipe(outputFile.stream, { end: false });
-    child.stderr?.pipe(outputFile.stream, { end: false });
+    child.stdout?.pipe(stream, { end: false });
+    child.stderr?.pipe(stream, { end: false });
     child.stdout?.on("error", onOutputStreamError);
     child.stderr?.on("error", onOutputStreamError);
     child.stdout?.on("data", (data: Buffer) => {
-      capture.append("stdout", data);
-      updates.schedule();
+      activeCapture.append("stdout", data);
+      activeUpdates.schedule();
     });
     child.stderr?.on("data", (data: Buffer) => {
-      capture.append("stderr", data);
-      updates.schedule();
+      activeCapture.append("stderr", data);
+      activeUpdates.schedule();
     });
 
     const onAbort = () => {
@@ -480,7 +501,6 @@ async function executeXonsh(
 
     if (fileError) requestTermination();
 
-    let exitCode: number | null;
     try {
       exitCode = await waitForChildProcess(child);
     } finally {
@@ -489,24 +509,25 @@ async function executeXonsh(
       }
     }
 
-    child.stdout?.unpipe(outputFile.stream);
-    child.stderr?.unpipe(outputFile.stream);
-    await closeOutputFile(outputFile);
+    child.stdout?.unpipe(stream);
+    child.stderr?.unpipe(stream);
+    await closeOutputFile(activeOutputFile);
 
     if (fileError) throw fileError;
     if (streamError) throw streamError;
 
-    capture.finish();
-    updates.flush();
-    const snapshot = capture.snapshot();
+    activeCapture.finish();
+    activeUpdates.flush();
+    const snapshot = activeCapture.snapshot();
     keepOutputFile = snapshot.truncation.truncated;
 
     const result = {
       ...snapshot,
       exitCode,
       timedOut,
-      fullOutputPath: keepOutputFile ? outputFile.path : undefined,
+      fullOutputPath: keepOutputFile ? activeOutputFile.path : undefined,
     };
+
     if (aborted || options.signal?.aborted) {
       throw new Error(`${formatOutput(result)}\n\nCommand aborted`);
     }
@@ -524,24 +545,61 @@ async function executeXonsh(
     });
     return result;
   } catch (error) {
+    failure = error instanceof Error ? error : new Error(String(error));
     logXonsh("failed", {
       aborted,
       durationMs: Date.now() - startedAt,
-      reason: error instanceof Error ? error.name : "unknown",
+      reason: failure.name,
       timedOut,
     });
     throw error;
   } finally {
-    updates.stop();
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-    child?.stdout?.unpipe(outputFile.stream);
-    child?.stderr?.unpipe(outputFile.stream);
-    child?.stdout?.removeListener("error", onOutputStreamError);
-    child?.stderr?.removeListener("error", onOutputStreamError);
-    await closeOutputFile(outputFile);
-    outputFile.stream.removeListener("error", onFileError);
+    const effectiveAborted = aborted || options.signal?.aborted === true;
+    const status = effectiveAborted
+      ? "cancelled"
+      : timedOut
+        ? "timed_out"
+        : failure
+          ? "failed"
+          : exitCode === 0
+            ? "success"
+            : "failed";
 
-    if (!keepOutputFile) {
+    capture?.finish();
+    const snapshot = capture?.snapshot();
+    recordExecution(
+      {
+        xonshVersion: XONSH_VERSION,
+        cwd,
+        commandChars: command.length,
+        deps,
+        timeoutMs: timeoutMs ?? null,
+        wallMs: Date.now() - startedAt,
+        exitCode: exitCode ?? null,
+        timedOut,
+        aborted: effectiveAborted,
+        status,
+        outputBytes: snapshot?.truncation.totalBytes ?? 0,
+        outputLines: snapshot?.truncation.totalLines ?? 0,
+        truncated: snapshot?.truncation.truncated ?? false,
+        keptOutputFile: keepOutputFile,
+      },
+      usageGeneration,
+    );
+
+    updates?.stop();
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    const stream = outputFile?.stream;
+    if (stream) {
+      child?.stdout?.unpipe(stream);
+      child?.stderr?.unpipe(stream);
+      child?.stdout?.removeListener("error", onOutputStreamError);
+      child?.stderr?.removeListener("error", onOutputStreamError);
+      stream.removeListener("error", onFileError);
+    }
+    if (outputFile) await closeOutputFile(outputFile);
+
+    if (outputFile && !keepOutputFile) {
       await rm(outputFile.directory, { recursive: true, force: true });
     }
   }
@@ -572,6 +630,12 @@ function formatOutput(result: XonshExecutionResult): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  prepareUsageForSession();
+  const usageGeneration = getUsageGeneration();
+  pi.on("session_shutdown", () => {
+    closeUsage(usageGeneration);
+  });
+
   pi.registerTool({
     name: "xonsh",
     label: "xonsh",
