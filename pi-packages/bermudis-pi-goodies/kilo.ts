@@ -711,10 +711,14 @@ export default function kilo(pi: ExtensionAPI): void {
           lastFullCatalogCheckedAt = checkedAt;
           return models;
         } catch (error) {
-          console.warn(
-            "[kilo] refreshModels fetch failed:",
-            error instanceof Error ? error.message : error,
-          );
+          // Closing a picker or starting a newer refresh aborts the old request.
+          // That is expected lifecycle control, not a provider failure.
+          if (!context.signal?.aborted) {
+            console.warn(
+              "[kilo] refreshModels fetch failed:",
+              error instanceof Error ? error.message : error,
+            );
+          }
           return lastFullCatalog ?? KILO_FREE_MODELS;
         } finally {
           refreshInFlight = undefined;

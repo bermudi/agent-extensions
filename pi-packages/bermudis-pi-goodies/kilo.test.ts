@@ -119,6 +119,45 @@ describe("catalog refresh", () => {
     }
   });
 
+  test("does not warn when picker cancellation aborts a refresh", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalWarn = console.warn;
+    const warnings: unknown[][] = [];
+    let rejectFetch: ((error: Error) => void) | undefined;
+    globalThis.fetch = (() =>
+      new Promise<Response>((_resolve, reject) => {
+        rejectFetch = reject;
+      })) as typeof fetch;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+
+    try {
+      const provider = captureKiloProvider();
+      const refreshModels = provider.refreshModels;
+      if (!refreshModels)
+        throw new Error("Kilo refresh hook was not registered");
+
+      const controller = new AbortController();
+      const context = {
+        credential: { type: "api_key", key: "test-key" },
+        stored: undefined,
+        publish: async () => true,
+        allowNetwork: true,
+        signal: controller.signal,
+      } as unknown as Parameters<typeof refreshModels>[0];
+
+      const refresh = refreshModels(context);
+      await Promise.resolve();
+      controller.abort();
+      rejectFetch?.(new Error("This operation was aborted"));
+      await refresh;
+
+      expect(warnings).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.warn = originalWarn;
+    }
+  });
+
   test("uses the Pi 0.84 stored snapshot and publication API", async () => {
     const originalFetch = globalThis.fetch;
     let fetchCount = 0;
