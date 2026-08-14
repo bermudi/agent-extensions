@@ -1,14 +1,17 @@
 /**
  * claudish — provider layer.
  *
- * Rewrites go through one of three providers selected with CLAUDISH_PROVIDER,
- * mirroring the upstream plugin: local ollama (default), the Anthropic Messages
- * API, or any OpenAI-compatible /chat/completions endpoint. Everything fails
- * open: any error (provider down, timeout, missing key, bad response) returns
- * `{ ok: false }` and the caller keeps the original text untouched.
+ * Rewrites go through one of three API shapes selected with `provider`:
+ * local ollama (default), the Anthropic Messages API, or any OpenAI-compatible
+ * /chat/completions endpoint. Everything fails open: any error (provider down,
+ * timeout, missing key, bad response) returns `{ ok: false }` and the caller
+ * keeps the original text untouched.
+ *
+ * Auth keys are NOT read from config — the caller resolves them from pi's
+ * model registry at rewrite time and passes them via `RewriteOptions`.
  */
 
-import { MAX_INPUT_CHARS, type ClConfig } from "./config.ts";
+import { MAX_INPUT_CHARS, type ClConfig, type ClProvider } from "./config.ts";
 
 /** Minimal fetch shape so tests can inject fakes without implementing every member. */
 export type FetchLike = (
@@ -29,6 +32,15 @@ export interface RewriteOptions {
   timeoutMs: number;
   /** Injectable for tests; defaults to globalThis.fetch. */
   fetchImpl?: FetchLike;
+  /**
+   * Resolved provider for this call. When undefined, the caller must have
+   * already derived it from the session model (see index.ts).
+   */
+  provider: ClProvider;
+  /** Resolved model id for this call. */
+  model: string;
+  /** Resolved API key for anthropic/openai providers (from pi's model registry). */
+  apiKey?: string;
 }
 
 /** Cap on the user question passed as context. */
@@ -82,6 +94,7 @@ function timeoutSignal(timeoutMs: number): {
 
 async function ollamaRewrite(
   config: ClConfig,
+  model: string,
   prompt: string,
   timeoutMs: number,
   fetchImpl: FetchLike,
@@ -92,11 +105,11 @@ async function ollamaRewrite(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: config.model,
+        model,
         prompt,
         stream: false,
         think: false,
-        options: { num_predict: 2048 },
+        options: { num_predict: config.maxTokens },
       }),
       signal,
     });
@@ -117,12 +130,14 @@ async function ollamaRewrite(
 
 async function anthropicRewrite(
   config: ClConfig,
+  model: string,
+  apiKey: string | undefined,
   prompt: string,
   timeoutMs: number,
   fetchImpl: FetchLike,
 ): Promise<string | undefined> {
-  if (!config.anthropicKey) {
-    throw new Error("no API key (CLAUDISH_ANTHROPIC_KEY / ANTHROPIC_API_KEY)");
+  if (!apiKey) {
+    throw new Error("no API key resolved from pi model registry");
   }
   const { signal, clear } = timeoutSignal(timeoutMs);
   try {
@@ -130,11 +145,11 @@ async function anthropicRewrite(
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-api-key": config.anthropicKey,
+        "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: config.model,
+        model,
         max_tokens: config.maxTokens,
         messages: [{ role: "user", content: prompt }],
       }),
@@ -155,6 +170,8 @@ async function anthropicRewrite(
 
 async function openaiRewrite(
   config: ClConfig,
+  model: string,
+  apiKey: string | undefined,
   prompt: string,
   timeoutMs: number,
   fetchImpl: FetchLike,
@@ -162,8 +179,9 @@ async function openaiRewrite(
   const { signal, clear } = timeoutSignal(timeoutMs);
   try {
     const body: Record<string, unknown> = {
-      model: config.model,
+      model,
       messages: [{ role: "user", content: prompt }],
+      max_tokens: config.maxTokens,
     };
     if (config.openaiEffort !== undefined) {
       body.reasoning_effort = config.openaiEffort;
@@ -171,7 +189,7 @@ async function openaiRewrite(
     const headers: Record<string, string> = {
       "content-type": "application/json",
     };
-    if (config.openaiKey) headers.authorization = `Bearer ${config.openaiKey}`;
+    if (apiKey) headers.authorization = `Bearer ${apiKey}`;
 
     const res = await fetchImpl(`${config.openaiUrl}/chat/completions`, {
       method: "POST",
@@ -185,10 +203,12 @@ async function openaiRewrite(
         message?: {
           content?: string | Array<{ type?: string; text?: string }>;
         };
+        finish_reason?: string;
       }>;
-      finish_reason?: string;
     };
-    if (data.finish_reason === "length") return undefined;
+    // finish_reason lives on each choice, not at the top level. A rewrite
+    // that hits the output cap is discarded, not shown.
+    if (data.choices?.[0]?.finish_reason === "length") return undefined;
     const content = data.choices?.[0]?.message?.content;
     const text =
       typeof content === "string"
@@ -213,29 +233,51 @@ async function openaiRewrite(
 export async function rewrite(
   options: RewriteOptions,
 ): Promise<RewriteOutcome> {
-  const { config, text, userQuestion } = options;
+  const { config, text, userQuestion, provider, model, apiKey } = options;
   if (config.stub) {
     return { ok: true, text: stubRewrite(text) };
+  }
+  if (!model) {
+    return {
+      ok: false,
+      reason:
+        "no model resolved (set `model` in claudish.json or switch to a model pi knows)",
+    };
   }
 
   const prompt = buildPrompt(text, userQuestion);
   const fetchImpl: FetchLike = options.fetchImpl ?? globalThis.fetch;
   try {
     let out: string | undefined;
-    switch (config.provider) {
+    switch (provider) {
       case "ollama":
-        out = await ollamaRewrite(config, prompt, options.timeoutMs, fetchImpl);
+        out = await ollamaRewrite(
+          config,
+          model,
+          prompt,
+          options.timeoutMs,
+          fetchImpl,
+        );
         break;
       case "anthropic":
         out = await anthropicRewrite(
           config,
+          model,
+          apiKey,
           prompt,
           options.timeoutMs,
           fetchImpl,
         );
         break;
       case "openai":
-        out = await openaiRewrite(config, prompt, options.timeoutMs, fetchImpl);
+        out = await openaiRewrite(
+          config,
+          model,
+          apiKey,
+          prompt,
+          options.timeoutMs,
+          fetchImpl,
+        );
         break;
     }
     if (out === undefined) {

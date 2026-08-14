@@ -9,7 +9,13 @@
  * entry (which never participates in LLM context), so the assistant message
  * and the saved transcript keep the original text. An optional second hook
  * rewrites Markdown files into plain English when they are written or edited
- * (opt-in via CLAUDISH_MD_DIR; that hook does change bytes on disk).
+ * (opt-in via `mdDir` in the config file; that hook does change bytes on disk).
+ *
+ * Configuration lives in `<agentDir>/claudish.json` (no env vars). Auth is
+ * resolved from pi's model registry — the extension reuses the same API key
+ * pi already has for the provider. `model` and `provider` default to the
+ * session's active model, so claudish rewrites through the same model you're
+ * chatting with unless you pin a cheaper one in the config file.
  *
  * Every hook fails open — if anything goes wrong (provider down, timeout,
  * missing key), you simply see the original text.
@@ -20,6 +26,7 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+  getAgentDir,
   isEditToolResult,
   isWriteToolResult,
 } from "@earendil-works/pi-coding-agent";
@@ -34,8 +41,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { parseConfig, type ClConfig } from "./config.ts";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  CONFIG_FILENAME,
+  loadConfig,
+  mapProviderFromSession,
+  type ClConfig,
+  type ClProvider,
+} from "./config.ts";
 import { rewrite } from "./providers.ts";
 import {
   extractText,
@@ -47,9 +60,11 @@ import {
 
 // ── Module state ───────────────────────────────────────────────────────────
 
-/** Config is read from the env once per session (mirrors the plugin). */
+/** Config path, resolved once at factory invocation. */
+let configPath: string;
+/** Cached config, loaded at session_start. */
 let config: ClConfig | undefined;
-/** Once-per-session skip notice, like the plugin's CLAUDISH_NOTICE. */
+/** Once-per-session skip notice. */
 let noticeShown = false;
 
 /** Marker written after the frontmatter in overwrite mode (idempotent). */
@@ -64,7 +79,7 @@ interface RewriteEntryData {
 }
 
 function getConfig(): ClConfig {
-  if (!config) config = parseConfig(process.env);
+  if (!config) config = loadConfig(configPath).config;
   return config;
 }
 
@@ -151,6 +166,42 @@ function writeAtomic(target: string, content: string): void {
   }
 }
 
+// ── Runtime resolution ─────────────────────────────────────────────────────
+
+/**
+ * Resolve the provider, model, and API key for a rewrite call, using the
+ * config file's values when set and falling back to the session's active
+ * model otherwise. Auth comes from pi's model registry, never from config.
+ */
+async function resolveRuntime(
+  cfg: ClConfig,
+  ctx: ExtensionContext,
+): Promise<{
+  provider: ClProvider;
+  model: string;
+  apiKey: string | undefined;
+}> {
+  const sessionModel = ctx.model;
+  const sessionProvider = sessionModel?.provider;
+
+  const provider: ClProvider =
+    cfg.provider ?? mapProviderFromSession(sessionProvider) ?? "ollama";
+  const model: string = cfg.model ?? sessionModel?.id ?? "";
+
+  // Resolve auth from pi's model registry for cloud providers. Ollama is
+  // local and keyless.
+  let apiKey: string | undefined;
+  if (provider === "anthropic" || provider === "openai") {
+    try {
+      apiKey = await ctx.modelRegistry.getApiKeyForProvider(provider);
+    } catch {
+      // fail open — rewrite will report the missing key
+    }
+  }
+
+  return { provider, model, apiKey };
+}
+
 // ── Rewrite flows ──────────────────────────────────────────────────────────
 
 async function runDisplayRewrite(
@@ -161,11 +212,15 @@ async function runDisplayRewrite(
   question: string | undefined,
 ): Promise<void> {
   debugLog(cfg, `display: rewriting assistant message (${text.length} chars)`);
+  const { provider, model, apiKey } = await resolveRuntime(cfg, ctx);
   const outcome = await rewrite({
     config: cfg,
     text,
     userQuestion: question,
     timeoutMs: cfg.displayTimeoutMs,
+    provider,
+    model,
+    apiKey,
   });
   if (!outcome.ok) {
     debugLog(cfg, `display: skipped — ${outcome.reason}`);
@@ -191,10 +246,14 @@ async function runMdRewrite(
   body: string,
 ): Promise<void> {
   debugLog(cfg, `md: rewriting ${absPath}`);
+  const { provider, model, apiKey } = await resolveRuntime(cfg, ctx);
   const outcome = await rewrite({
     config: cfg,
     text: body,
     timeoutMs: cfg.mdTimeoutMs,
+    provider,
+    model,
+    apiKey,
   });
   if (!outcome.ok) {
     debugLog(cfg, `md: skipped — ${outcome.reason}`);
@@ -220,10 +279,17 @@ async function runMdRewrite(
 
 // ── Extension ──────────────────────────────────────────────────────────────
 
-export default function (pi: ExtensionAPI) {
-  // Read env once per session; reset the once-per-session notice.
+export interface ClaudishOptions {
+  /** Internal seam used by tests; normal callers use Pi's global agent dir. */
+  configPath?: string;
+}
+
+export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
+  configPath = options.configPath ?? join(getAgentDir(), CONFIG_FILENAME);
+
+  // Read config at session start; reset the once-per-session notice.
   pi.on("session_start", () => {
-    config = parseConfig(process.env);
+    config = loadConfig(configPath).config;
     noticeShown = false;
   });
 
@@ -262,7 +328,7 @@ export default function (pi: ExtensionAPI) {
     void runDisplayRewrite(pi, ctx, cfg, text, question);
   });
 
-  // Markdown file hook (opt-in via CLAUDISH_MD_DIR): rewrite *.md files
+  // Markdown file hook (opt-in via mdDir in config): rewrite *.md files
   // written or edited inside the directory. This hook does change bytes.
   pi.on("tool_result", async (event, ctx) => {
     const cfg = getConfig();
@@ -277,7 +343,13 @@ export default function (pi: ExtensionAPI) {
 
     const abs = resolve(ctx.cwd, relPath);
     if (!isMarkdownPath(abs)) return;
-    if (!isInside(cfg.mdDir, abs)) return;
+    // Resolve a relative mdDir against the session cwd, not the process cwd
+    // (they can differ). Absolute paths (the common case, including any
+    // ~/expanded value) are used as-is.
+    const mdDir = isAbsolute(cfg.mdDir)
+      ? cfg.mdDir
+      : resolve(ctx.cwd, cfg.mdDir);
+    if (!isInside(mdDir, abs)) return;
 
     let content: string;
     try {
@@ -327,10 +399,16 @@ export default function (pi: ExtensionAPI) {
         const state = isKillSwitched(cfg)
           ? "paused (off file present)"
           : "active";
-        ctx.ui.notify(
-          `claudish: ${state} — ${cfg.provider}/${cfg.model}`,
-          "info",
-        );
+        const sessionModel = ctx.model;
+        const provider =
+          cfg.provider ??
+          mapProviderFromSession(sessionModel?.provider) ??
+          "ollama";
+        const modelLabel =
+          cfg.model ??
+          sessionModel?.id ??
+          "(no model — switch to a model or set `model` in claudish.json)";
+        ctx.ui.notify(`claudish: ${state} — ${provider}/${modelLabel}`, "info");
       }
     },
   });
