@@ -218,11 +218,19 @@ export default function modelThinking(
   }
 
   pi.on("model_select", (event, ctx) => {
-    apply(ctx, event.source === "restore");
+    // When Pi restores a model from session history (e.g. resume/fork), keep
+    // the thinking level that was active in that session instead of
+    // overwriting it with the per-model default.
+    if (event.source === "restore") return;
+    apply(ctx, false);
   });
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
     if (!ctx.model) return;
+    // Resumed or forked sessions already carry their last thinking level
+    // (restored by Pi from the session's branch). Don't clobber it with
+    // the per-model default; the default only applies to fresh sessions.
+    if (event.reason === "resume" || event.reason === "fork") return;
     apply(ctx, true);
   });
 
