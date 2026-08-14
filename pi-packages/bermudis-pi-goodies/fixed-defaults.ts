@@ -15,11 +15,21 @@ import {
 const CONFIG_FILENAME = "fixed-defaults.json";
 
 /**
- * Model active in the session being replaced by `/new`, captured during
- * `session_before_switch`. The factory is re-invoked per session, so this must
- * live at module scope to survive the switch to the new extension instance.
+ * Model and thinking level active in the session being replaced by `/new`,
+ * captured during `session_before_switch`. The factory is re-invoked per
+ * session, so this must live at module scope to survive the switch to the new
+ * extension instance.
  */
-let previousModelForNewSession: { provider: string; id: string } | null = null;
+let previousModelForNewSession: PreviousSessionModel | null = null;
+
+/** Model + thinking level snapshot taken when `/new` replaces a session. */
+interface PreviousSessionModel {
+  provider: string;
+  id: string;
+  thinkingLevel: ThinkingLevel;
+}
+
+type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 /**
  * Values read from the override file. `provider` and `model` are a coupled
  * pair — a model id is meaningless without its provider, so both must be
@@ -233,13 +243,13 @@ export default function fixedDefaults(
   }
 
   /**
-   * Restore the model that was active before `/new`. Unlike the pin, this only
-   * applies to the session being created, so the next fresh `pi` still starts
-   * from the pin.
+   * Restore the model and thinking level that were active before `/new`.
+   * Unlike the pin, this only applies to the session being created, so the
+   * next fresh `pi` still starts from the pin.
    */
   async function restorePreviousModel(
     ctx: ExtensionContext,
-    previous: { provider: string; id: string } | null,
+    previous: PreviousSessionModel | null,
   ): Promise<void> {
     if (!previous) return;
     const model = ctx.modelRegistry.find(previous.provider, previous.id);
@@ -247,7 +257,13 @@ export default function fixedDefaults(
     // setModel writes the restored model to settings.json, then its model_select
     // notification re-applies the pin afterwards (see restorePinnedModel), so
     // the active session keeps the previous model while the pin survives.
-    await pi.setModel(model);
+    // That same notification can re-apply a per-model thinking policy
+    // (model-thinking.ts), so the captured level is only restored after
+    // setModel resolves — its emit is awaited, giving this the final word.
+    // setThinkingLevel clamps to the restored model's capabilities.
+    const applied = await pi.setModel(model);
+    if (!applied) return;
+    pi.setThinkingLevel(previous.thinkingLevel);
   }
 
   function enqueue<T>(
@@ -276,8 +292,9 @@ export default function fixedDefaults(
 
   pi.on("session_start", (event, ctx) => {
     // `/new` has already selected a model (the pinned default) by the time this
-    // fires, so set the model that was active before the switch here. The
-    // resulting model_select notification re-applies the pin in settings.json.
+    // fires, so restore the model and thinking level that were active before
+    // the switch here. The resulting model_select notification re-applies the
+    // pin in settings.json.
     if (event.reason === "new") {
       const previous = previousModelForNewSession;
       previousModelForNewSession = null;
@@ -300,7 +317,11 @@ export default function fixedDefaults(
     if (event.reason === "new") {
       const model = ctx.model;
       previousModelForNewSession = model
-        ? { provider: model.provider, id: model.id }
+        ? {
+            provider: model.provider,
+            id: model.id,
+            thinkingLevel: pi.getThinkingLevel(),
+          }
         : null;
     }
   });

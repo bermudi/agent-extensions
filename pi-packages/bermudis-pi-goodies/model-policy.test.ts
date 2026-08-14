@@ -224,7 +224,10 @@ describe("model policy extensions", () => {
 
     const pi = new PiHarness(paths.settingsPath, "low");
     registerPolicies(pi, paths);
-    const activeContext = context(paths.cwd, model("anthropic", "claude-sonnet-4"));
+    const activeContext = context(
+      paths.cwd,
+      model("anthropic", "claude-sonnet-4"),
+    );
     await pi.commands.get("fixed-defaults")!("set", activeContext);
 
     expect(readSettings(paths.fixedDefaultsPath)).toEqual({

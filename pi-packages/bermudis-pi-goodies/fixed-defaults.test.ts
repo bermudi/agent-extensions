@@ -67,6 +67,18 @@ class PiHarness {
   readonly commands = new Map<string, CommandHandler>();
 
   setModelCalls: Array<{ provider: string; id: string }> = [];
+  /** Value setModel resolves with; false simulates "no auth for provider". */
+  setModelResult = true;
+  setThinkingLevelCalls: Array<ReturnType<ExtensionAPI["getThinkingLevel"]>> =
+    [];
+  /**
+   * When true, setModel emits model_select synchronously inside the call, like
+   * the real runtime does — policy hooks registered for that event then run
+   * before setModel resolves.
+   */
+  emitModelSelectOnSet = false;
+  /** Context used for events emitted from within setModel. */
+  ctxForEvents: ExtensionContext | null = null;
 
   readonly api = {
     on: (event: string, handler: Handler) => {
@@ -78,9 +90,20 @@ class PiHarness {
       this.commands.set(name, command.handler);
     },
     getThinkingLevel: () => this.level,
+    setThinkingLevel: (level: ReturnType<ExtensionAPI["getThinkingLevel"]>) => {
+      this.level = level;
+      this.setThinkingLevelCalls.push(level);
+    },
     setModel: async (model: { provider: string; id: string }) => {
       this.setModelCalls.push({ provider: model.provider, id: model.id });
-      return true;
+      if (this.emitModelSelectOnSet && this.ctxForEvents) {
+        await this.emit(
+          "model_select",
+          { model, previousModel: undefined, source: "set" },
+          this.ctxForEvents,
+        );
+      }
+      return this.setModelResult;
     },
   } as unknown as ExtensionAPI;
 
@@ -314,6 +337,119 @@ describe("fixed-defaults", () => {
       defaultProvider: "zai",
       defaultModel: "glm-5.2",
     });
+  });
+
+  test("session_start with reason new restores the previous thinking level", async () => {
+    const { agentDir, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+
+    // The session being replaced runs zai/glm-5.2 at medium.
+    pi.level = "medium";
+    await pi.emit(
+      "session_before_switch",
+      { reason: "new" },
+      context(ctx.cwd, { model: model("zai", "glm-5.2") }),
+    );
+
+    // The /new runtime starts on the pinned default at whatever level
+    // settings/policy gave it.
+    pi.level = "low";
+    await pi.emit(
+      "session_start",
+      { reason: "new", previousSessionFile: "/tmp/old.jsonl" },
+      context(ctx.cwd, { model: model("zai", "glm-5.2") }),
+    );
+
+    expect(pi.setModelCalls).toEqual([{ provider: "zai", id: "glm-5.2" }]);
+    expect(pi.setThinkingLevelCalls).toEqual(["medium"]);
+    expect(pi.level).toBe("medium");
+  });
+
+  test("session_start with reason new re-applies the captured level after model_select hooks ran", async () => {
+    const { agentDir, pi, ctx } = setup();
+
+    // Simulate model-thinking: registered before fixed-defaults, it applies a
+    // per-model policy on every model_select — including the one pi.setModel
+    // emits while restoring the previous model.
+    pi.api.on("model_select", () => {
+      pi.api.setThinkingLevel("minimal");
+    });
+    fixedDefaults(pi.api, { agentDir });
+
+    pi.level = "xhigh";
+    await pi.emit(
+      "session_before_switch",
+      { reason: "new" },
+      context(ctx.cwd, { model: model("anthropic", "claude-sonnet-4") }),
+    );
+
+    // setModel emits model_select before resolving, like the real runtime.
+    pi.emitModelSelectOnSet = true;
+    pi.ctxForEvents = context(ctx.cwd, {
+      model: model("anthropic", "claude-sonnet-4"),
+    });
+    pi.level = "low";
+    await pi.emit(
+      "session_start",
+      { reason: "new", previousSessionFile: "/tmp/old.jsonl" },
+      pi.ctxForEvents,
+    );
+
+    expect(pi.setModelCalls).toEqual([
+      { provider: "anthropic", id: "claude-sonnet-4" },
+    ]);
+    // The policy hook clobbered to "minimal" inside setModel; the restore then
+    // re-applied the captured level. Last write wins.
+    expect(pi.setThinkingLevelCalls).toEqual(["minimal", "xhigh"]);
+    expect(pi.level).toBe("xhigh");
+  });
+
+  test("session_start with reason new leaves the level alone when the model cannot be set", async () => {
+    const { agentDir, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+
+    pi.level = "medium";
+    await pi.emit(
+      "session_before_switch",
+      { reason: "new" },
+      context(ctx.cwd, { model: model("zai", "glm-5.2") }),
+    );
+
+    pi.setModelResult = false; // e.g. no API key for the previous provider
+    pi.level = "low";
+    await pi.emit(
+      "session_start",
+      { reason: "new", previousSessionFile: "/tmp/old.jsonl" },
+      context(ctx.cwd, { model: model("zai", "glm-5.2") }),
+    );
+
+    expect(pi.setModelCalls).toEqual([{ provider: "zai", id: "glm-5.2" }]);
+    expect(pi.setThinkingLevelCalls).toEqual([]);
+    expect(pi.level).toBe("low");
+  });
+
+  test("session_start with reason new skips the restore when the previous model is unavailable", async () => {
+    const { agentDir, pi, ctx } = setup();
+    fixedDefaults(pi.api, { agentDir });
+
+    pi.level = "medium";
+    await pi.emit(
+      "session_before_switch",
+      { reason: "new" },
+      context(ctx.cwd, { model: model("zai", "glm-5.2") }),
+    );
+
+    pi.level = "low";
+    await pi.emit(
+      "session_start",
+      { reason: "new", previousSessionFile: "/tmp/old.jsonl" },
+      context(ctx.cwd, {
+        modelRegistry: { find: () => undefined },
+      }),
+    );
+
+    expect(pi.setModelCalls).toEqual([]);
+    expect(pi.setThinkingLevelCalls).toEqual([]);
   });
 
   test("session_start with reason new leaves the pin when no previous model was captured", async () => {
