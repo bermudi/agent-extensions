@@ -75,6 +75,22 @@ const COLLAPSED_MAX_LINES = 14;
 interface RewriteEntryData {
   text: string;
   at: number;
+  /** While true the entry renders a loading placeholder. Flipped to false when the real text lands. */
+  pending?: boolean;
+}
+
+/** Live Text refs for pending placeholders so we can mutate them in place without a new entry. */
+const pendingPlaceholders = new Map<number, { box: Box; body: Text; header: Text }>();
+
+function requestRender(ctx: ExtensionContext): void {
+  try {
+    // Any status change forces the TUI to requestRender, which re-renders the
+    // chat container including our mutated Text nodes. Use a throwaway key.
+    ctx.ui.setStatus("claudish-refresh", "·");
+    ctx.ui.setStatus("claudish-refresh", undefined);
+  } catch {
+    // No UI (print/json mode or tests) — nothing to invalidate.
+  }
 }
 
 function getConfig(): ClConfig {
@@ -221,6 +237,23 @@ async function runDisplayRewrite(
   text: string,
   question: string | undefined,
 ): Promise<void> {
+  // Show a placeholder immediately so the user sees feedback before the LLM
+  // round-trip completes (the old flow only appended after the rewrite, leaving
+  // ~5-10s of silence). The placeholder is a single custom entry that we
+  // mutate in place when the real text lands, so no second entry is needed.
+  // Add a fractional random to avoid at collisions when two messages settle
+  // in the same millisecond (map key would otherwise overwrite).
+  const at = Date.now() + Math.random();
+  const placeholderData: RewriteEntryData = { text: "", at, pending: true };
+  let placeholderAppended = false;
+  try {
+    pi.appendEntry<RewriteEntryData>(ENTRY_TYPE, placeholderData);
+    placeholderAppended = true;
+    debugLog(cfg, `display: placeholder appended for ${text.length} chars`);
+  } catch (err) {
+    debugLog(cfg, `display: failed to append placeholder — ${errMessage(err)}`);
+  }
+
   debugLog(cfg, `display: rewriting assistant message (${text.length} chars)`);
   let outcome: RewriteOutcome;
   if (cfg.provider) {
@@ -245,11 +278,90 @@ async function runDisplayRewrite(
       registry: ctx.modelRegistry,
     });
   }
+
+  const pending = pendingPlaceholders.get(at);
+
   if (!outcome.ok) {
     debugLog(cfg, `display: skipped — ${outcome.reason}`);
     maybeNotice(ctx, cfg, outcome.reason);
+    // Fail-open: hide the placeholder so the original text stands alone.
+    if (pending) {
+      try {
+        pending.body.setText("");
+        pending.header.setText("");
+        pending.box.invalidate();
+        requestRender(ctx);
+      } catch {}
+      pendingPlaceholders.delete(at);
+    } else if (placeholderAppended) {
+      // Headless / test harness: no live component, mutate the placeholder
+      // object directly (same ref as in appended[] / sessionManager).
+      placeholderData.text = "";
+      placeholderData.pending = false;
+    }
+    // Persist the hidden state so a reload doesn't resurrect the spinner.
+    try {
+      const entries = ctx.sessionManager.getEntries();
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i] as unknown as { type: string; customType?: string; data?: RewriteEntryData };
+        if (e.type === "custom" && e.customType === ENTRY_TYPE && e.data?.at === at) {
+          e.data.pending = false;
+          e.data.text = "";
+          break;
+        }
+      }
+    } catch {}
     return;
   }
+
+  // Success: populate the placeholder in place.
+  if (pending) {
+    try {
+      // Persist for reloads / export.
+      const entries = ctx.sessionManager.getEntries();
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i] as unknown as { type: string; customType?: string; data?: RewriteEntryData };
+        if (e.type === "custom" && e.customType === ENTRY_TYPE && e.data?.at === at) {
+          e.data.text = outcome.text;
+          e.data.pending = false;
+          break;
+        }
+      }
+    } catch {}
+    try {
+      // Show truncated in the collapsed view; the full text is in data.text
+      // so a future rebuild (expand toggle, theme change) renders correctly.
+      const collapsed = truncateLines(outcome.text, COLLAPSED_MAX_LINES);
+      pending.body.setText(collapsed);
+      pending.box.invalidate();
+      requestRender(ctx);
+    } catch {}
+    pendingPlaceholders.delete(at);
+    debugLog(cfg, `display: populated placeholder (${outcome.text.length} chars)`);
+    return;
+  }
+
+  if (placeholderAppended) {
+    // No live component (headless / tests) — mutate the placeholder we already
+    // appended. This keeps the invariant of one entry per rewrite.
+    placeholderData.text = outcome.text;
+    placeholderData.pending = false;
+    try {
+      const entries = ctx.sessionManager.getEntries();
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i] as unknown as { type: string; customType?: string; data?: RewriteEntryData };
+        if (e.type === "custom" && e.customType === ENTRY_TYPE && e.data?.at === at) {
+          e.data.text = outcome.text;
+          e.data.pending = false;
+          break;
+        }
+      }
+    } catch {}
+    debugLog(cfg, `display: populated placeholder (headless, ${outcome.text.length} chars)`);
+    return;
+  }
+
+  // Placeholder never appended (shouldn't happen) — fall back to appending.
   try {
     pi.appendEntry<RewriteEntryData>(ENTRY_TYPE, {
       text: outcome.text,
@@ -326,14 +438,40 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
   pi.on("session_start", () => {
     config = loadConfig(configPath).config;
     noticeShown = false;
+    pendingPlaceholders.clear();
+    lastHandledText = undefined;
+    lastHandledAt = 0;
   });
 
   // The rewrite block: a custom entry that renders in the TUI but never
   // participates in LLM context, so the transcript keeps the original text.
+  // While pending it shows a spinner; once the rewrite lands the same entry
+  // is mutated in place (no second entry) and the TUI is nudged to re-render.
   pi.registerEntryRenderer<RewriteEntryData>(
     ENTRY_TYPE,
     (entry, { expanded }, theme) => {
       const data = entry.data ?? { text: "", at: 0 };
+      if (data.pending) {
+        const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
+        const header = new Text(
+          theme.fg("accent", theme.bold("💬 In plain English:")),
+          0,
+          0,
+        );
+        box.addChild(header);
+        const body = new Text(
+          theme.fg("muted", "⏳ Translating to plain English…"),
+          0,
+          0,
+        );
+        box.addChild(body);
+        pendingPlaceholders.set(data.at, { box, body, header });
+        return box;
+      }
+      // Hidden placeholder (failed rewrite) — render nothing but keep the
+      // entry so the session stays append-only; the Spacer in
+      // CustomEntryComponent will still add one blank line which is harmless.
+      if (!data.text) return undefined;
       const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
       box.addChild(
         new Text(theme.fg("accent", theme.bold("💬 In plain English:")), 0, 0),
@@ -346,21 +484,59 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
     },
   );
 
-  // Display hook: after an assistant message completes, rewrite it in the
-  // background and append the result. Fire-and-forget so the stream and the
-  // agent loop are never blocked on the rewriter.
-  pi.on("message_end", async (event, ctx) => {
+  // Deduplicate message_end vs agent_settled for the same final message.
+  let lastHandledText: string | undefined;
+  let lastHandledAt = 0;
+
+  async function handleAssistantText(
+    text: string,
+    ctx: ExtensionContext,
+  ): Promise<void> {
     const cfg = getConfig();
     if (!cfg.enabled || isKillSwitched(cfg)) return;
-    if (event.message.role !== "assistant") return;
-    // Skip error messages and pure tool-calling messages.
-    if ((event.message as { errorMessage?: unknown }).errorMessage) return;
-
-    const text = extractText(event.message.content).trim();
     if (!text || proseLength(text) < cfg.minChars) return;
-
+    // Avoid double placeholder for the same final message (message_end + agent_settled).
+    const now = Date.now();
+    if (text === lastHandledText && now - lastHandledAt < 5000) return;
+    lastHandledText = text;
+    lastHandledAt = now;
     const question = findLastUserQuestion(ctx);
     void runDisplayRewrite(pi, ctx, cfg, text, question);
+  }
+
+  // Display hook: after an assistant message completes, show a placeholder
+  // immediately and rewrite in the background. Fire-and-forget so the stream
+  // and the agent loop are never blocked.
+  pi.on("message_end", async (event, ctx) => {
+    if (event.message.role !== "assistant") return;
+    if ((event.message as { errorMessage?: unknown }).errorMessage) return;
+    const text = extractText(event.message.content).trim();
+    await handleAssistantText(text, ctx);
+  });
+
+  // Also trigger on agent_settled so the placeholder appears as soon as the
+  // agent is idle, even if the final message was streamed in chunks. The
+  // deduplication above prevents a second placeholder for the same text.
+  pi.on("agent_settled", async (_event, ctx) => {
+    let lastText: string | undefined;
+    try {
+      const entries = ctx.sessionManager.getEntries();
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i] as unknown as {
+          type: string;
+          message?: { role: string; content: unknown; errorMessage?: unknown };
+        };
+        if (e.type === "message" && e.message?.role === "assistant" && !e.message.errorMessage) {
+          const t = extractText(e.message.content).trim();
+          if (t && proseLength(t) >= getConfig().minChars) {
+            lastText = t;
+            break;
+          }
+        }
+      }
+    } catch {}
+    if (!lastText) return;
+    await handleAssistantText(lastText, ctx);
   });
 
   // Markdown file hook (opt-in via mdDir in config): rewrite *.md files
