@@ -27,13 +27,15 @@ export interface ClConfig {
   /** Kill-switch flag file path (default ~/.claude/claudish-off). */
   offFile: string;
   /**
-   * Which LLM API shape to use. When absent, derived from the session
-   * model's provider at rewrite time (see mapProviderFromSession).
+   * Which LLM API shape to use. When absent, claudish reuses the current
+   * pi model via ModelRegistry.complete — whatever model you're chatting
+   * with. Set provider explicitly ("ollama" | "anthropic" | "openai")
+   * only to override the model and hit a specific API shape / URL.
    */
   provider: ClProvider | undefined;
   /**
    * Model name. When absent, defaults to the session model's id at
-   * rewrite time.
+   * rewrite time (pi path) or the model string sent to the provider API.
    */
   model: string | undefined;
   /** ollama base URL. */
@@ -159,6 +161,9 @@ function clampNonNegativeInt(
 
 /**
  * Map a pi session model provider name to a claudish provider (API shape).
+ * Used only for the /claudish status display and for explicit provider
+ * overrides. The default rewrite path no longer uses this — it calls the
+ * current pi model directly via ModelRegistry, so any provider works.
  * Returns undefined when the provider doesn't map to a known API shape.
  */
 export function mapProviderFromSession(

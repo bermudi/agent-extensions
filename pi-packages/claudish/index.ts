@@ -1,7 +1,8 @@
 /**
  * claudish — a Pi extension that shows a plain-English rewrite of each
- * assistant message, produced by a local LLM via ollama (default), the
- * Anthropic API, or any OpenAI-compatible API.
+ * assistant message, produced by the current pi model by default (whatever
+ * you're chatting with), or optionally via ollama, the Anthropic API, or
+ * any OpenAI-compatible API.
  *
  * Port of the Claude Code plugin gvzdv/claudish-to-english.
  *
@@ -11,11 +12,10 @@
  * rewrites Markdown files into plain English when they are written or edited
  * (opt-in via `mdDir` in the config file; that hook does change bytes on disk).
  *
- * Configuration lives in `<agentDir>/claudish.json` (no env vars). Auth is
- * resolved from pi's model registry — the extension reuses the same API key
- * pi already has for the provider. `model` and `provider` default to the
- * session's active model, so claudish rewrites through the same model you're
- * chatting with unless you pin a cheaper one in the config file.
+ * Configuration lives in `<agentDir>/claudish.json` (no env vars). By default
+ * both `model` and `provider` are absent and claudish reuses the session's
+ * active model via ModelRegistry. Pin them in the config file to override.
+ * When provider is set explicitly, auth is resolved from pi's model registry.
  *
  * Every hook fails open — if anything goes wrong (provider down, timeout,
  * missing key), you simply see the original text.
@@ -45,11 +45,10 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
   CONFIG_FILENAME,
   loadConfig,
-  mapProviderFromSession,
   type ClConfig,
   type ClProvider,
 } from "./config.ts";
-import { rewrite } from "./providers.ts";
+import { rewrite, rewriteViaPi, type RewriteOutcome } from "./providers.ts";
 import {
   extractText,
   isInside,
@@ -168,12 +167,27 @@ function writeAtomic(target: string, content: string): void {
 
 // ── Runtime resolution ─────────────────────────────────────────────────────
 
+/** Resolve the pi model to use when provider is not pinned. */
+function resolvePiModel(
+  cfg: ClConfig,
+  ctx: ExtensionContext,
+): NonNullable<ExtensionContext["model"]> | undefined {
+  if (cfg.model) {
+    const found = ctx.modelRegistry
+      .getAll()
+      .find((m) => (m as { id: string }).id === cfg.model);
+    if (found) return found as NonNullable<ExtensionContext["model"]>;
+    return undefined;
+  }
+  return ctx.model as NonNullable<ExtensionContext["model"]> | undefined;
+}
+
 /**
- * Resolve the provider, model, and API key for a rewrite call, using the
- * config file's values when set and falling back to the session's active
- * model otherwise. Auth comes from pi's model registry, never from config.
+ * Resolve the provider, model, and API key for the explicit fetch path
+ * (when cfg.provider is set). Auth comes from pi's model registry, never
+ * from config.
  */
-async function resolveRuntime(
+async function resolveFetchRuntime(
   cfg: ClConfig,
   ctx: ExtensionContext,
 ): Promise<{
@@ -181,12 +195,8 @@ async function resolveRuntime(
   model: string;
   apiKey: string | undefined;
 }> {
-  const sessionModel = ctx.model;
-  const sessionProvider = sessionModel?.provider;
-
-  const provider: ClProvider =
-    cfg.provider ?? mapProviderFromSession(sessionProvider) ?? "ollama";
-  const model: string = cfg.model ?? sessionModel?.id ?? "";
+  const provider = cfg.provider as ClProvider;
+  const model: string = cfg.model ?? ctx.model?.id ?? "";
 
   // Resolve auth from pi's model registry for cloud providers. Ollama is
   // local and keyless.
@@ -212,16 +222,29 @@ async function runDisplayRewrite(
   question: string | undefined,
 ): Promise<void> {
   debugLog(cfg, `display: rewriting assistant message (${text.length} chars)`);
-  const { provider, model, apiKey } = await resolveRuntime(cfg, ctx);
-  const outcome = await rewrite({
-    config: cfg,
-    text,
-    userQuestion: question,
-    timeoutMs: cfg.displayTimeoutMs,
-    provider,
-    model,
-    apiKey,
-  });
+  let outcome: RewriteOutcome;
+  if (cfg.provider) {
+    const { provider, model, apiKey } = await resolveFetchRuntime(cfg, ctx);
+    outcome = await rewrite({
+      config: cfg,
+      text,
+      userQuestion: question,
+      timeoutMs: cfg.displayTimeoutMs,
+      provider,
+      model,
+      apiKey,
+    });
+  } else {
+    const target = resolvePiModel(cfg, ctx);
+    outcome = await rewriteViaPi({
+      config: cfg,
+      text,
+      userQuestion: question,
+      timeoutMs: cfg.displayTimeoutMs,
+      model: target,
+      registry: ctx.modelRegistry,
+    });
+  }
   if (!outcome.ok) {
     debugLog(cfg, `display: skipped — ${outcome.reason}`);
     maybeNotice(ctx, cfg, outcome.reason);
@@ -246,15 +269,27 @@ async function runMdRewrite(
   body: string,
 ): Promise<void> {
   debugLog(cfg, `md: rewriting ${absPath}`);
-  const { provider, model, apiKey } = await resolveRuntime(cfg, ctx);
-  const outcome = await rewrite({
-    config: cfg,
-    text: body,
-    timeoutMs: cfg.mdTimeoutMs,
-    provider,
-    model,
-    apiKey,
-  });
+  let outcome: RewriteOutcome;
+  if (cfg.provider) {
+    const { provider, model, apiKey } = await resolveFetchRuntime(cfg, ctx);
+    outcome = await rewrite({
+      config: cfg,
+      text: body,
+      timeoutMs: cfg.mdTimeoutMs,
+      provider,
+      model,
+      apiKey,
+    });
+  } else {
+    const target = resolvePiModel(cfg, ctx);
+    outcome = await rewriteViaPi({
+      config: cfg,
+      text: body,
+      timeoutMs: cfg.mdTimeoutMs,
+      model: target,
+      registry: ctx.modelRegistry,
+    });
+  }
   if (!outcome.ok) {
     debugLog(cfg, `md: skipped — ${outcome.reason}`);
     maybeNotice(ctx, cfg, outcome.reason);
@@ -400,15 +435,17 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
           ? "paused (off file present)"
           : "active";
         const sessionModel = ctx.model;
-        const provider =
-          cfg.provider ??
-          mapProviderFromSession(sessionModel?.provider) ??
-          "ollama";
+        const providerLabel = cfg.provider ?? "pi";
         const modelLabel =
           cfg.model ??
           sessionModel?.id ??
           "(no model — switch to a model or set `model` in claudish.json)";
-        ctx.ui.notify(`claudish: ${state} — ${provider}/${modelLabel}`, "info");
+        const detail = cfg.provider
+          ? `${providerLabel}/${modelLabel}`
+          : sessionModel
+            ? `pi:${sessionModel.provider}/${modelLabel}`
+            : `pi/${modelLabel}`;
+        ctx.ui.notify(`claudish: ${state} — ${detail}`, "info");
       }
     },
   });

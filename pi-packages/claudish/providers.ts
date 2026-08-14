@@ -1,16 +1,22 @@
 /**
  * claudish — provider layer.
  *
- * Rewrites go through one of three API shapes selected with `provider`:
- * local ollama (default), the Anthropic Messages API, or any OpenAI-compatible
- * /chat/completions endpoint. Everything fails open: any error (provider down,
- * timeout, missing key, bad response) returns `{ ok: false }` and the caller
- * keeps the original text untouched.
+ * Rewrites go through one of four paths:
+ *  - "pi" (default): the current pi model via ModelRegistry.complete —
+ *    whatever provider/model you're chatting with, no extra wiring.
+ *  - "ollama": local ollama /api/generate
+ *  - "anthropic": the Anthropic Messages API
+ *  - "openai": any OpenAI-compatible /chat/completions endpoint
+ * Everything fails open: any error (provider down, timeout, missing key,
+ * bad response) returns `{ ok: false }` and the caller keeps the original
+ * text untouched.
  *
- * Auth keys are NOT read from config — the caller resolves them from pi's
- * model registry at rewrite time and passes them via `RewriteOptions`.
+ * For the "pi" path auth and routing come from pi's model registry.
+ * For the fetch paths auth keys are resolved from pi's registry at rewrite
+ * time and passed via `RewriteOptions`.
  */
 
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MAX_INPUT_CHARS, type ClConfig, type ClProvider } from "./config.ts";
 
 /** Minimal fetch shape so tests can inject fakes without implementing every member. */
@@ -41,6 +47,16 @@ export interface RewriteOptions {
   model: string;
   /** Resolved API key for anthropic/openai providers (from pi's model registry). */
   apiKey?: string;
+}
+
+export interface PiRewriteOptions {
+  config: ClConfig;
+  text: string;
+  userQuestion?: string;
+  timeoutMs: number;
+  /** The pi model to run (ctx.model or cfg.model resolved via registry). May be undefined when no model is active. */
+  model: ExtensionContext["model"];
+  registry: ExtensionContext["modelRegistry"];
 }
 
 /** Cap on the user question passed as context. */
@@ -220,6 +236,83 @@ async function openaiRewrite(
               .join("\n")
           : "";
     return text.trim() || undefined;
+  } finally {
+    clear();
+  }
+}
+
+/**
+ * Rewrite via the current pi model (ModelRegistry.complete). Used when
+ * cfg.provider is absent — i.e. "just use whatever I'm chatting with".
+ * Fails open like the fetch paths.
+ */
+export async function rewriteViaPi(
+  options: PiRewriteOptions,
+): Promise<RewriteOutcome> {
+  const { config, text, userQuestion, timeoutMs, model, registry } = options;
+  if (config.stub) {
+    return { ok: true, text: stubRewrite(text) };
+  }
+  if (!model) {
+    if (config.model) {
+      return {
+        ok: false,
+        reason: `model "${config.model}" not found in registry (is it installed? remove "model" or set "provider" explicitly)`,
+      };
+    }
+    return {
+      ok: false,
+      reason:
+        "no model resolved (set `model` in claudish.json or switch to a model pi knows)",
+    };
+  }
+  const prompt = buildPrompt(text, userQuestion);
+  const { signal, clear } = timeoutSignal(timeoutMs);
+  try {
+      const msg = (await (registry as unknown as {
+      complete: (
+        model: unknown,
+        context: unknown,
+        options: unknown,
+      ) => Promise<unknown>;
+    }).complete(
+      model as unknown,
+      {
+        messages: [
+          { role: "user", content: prompt, timestamp: Date.now() },
+        ],
+      },
+      {
+        signal,
+        maxTokens: config.maxTokens,
+      },
+    )) as
+      | {
+          stopReason?: string;
+          content?: Array<{ type?: string; text?: string }>;
+        }
+      | undefined;
+    if (msg?.stopReason === "length") {
+      return { ok: false, reason: "rewrite was empty or hit the output cap" };
+    }
+    const content = (msg?.content ?? []) as Array<{
+      type?: string;
+      text?: string;
+    }>;
+    const out = content
+      .filter((c) => c.type === "text" && typeof c.text === "string")
+      .map((c) => c.text ?? "")
+      .join("\n")
+      .trim();
+    if (!out) {
+      return { ok: false, reason: "rewrite was empty or hit the output cap" };
+    }
+    return { ok: true, text: out };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : String(err),
+    };
   } finally {
     clear();
   }

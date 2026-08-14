@@ -1,0 +1,908 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>claudish — how it works</title>
+    <style>
+      /* ── Tokens ─────────────────────────────────────────────── */
+      :root {
+        --paper: #f3f6f5;
+        --paper-2: #e9eeec;
+        --paper-3: #ffffff;
+        --ink: #16201e;
+        --ink-2: #46524e;
+        --ink-3: #69776f;
+        --line: #cdd6d2;
+        --line-2: #e1e7e4;
+        --accent: #0f6f5c;
+        --accent-2: #0a5746;
+        --accent-soft: #e4efea;
+        --accent-ink: #0a4a3e;
+        --amber: #955700;
+        --amber-soft: #f6ecd9;
+        --good: #2f7d3b;
+        --shadow: 0 1px 0 rgba(20, 40, 35, 0.04), 0 8px 24px -16px rgba(20, 40, 35, 0.28);
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, "Liberation Mono", monospace;
+        --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        --maxw: 1040px;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --paper: #0e1513;
+          --paper-2: #131c19;
+          --paper-3: #182320;
+          --ink: #d7e3dd;
+          --ink-2: #94a39d;
+          --ink-3: #5e6d68;
+          --line: #24332e;
+          --line-2: #1b2622;
+          --accent: #3dd9bf;
+          --accent-2: #5fe6cd;
+          --accent-soft: #11241f;
+          --accent-ink: #6fe9d3;
+          --amber: #f0b450;
+          --amber-soft: #261c0d;
+          --good: #62c06e;
+          --shadow: 0 1px 0 rgba(0, 0, 0, 0.3), 0 18px 40px -24px rgba(0, 0, 0, 0.7);
+          color-scheme: dark;
+        }
+      }
+      :root[data-theme="light"] {
+        --paper: #f3f6f5;
+        --paper-2: #e9eeec;
+        --paper-3: #ffffff;
+        --ink: #16201e;
+        --ink-2: #46524e;
+        --ink-3: #69776f;
+        --line: #cdd6d2;
+        --line-2: #e1e7e4;
+        --accent: #0f6f5c;
+        --accent-2: #0a5746;
+        --accent-soft: #e4efea;
+        --accent-ink: #0a4a3e;
+        --amber: #955700;
+        --amber-soft: #f6ecd9;
+        --good: #2f7d3b;
+        --shadow: 0 1px 0 rgba(20, 40, 35, 0.04), 0 8px 24px -16px rgba(20, 40, 35, 0.28);
+        color-scheme: light;
+      }
+      :root[data-theme="dark"] {
+        --paper: #0e1513;
+        --paper-2: #131c19;
+        --paper-3: #182320;
+        --ink: #d7e3dd;
+        --ink-2: #94a39d;
+        --ink-3: #5e6d68;
+        --line: #24332e;
+        --line-2: #1b2622;
+        --accent: #3dd9bf;
+        --accent-2: #5fe6cd;
+        --accent-soft: #11241f;
+        --accent-ink: #6fe9d3;
+        --amber: #f0b450;
+        --amber-soft: #261c0d;
+        --good: #62c06e;
+        --shadow: 0 1px 0 rgba(0, 0, 0, 0.3), 0 18px 40px -24px rgba(0, 0, 0, 0.7);
+        color-scheme: dark;
+      }
+
+      /* ── Base ───────────────────────────────────────────────── */
+      * { box-sizing: border-box; }
+      html { -webkit-text-size-adjust: 100%; scroll-padding-top: 84px; }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font-family: var(--sans);
+        font-size: 16.5px;
+        line-height: 1.6;
+        font-feature-settings: "kern";
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+      ::selection { background: var(--accent); color: #fff; }
+      a { color: var(--accent); }
+      h1, h2, h3 { line-height: 1.18; text-wrap: balance; letter-spacing: -0.01em; }
+      h1 { font-size: clamp(2rem, 6vw, 3.1rem); margin: 0; font-weight: 660; }
+      h2 { font-size: clamp(1.35rem, 3vw, 1.8rem); margin: 0 0 0.4rem; font-weight: 640; }
+      h3 { font-size: 1.05rem; margin: 0 0 0.4rem; font-weight: 640; }
+      p { margin: 0 0 1rem; max-width: 66ch; }
+      code, kbd, .mono {
+        font-family: var(--mono);
+        font-size: 0.86em;
+        font-variant-ligatures: none;
+      }
+      code.inline {
+        background: var(--paper-2);
+        border: 1px solid var(--line);
+        padding: 0.08em 0.38em;
+        border-radius: 4px;
+        color: var(--ink);
+      }
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+        border-radius: 3px;
+      }
+
+      /* ── Layout ─────────────────────────────────────────────── */
+      .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 22px; }
+      section { padding: 64px 0; border-top: 1px solid var(--line-2); scroll-margin-top: 74px; }
+      section:first-of-type { border-top: none; }
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin: 0 0 0.7rem;
+        font-weight: 600;
+      }
+      .lede { font-size: 1.12rem; color: var(--ink-2); max-width: 62ch; }
+
+      /* ── Top bar ────────────────────────────────────────────── */
+      header.top {
+        position: sticky; top: 0; z-index: 20;
+        background: color-mix(in srgb, var(--paper) 82%, transparent);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid var(--line-2);
+      }
+      header.top .row {
+        display: flex; align-items: center; gap: 14px;
+        padding: 12px 0;
+      }
+      .brand { display: flex; align-items: baseline; gap: 10px; font-family: var(--mono); }
+      .brand .dot { color: var(--accent); }
+      .brand b { font-weight: 700; letter-spacing: -0.01em; }
+      .brand span { color: var(--ink-3); font-size: 0.82rem; }
+      header.top nav { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+      header.top nav a {
+        color: var(--ink-2); text-decoration: none; font-size: 0.86rem;
+        padding: 6px 10px; border-radius: 6px; font-family: var(--mono); white-space: nowrap;
+      }
+      header.top nav a:hover { color: var(--ink); background: var(--paper-2); }
+      @media (max-width: 640px) {
+        header.top nav a { font-size: 0.78rem; padding: 5px 7px; }
+      }
+      .theme-btn {
+        font-family: var(--mono); font-size: 0.82rem; cursor: pointer;
+        background: var(--paper-2); color: var(--ink); border: 1px solid var(--line);
+        padding: 6px 10px; border-radius: 6px;
+      }
+      .theme-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+      /* ── Hero ───────────────────────────────────────────────── */
+      .hero { padding: 52px 0 28px; }
+      .hero h1 .accent { color: var(--accent); }
+      .hero .tag {
+        display: inline-block; font-family: var(--mono); font-size: 0.74rem;
+        letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3);
+        border: 1px solid var(--line); padding: 4px 9px; border-radius: 999px;
+        margin-bottom: 18px;
+      }
+      .hero-grid {
+        display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+        gap: 40px; align-items: center; margin-top: 30px;
+      }
+      @media (max-width: 900px) { .hero-grid { grid-template-columns: 1fr; gap: 28px; } }
+      .hero p.kicker { font-size: 1.08rem; color: var(--ink-2); }
+
+      /* terminal window */
+      .term {
+        background: var(--paper-3); border: 1px solid var(--line);
+        border-radius: 12px; box-shadow: var(--shadow); overflow: hidden;
+        font-family: var(--mono); font-size: 0.83rem; line-height: 1.62;
+      }
+      .term .bar {
+        display: flex; align-items: center; gap: 7px; padding: 9px 13px;
+        background: var(--paper-2); border-bottom: 1px solid var(--line-2);
+      }
+      .term .bar i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+      .term .bar i.r { background: #e06c6c; } .term .bar i.y { background: #d8b54a; } .term .bar i.g { background: #5fbf6a; }
+      .term .bar .ttl { margin-left: 8px; color: var(--ink-3); font-size: 0.76rem; }
+      .term .body { padding: 14px 16px 18px; }
+      .term .ln { white-space: pre-wrap; word-break: break-word; }
+      .role { font-weight: 700; }
+      .role.user { color: var(--ink-2); }
+      .role.asst { color: var(--ink); }
+      .prompt { color: var(--accent); }
+      .asst-msg { color: var(--ink); margin: 2px 0 0; }
+
+      .wall {
+        margin: 12px -16px; padding: 5px 16px;
+        border-top: 1.5px dashed var(--line); border-bottom: 1.5px dashed var(--line);
+        background: repeating-linear-gradient(135deg, transparent 0 8px, color-mix(in srgb, var(--ink) 3%, transparent) 8px 16px);
+        text-align: center; color: var(--ink-3); font-size: 0.7rem; letter-spacing: 0.04em;
+      }
+      .wall b { color: var(--accent-ink); font-weight: 600; }
+
+      .ghost {
+        margin: 12px 0 0; padding: 11px 13px; border-radius: 9px;
+        background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+      }
+      .ghost .gh-head { color: var(--accent-ink); font-weight: 700; display: block; margin-bottom: 4px; }
+      .ghost .gh-body { color: var(--accent-ink); }
+
+      /* inline numbered annotations under the hero terminal */
+      .annos { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+      @media (max-width: 540px) { .annos { grid-template-columns: 1fr; } }
+      .anno { display: flex; gap: 9px; align-items: flex-start; font-size: 0.83rem; line-height: 1.45; color: var(--ink-2); }
+      .anno .num {
+        flex: 0 0 auto; width: 19px; height: 19px; border-radius: 50%;
+        background: var(--accent); color: #fff; font-family: var(--mono); font-size: 0.68rem;
+        font-weight: 700; display: grid; place-items: center; line-height: 1; margin-top: 1px;
+      }
+      .anno b { color: var(--ink); font-weight: 640; }
+      .mk { font-family: var(--mono); font-size: 0.74rem; color: var(--accent-ink); font-weight: 700; }
+
+      /* ── Generic figure / scroll ────────────────────────────── */
+      .figure {
+        background: var(--paper-3); border: 1px solid var(--line); border-radius: 14px;
+        padding: 18px; box-shadow: var(--shadow); margin: 22px 0 6px;
+      }
+      .scroll-x { overflow-x: auto; }
+      .figure svg { display: block; width: 100%; height: auto; }
+      .fig-cap {
+        font-family: var(--mono); font-size: 0.76rem; color: var(--ink-3);
+        margin: 12px 2px 0; line-height: 1.5;
+      }
+      .fig-cap b { color: var(--ink-2); }
+
+      /* legend chips */
+      .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 14px 0 4px; }
+      .legend .li { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 0.76rem; color: var(--ink-2); }
+      .swatch { width: 16px; height: 10px; border-radius: 3px; border: 1px solid var(--line); }
+      .sw-original { background: var(--ink); border-color: var(--ink); }
+      .sw-ghost { background: var(--accent); border-color: var(--accent); }
+      .sw-wall { background: transparent; border-top: 2px dashed var(--line); border-left: none; border-right: none; border-bottom: none; height: 8px; }
+
+      /* ── Sequence stepper ───────────────────────────────────── */
+      .seq-layout { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+      @media (max-width: 860px) { .seq-layout { grid-template-columns: 1fr; } }
+      .seq-panel { background: var(--paper-2); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+      .seq-list { list-style: none; margin: 0; padding: 0; counter-reset: s; }
+      .seq-list li {
+        counter-increment: s; position: relative; padding: 10px 12px 10px 44px;
+        border-radius: 8px; cursor: pointer; border: 1px solid transparent;
+        transition: background 0.18s, border-color 0.18s;
+      }
+      .seq-list li + li { margin-top: 4px; }
+      .seq-list li::before {
+        content: counter(s, decimal-leading-zero);
+        position: absolute; left: 10px; top: 11px;
+        font-family: var(--mono); font-size: 0.72rem; color: var(--ink-3);
+        background: var(--paper-3); border: 1px solid var(--line);
+        width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center;
+      }
+      .seq-list li b { font-weight: 640; color: var(--ink); display: block; font-size: 0.92rem; }
+      .seq-list li small { color: var(--ink-3); font-family: var(--mono); font-size: 0.74rem; }
+      .seq-list li:hover { background: var(--paper-3); }
+      .seq-list li.is-active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+      .seq-list li.is-active::before { color: var(--accent-ink); border-color: var(--accent); background: var(--paper-3); }
+      .seq-list li.is-active b { color: var(--accent-ink); }
+
+      .seq-ctrl { display: flex; gap: 8px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+      .seq-ctrl button {
+        font-family: var(--mono); font-size: 0.82rem; cursor: pointer;
+        background: var(--paper-3); color: var(--ink); border: 1px solid var(--line);
+        padding: 7px 12px; border-radius: 7px; min-width: 42px;
+      }
+      .seq-ctrl button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+      .seq-ctrl button:disabled { opacity: 0.4; cursor: not-allowed; }
+      .seq-ctrl .primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+      .seq-ctrl .primary:hover:not(:disabled) { color: #fff; background: var(--accent-2); }
+      .seq-ctrl .pos { font-family: var(--mono); font-size: 0.8rem; color: var(--ink-3); margin-left: auto; }
+
+      .seq-step { transition: opacity 0.18s ease; }
+      .seq-step .lbl { font-family: var(--mono); fill: var(--ink-2); }
+      .seq-step .edge { stroke: var(--ink-3); stroke-width: 1.7; }
+      .seq-step.is-active .lbl { fill: var(--accent-ink); font-weight: 700; }
+      .seq-step.is-active .edge { stroke: var(--accent); stroke-width: 2.6; }
+
+      /* ── comparison grid ────────────────────────────────────── */
+      .cmp { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+      @media (max-width: 720px) { .cmp { grid-template-columns: 1fr; } }
+      .cmp .h { background: var(--paper-2); padding: 13px 15px; font-weight: 660; border-bottom: 1px solid var(--line); }
+      .cmp .h.key { color: var(--ink-3); font-family: var(--mono); font-size: 0.78rem; font-weight: 600; }
+      .cmp .h.disp { color: var(--ink); }
+      .cmp .h.md { color: var(--accent-ink); }
+      .cmp .cell { padding: 12px 15px; border-bottom: 1px solid var(--line-2); font-size: 0.9rem; }
+      .cmp .cell.key { font-family: var(--mono); font-size: 0.78rem; color: var(--ink-2); background: var(--paper-2); border-right: 1px solid var(--line); }
+      .cmp .row-last .cell { border-bottom: none; }
+      .pill { display: inline-block; font-family: var(--mono); font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+      .pill.on { color: var(--good); border-color: color-mix(in srgb, var(--good) 50%, var(--line)); }
+      .pill.off { color: var(--ink-3); }
+
+      /* ── config reference ───────────────────────────────────── */
+      .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+      .fact { background: var(--paper-3); border: 1px solid var(--line); border-radius: 10px; padding: 14px 15px; }
+      .fact .k { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 5px; }
+      .fact .v { font-size: 0.9rem; color: var(--ink); }
+      .fact .v code { color: var(--accent-ink); }
+
+      .callout-note {
+        border-left: 3px solid var(--amber); background: var(--amber-soft);
+        padding: 12px 15px; border-radius: 0 9px 9px 0; font-size: 0.9rem; color: var(--ink);
+        margin: 16px 0;
+      }
+      .callout-note b { color: var(--amber); }
+
+      footer.foot { padding: 40px 0 64px; border-top: 1px solid var(--line-2); color: var(--ink-3); font-size: 0.85rem; font-family: var(--mono); }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { transition: none !important; animation: none !important; }
+        .hide-reduced { display: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap row">
+        <div class="brand">
+          <span class="dot">◆</span><b>claudish</b><span>a pi extension</span>
+        </div>
+        <nav>
+          <a href="#flow">flow</a>
+          <a href="#fail-open">fail-open</a>
+          <a href="#providers">providers</a>
+          <a href="#structure">structure</a>
+          <a href="#hooks">two&nbsp;hooks</a>
+          <button class="theme-btn" id="themeBtn" aria-label="Toggle color theme" title="Toggle theme">☾ dark</button>
+        </nav>
+      </div>
+    </header>
+
+    <!-- ───────────────── HERO ───────────────── -->
+    <div class="wrap hero">
+      <span class="tag">plain-english rewrite · display-only · fails open</span>
+      <h1>Every assistant reply gets a <span class="accent">plain-English</span> shadow.</h1>
+      <div class="hero-grid">
+        <div>
+          <p class="kicker">
+            <b>claudish</b> watches each message the agent finishes, asks a model to
+            restate it in simple language, and tacks the result underneath —
+            <b>without changing a byte</b> of the original. The rewrite is a
+            custom session entry that renders in your TUI but never enters the
+            model's context. What you see is glossed; what the model sees is not.
+          </p>
+          <div class="legend">
+            <span class="li"><span class="swatch sw-original"></span>original message (source of truth)</span>
+            <span class="li"><span class="swatch sw-ghost"></span>plain-English rewrite (ghost)</span>
+            <span class="li"><span class="swatch sw-wall"></span>context wall</span>
+          </div>
+        </div>
+
+        <div class="term-wrap">
+          <div class="term" id="termDemo" aria-label="Annotated terminal transcript">
+            <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span class="ttl">pi — session</span></div>
+            <div class="body">
+              <div class="ln"><span class="prompt">›</span> <span class="role user">how does fail-open actually work?</span></div>
+              <div class="ln" style="margin-top:9px"><span class="role asst">» assistant</span> <span class="mk">①</span></div>
+              <p class="asst-msg ln">Every hook is wrapped so that on any rejection path — provider unreachable, request exceeding <code>displayTimeoutMs</code>, an empty response, a <code>stop_reason</code> of <code>max_tokens</code>, or the kill-switch flag file present on disk — the extension resolves <code>{ok:false}</code> and the caller short-circuits before any mutation, leaving the original message and transcript entry byte-identical. The once-per-session notice surfaces the first skip via <code>ctx.ui.notify</code> at <code>warning</code> level; subsequent failures in the same session stay silent.</p>
+
+              <div class="wall">── <b>model context ends here</b> · everything below is display-only ──</div>
+
+              <div class="ghost">
+                <span class="gh-head">💬 In plain English: <span class="mk">②</span></span>
+                <span class="gh-body ln">If anything goes wrong — the model is down, a request times out, the reply is empty, it hits the length cap, or you've turned claudish off — nothing changes. Your original message is shown exactly as it was. You get one small warning the first time, then it stays quiet for the rest of the session.</span>
+              </div>
+            </div>
+          </div>
+          <div class="annos">
+            <div class="anno"><span class="num">1</span><div><b>Original message</b> — kept verbatim in the transcript and sent to the model on the next turn.</div></div>
+            <div class="anno"><span class="num">2</span><div><b>The ghost</b> — a custom entry drawn by <code>registerEntryRenderer</code>. The LLM never sees it.</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ───────────────── FLOW (sequence) ───────────────── -->
+    <section id="flow" class="wrap">
+      <p class="eyebrow">sequence · the display hook</p>
+      <h2>One message, eight beats — none of them block the agent.</h2>
+      <p class="lede">
+        When <code class="inline">message_end</code> fires, claudish runs entirely in the
+        background: it guards, resolves the model and provider, calls out, and appends
+        a custom entry. The stream and the agent loop keep moving the whole time.
+        Step through it.
+      </p>
+
+      <div class="seq-layout" style="margin-top:24px">
+        <div class="figure scroll-x" style="padding:8px">
+          <svg id="seqSvg" viewBox="0 0 800 600" role="img" aria-label="Sequence diagram of the display hook">
+            <defs>
+              <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"></path>
+              </marker>
+              <marker id="arrDim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-3)"></path>
+              </marker>
+            </defs>
+
+            <!-- lane headers -->
+            <g font-family="var(--mono)" font-size="12" text-anchor="middle">
+              <text x="90"  y="26" fill="var(--ink-2)" font-weight="600">agent loop</text>
+              <text x="300" y="26" fill="var(--accent-ink)" font-weight="700">claudish</text>
+              <text x="520" y="26" fill="var(--ink-2)" font-weight="600">provider (LLM)</text>
+              <text x="720" y="26" fill="var(--ink-2)" font-weight="600">TUI · transcript</text>
+            </g>
+            <!-- lifelines -->
+            <g stroke="var(--line)" stroke-width="1.4" stroke-dasharray="3 5">
+              <line x1="90"  y1="44" x2="90"  y2="566"></line>
+              <line x1="300" y1="44" x2="300" y2="566"></line>
+              <line x1="520" y1="44" x2="520" y2="566"></line>
+              <line x1="720" y1="44" x2="720" y2="566"></line>
+            </g>
+
+            <!-- step 1: agent -> claudish -->
+            <g class="seq-step" data-step="1">
+              <line class="edge" x1="92" y1="98" x2="298" y2="98" stroke-width="1.8" marker-end="url(#arrDim)"></line>
+              <rect x="300" y="84" width="10" height="28" rx="2" fill="color-mix(in srgb, var(--accent) 30%, transparent)"></rect>
+              <text class="lbl" x="195" y="90" text-anchor="middle" font-size="11.5">message_end fires</text>
+              <text class="lbl" x="195" y="120" text-anchor="middle" font-size="10" fill="var(--ink-3)">(assistant msg finalized)</text>
+            </g>
+
+            <!-- step 2: guards (self) -->
+            <g class="seq-step" data-step="2">
+              <rect x="284" y="132" width="32" height="34" rx="4" fill="color-mix(in srgb, var(--accent) 30%, transparent)"></rect>
+              <text class="lbl" x="326" y="147" font-size="11.5">guards: role = assistant</text>
+              <text class="lbl" x="326" y="161" font-size="11.5">no error · prose ≥ 200</text>
+            </g>
+
+            <!-- step 3: find question -->
+            <g class="seq-step" data-step="3">
+              <rect x="284" y="186" width="32" height="30" rx="4" fill="color-mix(in srgb, var(--accent) 30%, transparent)"></rect>
+              <text class="lbl" x="326" y="205" font-size="11.5">find last user question — context only</text>
+            </g>
+
+            <!-- step 4: resolve runtime -->
+            <g class="seq-step" data-step="4">
+              <rect x="284" y="236" width="32" height="34" rx="4" fill="color-mix(in srgb, var(--accent) 30%, transparent)"></rect>
+              <text class="lbl" x="326" y="251" font-size="11.5">resolve provider · model</text>
+              <text class="lbl" x="326" y="265" font-size="11.5">apiKey ← modelRegistry</text>
+            </g>
+
+            <!-- step 5: claudish -> provider -->
+            <g class="seq-step" data-step="5">
+              <line class="edge" x1="302" y1="318" x2="518" y2="318" stroke-width="1.8" marker-end="url(#arrDim)"></line>
+              <rect x="520" y="304" width="10" height="28" rx="2" fill="color-mix(in srgb, var(--accent) 30%, transparent)"></rect>
+              <text class="lbl" x="410" y="310" text-anchor="middle" font-size="11.5">POST buildPrompt(…)</text>
+              <text class="lbl" x="410" y="340" text-anchor="middle" font-size="10" fill="var(--ink-3)">timeout-guarded fetch</text>
+            </g>
+
+            <!-- step 6: provider -> claudish -->
+            <g class="seq-step" data-step="6">
+              <line class="edge" x1="518" y1="378" x2="302" y2="378" stroke-width="1.8" marker-end="url(#arrDim)"></line>
+              <text class="lbl" x="410" y="370" text-anchor="middle" font-size="11.5">rewrite text</text>
+              <text class="lbl" x="410" y="400" text-anchor="middle" font-size="10" fill="var(--ink-3)">or { ok: false, reason }</text>
+            </g>
+
+            <!-- step 7: claudish -> TUI -->
+            <g class="seq-step" data-step="7">
+              <line class="edge" x1="302" y1="442" x2="718" y2="442" stroke-width="1.8" marker-end="url(#arrDim)"></line>
+              <text class="lbl" x="510" y="434" text-anchor="middle" font-size="11.5">appendEntry("claudish-rewrite", { text })</text>
+            </g>
+
+            <!-- step 8: TUI render -->
+            <g class="seq-step" data-step="8">
+              <rect x="704" y="486" width="32" height="32" rx="4" fill="color-mix(in srgb, var(--accent) 30%, transparent)"></rect>
+              <text class="lbl" x="690" y="503" text-anchor="end" font-size="11.5">render 💬 In plain English:</text>
+              <text class="lbl" x="690" y="517" text-anchor="end" font-size="10" fill="var(--ink-3)">custom entry — no LLM context</text>
+            </g>
+
+            <!-- fail-open side rail -->
+            <g stroke="var(--amber)" stroke-width="1.4" stroke-dasharray="4 4" fill="none">
+              <path d="M300,392 C 250,420 250,470 196,470" marker-end="url(#arrDim)"></path>
+            </g>
+            <rect x="24" y="450" width="172" height="50" rx="8" fill="var(--amber-soft)" stroke="var(--amber)"></rect>
+            <text x="110" y="470" text-anchor="middle" font-family="var(--mono)" font-size="10.5" fill="var(--ink)">on failure:</text>
+            <text x="110" y="486" text-anchor="middle" font-family="var(--mono)" font-size="10.5" fill="var(--ink)">notice (once) + original</text>
+            <text x="110" y="498" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--ink-3)">shown unchanged</text>
+          </svg>
+        </div>
+
+        <div class="seq-panel">
+          <ol class="seq-list" id="seqList">
+            <li data-step="1"><b>message_end fires</b><small>pi → claudish · once per finalized assistant message</small></li>
+            <li data-step="2"><b>guards</b><small>skip errors, tool-only msgs, prose &lt; minChars</small></li>
+            <li data-step="3"><b>find last user question</b><small>context for the rewriter — never answered</small></li>
+            <li data-step="4"><b>resolve runtime</b><small>provider · model · apiKey, from config or session model</small></li>
+            <li data-step="5"><b>POST the prompt</b><small>buildPrompt + timeout-guarded fetch to the provider</small></li>
+            <li data-step="6"><b>rewrite returns</b><small>plain text, or { ok:false } on any problem</small></li>
+            <li data-step="7"><b>appendEntry</b><small>custom "claudish-rewrite" entry added to the session</small></li>
+            <li data-step="8"><b>render the ghost</b><small>registerEntryRenderer draws 💬 — invisible to the model</small></li>
+          </ol>
+          <div class="seq-ctrl">
+            <button id="seqPrev" aria-label="Previous step">‹</button>
+            <button id="seqPlay" class="primary hide-reduced" aria-label="Play sequence">▶ play</button>
+            <button id="seqNext" aria-label="Next step">›</button>
+            <button id="seqReset" aria-label="Restart">↺</button>
+            <span class="pos" id="seqPos">01 / 08</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────── FAIL-OPEN ───────────────── -->
+    <section id="fail-open" class="wrap">
+      <p class="eyebrow">decision · fail-open</p>
+      <h2>Every broken path lands in the same safe place.</h2>
+      <p class="lede">
+        The whole extension is built so it can never swallow or corrupt an answer.
+        Six things can go wrong on a single rewrite; all six converge on one
+        outcome — your original text, byte-identical, plus at most one notice.
+      </p>
+
+      <div class="figure scroll-x">
+        <svg viewBox="0 0 740 470" role="img" aria-label="Fail-open convergence diagram">
+          <defs>
+            <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-3)"></path>
+            </marker>
+          </defs>
+
+          <!-- start -->
+          <rect x="280" y="20" width="180" height="44" rx="22" fill="var(--paper-2)" stroke="var(--ink-2)" stroke-width="1.5"></rect>
+          <text x="370" y="47" text-anchor="middle" font-family="var(--mono)" font-size="12.5" fill="var(--ink)">any rewrite attempt</text>
+
+          <!-- success node -->
+          <rect x="572" y="118" width="140" height="46" rx="9" fill="color-mix(in srgb, var(--good) 14%, var(--paper-3))" stroke="var(--good)"></rect>
+          <text x="642" y="138" text-anchor="middle" font-family="var(--mono)" font-size="11.5" fill="var(--good)" font-weight="700">rewrite OK</text>
+          <text x="642" y="154" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">full text returned</text>
+
+          <!-- success arrow start->ok -->
+          <line x1="430" y1="52" x2="600" y2="116" stroke="var(--good)" stroke-width="1.8" marker-end="url(#fa)"></line>
+          <text x="540" y="78" font-family="var(--mono)" font-size="10.5" fill="var(--good)">all checks pass</text>
+
+          <!-- ok -> append -->
+          <line x1="642" y1="166" x2="642" y2="372" stroke="var(--good)" stroke-width="1.8" marker-end="url(#fa)"></line>
+          <rect x="566" y="372" width="152" height="54" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+          <text x="642" y="393" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="var(--accent-ink)" font-weight="700">append 💬 entry</text>
+          <text x="642" y="409" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--accent-ink)">ghost appears</text>
+
+          <!-- failure conditions -->
+          <g font-family="var(--mono)" font-size="11" fill="var(--ink)">
+            <rect x="28" y="108" width="246" height="36" rx="7" fill="var(--paper-2)" stroke="var(--line)"></rect>
+            <text x="44" y="131">provider unreachable / non-200</text>
+
+            <rect x="28" y="156" width="246" height="36" rx="7" fill="var(--paper-2)" stroke="var(--line)"></rect>
+            <text x="44" y="179">request exceeded timeout</text>
+
+            <rect x="28" y="204" width="246" height="36" rx="7" fill="var(--paper-2)" stroke="var(--line)"></rect>
+            <text x="44" y="227">no API key from modelRegistry</text>
+
+            <rect x="28" y="252" width="246" height="36" rx="7" fill="var(--paper-2)" stroke="var(--line)"></rect>
+            <text x="44" y="275">empty / hit max_tokens cap</text>
+
+            <rect x="28" y="300" width="246" height="36" rx="7" fill="var(--paper-2)" stroke="var(--line)"></rect>
+            <text x="44" y="323">kill-switch file · msg too short</text>
+          </g>
+
+          <!-- converging arrows to sink -->
+          <g stroke="var(--ink-3)" stroke-width="1.5" fill="none">
+            <path d="M274,126 C 320,126 330,392 318,404" marker-end="url(#fa)"></path>
+            <path d="M274,174 C 322,174 332,395 320,406" marker-end="url(#fa)"></path>
+            <path d="M274,222 C 326,222 334,398 322,408" marker-end="url(#fa)"></path>
+            <path d="M274,270 C 328,270 336,401 324,410" marker-end="url(#fa)"></path>
+            <path d="M274,318 C 330,318 338,404 326,412" marker-end="url(#fa)"></path>
+          </g>
+
+          <!-- sink -->
+          <rect x="312" y="392" width="226" height="60" rx="10" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="1.6"></rect>
+          <text x="425" y="414" text-anchor="middle" font-family="var(--mono)" font-size="11.5" fill="var(--ink)" font-weight="700">original text · unchanged</text>
+          <text x="425" y="431" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">+ once-per-session notice</text>
+          <text x="425" y="444" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">caller never mutates</text>
+        </svg>
+      </div>
+      <p class="fig-cap"><b>Note:</b> a rewrite that hits the <code>maxTokens</code> output cap is <b>discarded, not shown</b> — a half-finished plain-English version is confusing, and in overwrite mode it would have replaced a real document.</p>
+    </section>
+
+    <!-- ───────────────── PROVIDERS ───────────────── -->
+    <section id="providers" class="wrap">
+      <p class="eyebrow">topology · provider routing</p>
+      <h2>Zero-config: it rewrites through the model you're already using.</h2>
+      <p class="lede">
+        Leave <code class="inline">provider</code> and <code class="inline">model</code> out of the config
+        and claudish follows your session. Auth is never stored in config — it's pulled from
+        pi's model registry, the same key pi already uses.
+      </p>
+
+      <div class="figure scroll-x">
+        <svg viewBox="0 0 760 440" role="img" aria-label="Provider routing topology">
+          <defs>
+            <marker id="pa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-3)"></path>
+            </marker>
+          </defs>
+
+          <!-- session model -->
+          <rect x="280" y="18" width="200" height="42" rx="8" fill="var(--paper-2)" stroke="var(--ink-2)"></rect>
+          <text x="380" y="44" text-anchor="middle" font-family="var(--mono)" font-size="12" fill="var(--ink)">ctx.model — session model</text>
+          <line x1="380" y1="60" x2="380" y2="92" stroke="var(--ink-3)" stroke-width="1.5" marker-end="url(#pa)"></line>
+
+          <!-- decision -->
+          <rect x="270" y="92" width="220" height="44" rx="8" fill="var(--paper-3)" stroke="var(--accent)"></rect>
+          <text x="380" y="112" text-anchor="middle" font-family="var(--mono)" font-size="11.5" fill="var(--accent-ink)" font-weight="700">provider set in claudish.json?</text>
+          <text x="380" y="127" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-3)">else mapProviderFromSession()</text>
+
+          <!-- yes branch -->
+          <line x1="490" y1="114" x2="572" y2="114" stroke="var(--ink-3)" stroke-width="1.5" marker-end="url(#pa)"></line>
+          <text x="530" y="108" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">yes</text>
+          <rect x="572" y="92" width="160" height="44" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+          <text x="652" y="112" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="var(--accent-ink)">use cfg.provider</text>
+          <text x="652" y="127" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--accent-ink)">+ cfg.model</text>
+
+          <!-- three providers -->
+          <!-- ollama -->
+          <rect x="40" y="290" width="190" height="86" rx="10" fill="var(--paper-2)" stroke="var(--line)"></rect>
+          <text x="135" y="313" text-anchor="middle" font-family="var(--mono)" font-size="13" fill="var(--ink)" font-weight="700">ollama</text>
+          <text x="135" y="333" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">localhost:11434</text>
+          <text x="135" y="350" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">keyless · local</text>
+          <text x="135" y="367" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-3)">fallback default</text>
+
+          <!-- anthropic -->
+          <rect x="285" y="290" width="190" height="86" rx="10" fill="var(--paper-2)" stroke="var(--line)"></rect>
+          <text x="380" y="313" text-anchor="middle" font-family="var(--mono)" font-size="13" fill="var(--ink)" font-weight="700">anthropic</text>
+          <text x="380" y="333" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">api.anthropic.com</text>
+          <text x="380" y="350" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">key ← modelRegistry</text>
+          <text x="380" y="367" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-3)">stop_reason: max_tokens</text>
+
+          <!-- openai -->
+          <rect x="530" y="290" width="190" height="86" rx="10" fill="var(--paper-2)" stroke="var(--line)"></rect>
+          <text x="625" y="313" text-anchor="middle" font-family="var(--mono)" font-size="13" fill="var(--ink)" font-weight="700">openai</text>
+          <text x="625" y="333" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">any /v1 endpoint</text>
+          <text x="625" y="350" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--ink-2)">key ← modelRegistry</text>
+          <text x="625" y="367" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-3)">+ optional reasoning_effort</text>
+
+          <!-- fan-out arrows from decision -->
+          <g stroke="var(--ink-3)" stroke-width="1.5" fill="none">
+            <path d="M340,150 C 200,200 150,240 135,288" marker-end="url(#pa)"></path>
+            <line x1="380" y1="136" x2="380" y2="288" marker-end="url(#pa)"></line>
+            <path d="M420,150 C 540,200 610,240 625,288" marker-end="url(#pa)"></path>
+          </g>
+          <text x="150" y="222" font-family="var(--mono)" font-size="9.5" fill="var(--ink-3)">other / none</text>
+          <text x="392" y="210" font-family="var(--mono)" font-size="9.5" fill="var(--ink-3)">= anthropic</text>
+          <text x="540" y="222" font-family="var(--mono)" font-size="9.5" fill="var(--ink-3)">= openai</text>
+
+          <!-- bottom note -->
+          <line x1="40" y1="402" x2="720" y2="402" stroke="var(--line)"></line>
+          <text x="380" y="422" text-anchor="middle" font-family="var(--mono)" font-size="11" fill="var(--ink-2)">model = cfg.model ?? sessionModel.id  ·  all three cap completions at maxTokens (default 4096)</text>
+        </svg>
+      </div>
+      <div class="callout-note">
+        <b>Privacy:</b> selecting a cloud provider is the consent switch. Auth comes from pi's
+        registry, so if pi has a key for anthropic or openai, claudish will use it — and each
+        assistant message leaves your machine. The default (follow session model) adds no new egress.
+      </div>
+    </section>
+
+    <!-- ───────────────── STRUCTURE ───────────────── -->
+    <section id="structure" class="wrap">
+      <p class="eyebrow">structure · the four files</p>
+      <h2>Small surface, clear seams.</h2>
+      <p class="lede">
+        Hooks and rendering live in <code class="inline">index.ts</code>. Everything else is
+        pure and independently testable — config parsing, the provider calls, and the text
+        helpers. That separation is why 47 tests cover it cleanly.
+      </p>
+
+      <div class="figure scroll-x">
+        <svg viewBox="0 0 800 380" role="img" aria-label="Module architecture">
+          <defs>
+            <marker id="ma" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-3)"></path>
+            </marker>
+          </defs>
+
+          <!-- index.ts center -->
+          <rect x="300" y="130" width="200" height="124" rx="11" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"></rect>
+          <text x="400" y="153" text-anchor="middle" font-family="var(--mono)" font-size="13" fill="var(--accent-ink)" font-weight="700">index.ts</text>
+          <text x="400" y="172" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--accent-ink)">message_end · tool_result</text>
+          <text x="400" y="188" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--accent-ink)">registerEntryRenderer</text>
+          <text x="400" y="204" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--accent-ink)">/claudish command</text>
+          <text x="400" y="220" text-anchor="middle" font-family="var(--mono)" font-size="10" fill="var(--accent-ink)">resolveRuntime · writeAtomic</text>
+
+          <!-- config.ts top-left -->
+          <rect x="30" y="24" width="220" height="84" rx="10" fill="var(--paper-2)" stroke="var(--line)"></rect>
+          <text x="140" y="46" text-anchor="middle" font-family="var(--mono)" font-size="12.5" fill="var(--ink)" font-weight="700">config.ts</text>
+          <text x="140" y="64" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">loadConfig → ClConfig</text>
+          <text x="140" y="79" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">mapProviderFromSession</text>
+          <text x="140" y="94" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">expandHome · DEFAULTS</text>
+
+          <!-- text.ts left -->
+          <rect x="30" y="272" width="220" height="84" rx="10" fill="var(--paper-2)" stroke="var(--line)"></rect>
+          <text x="140" y="294" text-anchor="middle" font-family="var(--mono)" font-size="12.5" fill="var(--ink)" font-weight="700">text.ts</text>
+          <text x="140" y="312" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">extractText · proseLength</text>
+          <text x="140" y="327" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">splitFrontmatter</text>
+          <text x="140" y="342" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">isInside · isMarkdownPath</text>
+
+          <!-- providers.ts right -->
+          <rect x="550" y="24" width="220" height="84" rx="10" fill="var(--paper-2)" stroke="var(--line)"></rect>
+          <text x="660" y="46" text-anchor="middle" font-family="var(--mono)" font-size="12.5" fill="var(--ink)" font-weight="700">providers.ts</text>
+          <text x="660" y="64" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">rewrite() · buildPrompt</text>
+          <text x="660" y="79" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">ollama / anthropic / openai</text>
+          <text x="660" y="94" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">RewriteOutcome</text>
+
+          <!-- json-file.ts bottom-right -->
+          <rect x="550" y="272" width="220" height="84" rx="10" fill="var(--paper-2)" stroke="var(--line)" stroke-dasharray="4 4"></rect>
+          <text x="660" y="294" text-anchor="middle" font-family="var(--mono)" font-size="12.5" fill="var(--ink-2)" font-weight="700">json-file.ts</text>
+          <text x="660" y="312" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">describeError → config</text>
+          <text x="660" y="327" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-3)">writeJsonFileAtomic — unused</text>
+          <text x="660" y="342" text-anchor="middle" font-family="var(--mono)" font-size="9.5" fill="var(--ink-3)">unlinkIfPresent — unused</text>
+
+          <!-- edges -->
+          <g stroke="var(--ink-3)" stroke-width="1.4" fill="none">
+            <line x1="250" y1="80" x2="300" y2="150" marker-end="url(#ma)"></line>
+            <line x1="250" y1="300" x2="300" y2="230" marker-end="url(#ma)"></line>
+            <line x1="500" y1="150" x2="550" y2="80" marker-end="url(#ma)"></line>
+            <!-- config -> json-file, routed through the gutters (avoids index.ts) -->
+            <path d="M250,90 H285 V300 H546" stroke-dasharray="3 4" marker-end="url(#ma)"></path>
+          </g>
+          <g font-family="var(--mono)" font-size="9.5" fill="var(--ink-2)">
+            <text x="262" y="118">loads ClConfig</text>
+            <text x="262" y="270">extract / measure</text>
+            <text x="500" y="118">rewrite()</text>
+            <text x="415" y="292" text-anchor="middle">describeError</text>
+          </g>
+        </svg>
+      </div>
+      <p class="fig-cap">Solid arrows are runtime calls from <code>index.ts</code>. The dashed arrow is a build-time import (<code>providers.ts</code> pulls types and <code>MAX_INPUT_CHARS</code> from <code>config.ts</code>). <code>json-file.ts</code> only ships <code>describeError</code> into <code>config.ts</code>; the md-hook's atomic write is local to <code>index.ts</code>.</p>
+    </section>
+
+    <!-- ───────────────── TWO HOOKS ───────────────── -->
+    <section id="hooks" class="wrap">
+      <p class="eyebrow">comparison · two hooks</p>
+      <h2>One rewrites your chat. The other rewrites your files.</h2>
+      <p class="lede">
+        claudish registers on two pi events. The chat hook is cosmetic and on by default;
+        the file hook mutates disk and is strictly opt-in.
+      </p>
+
+      <div class="cmp" style="margin-top:22px">
+        <div class="h key">property</div>
+        <div class="h disp">display hook · chat</div>
+        <div class="h md">markdown hook · files</div>
+
+        <div class="cell key">event</div>
+        <div class="cell"><code class="inline">message_end</code></div>
+        <div class="cell"><code class="inline">tool_result</code> (write / edit)</div>
+
+        <div class="cell key">on by default</div>
+        <div class="cell"><span class="pill on">yes</span></div>
+        <div class="cell"><span class="pill off">no — needs mdDir</span></div>
+
+        <div class="cell key">scope</div>
+        <div class="cell">assistant msgs, prose ≥ 200</div>
+        <div class="cell"><code class="inline">*.md</code> under <code class="inline">mdDir</code> only</div>
+
+        <div class="cell key">mutates?</div>
+        <div class="cell"><span class="pill off">no — cosmetic only</span></div>
+        <div class="cell"><span class="pill on">yes</span> — sibling or overwrite</div>
+
+        <div class="cell key">enters LLM context</div>
+        <div class="cell"><span class="pill off">never</span> (custom entry)</div>
+        <div class="cell">n/a — it's a file on disk</div>
+
+        <div class="row-last cell key">fail-open</div>
+        <div class="row-last cell">original message shown</div>
+        <div class="row-last cell">file left exactly as written</div>
+      </div>
+
+      <div class="callout-note" style="margin-top:18px">
+        <b>Why no "replace" mode for chat?</b> Pi's transcript <i>is</i> the display — there's no
+        separate presentation layer. Suppressing the original on screen would also rewrite what's
+        stored and sent to the model. So the chat hook is always append-style; the model always sees
+        the real text.
+      </div>
+    </section>
+
+    <!-- ───────────────── CONFIG / REFERENCE ───────────────── -->
+    <section id="config" class="wrap">
+      <p class="eyebrow">reference · control surface</p>
+      <h2>One JSON file. One slash command. One flag file.</h2>
+      <p class="lede">
+        No environment variables. Config lives at <code class="inline">&lt;agentDir&gt;/claudish.json</code>,
+        read at session start and on <code class="inline">/reload</code>. All fields optional — an empty
+        <code class="inline">{}</code> uses every default.
+      </p>
+
+      <div class="facts" style="margin-top:22px">
+        <div class="fact"><div class="k">config file</div><div class="v"><code>~/.pi/agent/claudish.json</code></div></div>
+        <div class="fact"><div class="k">pause mid-session</div><div class="v"><code>/claudish off</code> · <code>/claudish on</code></div></div>
+        <div class="fact"><div class="k">kill-switch file</div><div class="v"><code>touch ~/.claude/claudish-off</code></div></div>
+        <div class="fact"><div class="k">status</div><div class="v"><code>/claudish status</code></div></div>
+        <div class="fact"><div class="k">default model</div><div class="v">your session model (or pin a cheap one)</div></div>
+        <div class="fact"><div class="k">minChars</div><div class="v"><code>200</code> — skip shorter prose</div></div>
+        <div class="fact"><div class="k">maxTokens</div><div class="v"><code>4096</code> — capped rewrites discarded</div></div>
+        <div class="fact"><div class="k">file hook</div><div class="v">set <code>mdDir</code> to enable</div></div>
+      </div>
+
+      <p style="margin-top:24px;color:var(--ink-2)">
+        <b>Quick configs:</b>
+        &nbsp;follow the session model → <code class="inline">{}</code>
+        &nbsp;·&nbsp; local → <code class="inline">{ "provider": "ollama", "model": "llama3.2:3b" }</code>
+        &nbsp;·&nbsp; cheap cloud → <code class="inline">{ "provider": "anthropic", "model": "claude-3-5-haiku-latest" }</code>
+      </p>
+    </section>
+
+    <footer class="foot">
+      <div class="wrap">
+        claudish · a port of gvzdv/claudish-to-english for the pi coding agent · display-only, fails open.
+      </div>
+    </footer>
+
+    <script>
+      // ── theme ──────────────────────────────────────────────
+      (function () {
+        var root = document.documentElement;
+        var btn = document.getElementById("themeBtn");
+        var stored = null;
+        try { stored = localStorage.getItem("claudish-theme"); } catch (e) {}
+        if (stored === "light" || stored === "dark") root.setAttribute("data-theme", stored);
+        function sync() {
+          var dark = root.getAttribute("data-theme") !== "light";
+          btn.textContent = dark ? "☾ dark" : "☀ light";
+        }
+        sync();
+        btn.addEventListener("click", function () {
+          var next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
+          root.setAttribute("data-theme", next);
+          try { localStorage.setItem("claudish-theme", next); } catch (e) {}
+          sync();
+        });
+      })();
+
+      // ── sequence stepper ───────────────────────────────────
+      (function () {
+        var steps = Array.prototype.slice.call(document.querySelectorAll("#seqSvg .seq-step"));
+        var items = Array.prototype.slice.call(document.querySelectorAll("#seqList li"));
+        var prev = document.getElementById("seqPrev");
+        var next = document.getElementById("seqNext");
+        var play = document.getElementById("seqPlay");
+        var reset = document.getElementById("seqReset");
+        var pos = document.getElementById("seqPos");
+        var N = steps.length;
+        var cur = 1;
+        var timer = null;
+        var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+        function render() {
+          steps.forEach(function (g) {
+            g.classList.toggle("is-active", Number(g.getAttribute("data-step")) === cur);
+          });
+          items.forEach(function (li) {
+            li.classList.toggle("is-active", Number(li.getAttribute("data-step")) === cur);
+          });
+          pos.textContent = String(cur).padStart(2, "0") + " / " + String(N).padStart(2, "0");
+          prev.disabled = cur === 1;
+          next.disabled = cur === N;
+        }
+        function set(n) { cur = Math.max(1, Math.min(N, n)); render(); if (timer) playPause(); }
+        function playPause() {
+          if (timer) { clearInterval(timer); timer = null; play.textContent = "▶ play"; play.classList.add("primary"); return; }
+          play.textContent = "❚❚ pause";
+          timer = setInterval(function () {
+            if (cur >= N) { clearInterval(timer); timer = null; play.textContent = "▶ play"; return; }
+            set(cur + 1);
+          }, 1700);
+        }
+        prev.addEventListener("click", function () { set(cur - 1); });
+        next.addEventListener("click", function () { set(cur + 1); });
+        reset.addEventListener("click", function () { set(1); });
+        if (play) play.addEventListener("click", playPause);
+        items.forEach(function (li) {
+          li.addEventListener("click", function () { set(Number(li.getAttribute("data-step"))); });
+        });
+        document.querySelector(".seq-panel").addEventListener("keydown", function (e) {
+          if (e.key === "ArrowRight") { set(cur + 1); e.preventDefault(); }
+          if (e.key === "ArrowLeft") { set(cur - 1); e.preventDefault(); }
+        });
+        // keyboard focusability for the panel
+        document.querySelector(".seq-panel").setAttribute("tabindex", "0");
+        render();
+      })();
+    </script>
+  </body>
+</html>

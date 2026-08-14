@@ -64,12 +64,11 @@ Or just leave them out and let it follow your session model.
 
 ### Quick start
 
-With no config file, claudish uses the session model and its provider's API
-shape. If you're chatting with Claude, rewrites go through the Anthropic API
-using pi's stored Anthropic key. If you're on GPT, they go through the OpenAI
-API. For any other provider, it defaults to ollama (local).
+With no config file, claudish reuses the session model directly via pi's
+`ModelRegistry` — whatever provider and model you're chatting with.
+No provider mapping or extra URL needed. That is the default.
 
-To use ollama explicitly:
+To use a specific API shape explicitly (e.g. local ollama):
 
 ```json
 {
@@ -132,13 +131,15 @@ raise `mdTimeoutMs` or use a smaller model.
 
 ## Providers
 
-Selected with `provider` in the config file. When absent, derived from the
-session model's provider (`anthropic` → anthropic API, `openai` → openai API,
-anything else → ollama).
+Selected with `provider` in the config file. When absent (default),
+claudish calls the current pi model directly via `ModelRegistry.complete` —
+no provider mapping, no URL, works with any provider/model. Set `provider`
+explicitly only to hit a specific API shape or local server.
 
 | Provider | Endpoint | Auth |
 |---|---|---|
-| `ollama` (fallback default) | `ollamaUrl` (`http://localhost:11434`) | none (local) |
+| `pi` (default, when `provider` is absent) | current pi model via `ModelRegistry.complete` | reuses session model's auth and routing |
+| `ollama` | `ollamaUrl` (`http://localhost:11434`) | none (local) |
 | `anthropic` | `anthropicUrl` (`https://api.anthropic.com`) + `/v1/messages` | pi model registry (`getApiKeyForProvider("anthropic")`) |
 | `openai` | `openaiUrl` + `/chat/completions` | pi model registry (`getApiKeyForProvider("openai")`) |
 
@@ -164,10 +165,10 @@ Notes:
   value (the API accepts `low`/`medium`/`high`, or `minimal` on some models)
   and would 400. If you point the openai provider at a reasoning model, set
   `openaiEffort` to `"minimal"` (or `"low"`) explicitly.
-- All three providers cap completions at `maxTokens` (default 4096):
-  anthropic's `max_tokens`, openai's `max_tokens`, and ollama's
+- All paths (pi via `ModelRegistry`, anthropic, openai, ollama) cap completions at `maxTokens` (default 4096):
+  pi's `maxTokens` option, anthropic's `max_tokens`, openai's `max_tokens`, and ollama's
   `num_predict`. A rewrite that hits an output-token cap is **discarded, not
-  shown** on all three providers — a half-finished rewrite is confusing, and
+  shown** on all paths — a half-finished rewrite is confusing, and
   in the Markdown hook's overwrite mode it would replace your real document.
   You get the original text plus the once-per-session notice suggesting a
   higher cap.
@@ -198,7 +199,7 @@ All fields are optional. An absent file or empty `{}` uses all defaults.
 |---|---|---|
 | `enabled` | `true` | Master switch. `false` = pass everything through. |
 | `offFile` | `~/.claude/claudish-off` | Runtime kill switch. While this file exists, rewrites pause — re-checked every message. |
-| `provider` | (from session model) | `ollama`, `anthropic`, or `openai` — which API shape serves rewrites. Falls back to `ollama` when the session provider doesn't map. |
+| `provider` | (absent) | `ollama`, `anthropic`, or `openai` — which API shape serves rewrites. When absent, reuses the current pi model via `ModelRegistry`. |
 | `model` | (from session model) | Model name; defaults to the session model's id. |
 | `ollamaUrl` | `http://localhost:11434` | ollama base URL. |
 | `anthropicUrl` | `https://api.anthropic.com` | Base URL for the anthropic provider (proxy/gateway overrides). |
