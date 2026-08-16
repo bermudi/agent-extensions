@@ -42,11 +42,22 @@ function sameModel(left: ModelRef, right: ModelRef): boolean {
  * wins, --thinking counts only when its value is a valid level (invalid
  * values are dropped with a CLI warning), and a trailing flag without a
  * value token sets nothing. Degenerate argv where another flag consumes a
- * bare "--model"/"--thinking" as its value is not mirrored. The colon
- * suffix is a heuristic: Pi checks the registry for an exact model id
- * (colons can be part of the id) before splitting, which we cannot do here.
+ * bare "--model"/"--thinking" as its value is not mirrored.
+ *
+ * A trailing ":<level>" counts as explicit thinking only when it is not part
+ * of the model id: Pi matches the whole pattern against the registry first
+ * (colons can be part of registered ids, e.g. "gw/foo:high") and splits the
+ * suffix only when nothing matched. The startup active model is Pi's own
+ * resolution result, so a whole-pattern match against it — in the same two
+ * reference forms findExactModelReferenceMatch uses, canonical
+ * "provider/id" and bare "id", lowercased — proves the suffix was the id
+ * and no explicit thinking was applied. Fuzzy whole-matches (the pattern a
+ * substring of a longer registered id) are not distinguished and keep the
+ * conservative skip.
  */
-function plainCliModelNeedsScopedLevel(): boolean {
+function plainCliModelNeedsScopedLevel(
+  activeModel: ModelRef | undefined,
+): boolean {
   const args = process.argv.slice(2);
   let model: string | undefined;
   let thinking: string | undefined;
@@ -62,7 +73,15 @@ function plainCliModelNeedsScopedLevel(): boolean {
   if (thinking !== undefined) return false;
   if (model === undefined) return false;
   const colon = model.lastIndexOf(":");
-  return !(colon !== -1 && THINKING_LEVELS.has(model.slice(colon + 1)));
+  if (colon === -1 || !THINKING_LEVELS.has(model.slice(colon + 1))) return true;
+  const reference = model.trim().toLowerCase();
+  const wholeModelReference =
+    activeModel !== undefined &&
+    (reference === `${activeModel.provider}/${activeModel.id}`.toLowerCase() ||
+      reference === activeModel.id.toLowerCase());
+  // Whole-pattern match ⇒ the suffix was part of the model id and Pi applied
+  // no explicit thinking; the scoped level still needs to fill the gap.
+  return wholeModelReference;
 }
 
 /**
@@ -183,7 +202,8 @@ export default function modelThinking(pi: ExtensionAPI): void {
     ) {
       return;
     }
-    if (event.reason === "startup" && !plainCliModelNeedsScopedLevel()) return;
+    if (event.reason === "startup" && !plainCliModelNeedsScopedLevel(ctx.model))
+      return;
     applyScopedLevel(ctx, true);
   });
 

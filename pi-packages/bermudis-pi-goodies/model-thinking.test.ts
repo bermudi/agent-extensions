@@ -217,6 +217,64 @@ describe("model-thinking", () => {
     expect(pi.level).toBe("high");
   });
 
+  test("applies the scoped level when a colon-terminated id is a registered model", async () => {
+    const pi = new PiHarness();
+    modelThinking(pi.api);
+    // "glm-5.2:high" is the model's registered id, not thinking shorthand:
+    // Pi exact-matches the whole pattern, so no explicit thinking is applied
+    // and the scoped level must fill the startup gap.
+    const activeModel = model("zai", "glm-5.2:high");
+    pi.level = "low";
+
+    await withArgv(["pi", "start", "--model", "zai/glm-5.2:high"], async () => {
+      await pi.emit(
+        "session_start",
+        { reason: "startup" },
+        context(activeModel, [scoped("zai", "glm-5.2:high", "medium")]),
+      );
+    });
+
+    expect(pi.level).toBe("medium");
+  });
+
+  test("applies the scoped level for a bare colon-terminated CLI model id", async () => {
+    const pi = new PiHarness();
+    modelThinking(pi.api);
+    // Without a provider prefix, Pi resolves the bare exact id the same
+    // way: the whole pattern is the model, no thinking suffix is parsed.
+    const activeModel = model("zai", "glm-5.2:high");
+    pi.level = "off";
+
+    await withArgv(["pi", "start", "--model", "glm-5.2:high"], async () => {
+      await pi.emit(
+        "session_start",
+        { reason: "startup" },
+        context(activeModel, [scoped("zai", "glm-5.2:high", "medium")]),
+      );
+    });
+
+    expect(pi.level).toBe("medium");
+  });
+
+  test("keeps the global level for a colon-terminated id without a scoped entry", async () => {
+    const pi = new PiHarness();
+    modelThinking(pi.api);
+    // A colon-terminated id resolves exactly like any other model: with no
+    // scoped entry there is nothing to apply and the global level stands.
+    const activeModel = model("zai", "glm-5.2:high");
+    pi.level = "low";
+
+    await withArgv(["pi", "start", "--model", "zai/glm-5.2:high"], async () => {
+      await pi.emit(
+        "session_start",
+        { reason: "startup" },
+        context(activeModel, [scoped("anthropic", "claude-test", "high")]),
+      );
+    });
+
+    expect(pi.level).toBe("low");
+  });
+
   test("applies the scoped level when --thinking is invalid", async () => {
     const pi = new PiHarness();
     modelThinking(pi.api);

@@ -46,7 +46,9 @@ thinking level after a colon:
 Pi applies those levels while cycling with Ctrl+P and Ctrl+Shift+P. This
 package fills the small consistency gaps: choosing a scoped model through the
 full model picker and starting with a plain explicit `--model` apply its
-configured level. Explicit `--thinking` and `--model ...:<level>` still win.
+configured level. Explicit `--thinking` and `--model ...:<level>` still win
+(unless the `:<level>` ending is the model's registered id, in which case the
+scoped level applies).
 One gap is inherent to Pi: it emits no selection event when you pick the
 model that is already active, so re-selecting it in the full picker leaves a
 manual thinking level in place — switch models (or cycle) to snap back.
