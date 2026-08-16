@@ -3,17 +3,17 @@
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
 extensions. One entry point, nine independent features.
 
-| Feature | Command / hook | What it does |
-|---------|----------------|--------------|
-| `copy-with-model` | `/copy-with-model` | Copy last assistant message to the clipboard in a code fence tagged with the model name. |
-| `copy-trajectory` | `/copy-trajectory [thinking]` | Copy the whole conversation (user + assistant text, tool calls stripped) to the clipboard; `thinking` also includes assistant thinking blocks. |
-| `name-with-ai` | `/name-with-ai [name]` | Generate a short session name from the first user message (or set one manually). |
-| `zed` | `/z` | Open Zed editor on the current working directory. |
-| `prefer-tools` | hook (no command) | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`. |
-| `model-thinking` | hook (no command) | Apply native scoped-model thinking levels consistently when selecting a model through the full picker. |
-| `kilo` | provider | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`. |
-| `provider-balance` | footer (no command) | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
-| `tps` | hook (no command) | Notify tokens/sec and in/out/cache token usage at the end of each agent turn. |
+| Feature            | Command / hook                | What it does                                                                                                                                    |
+| ------------------ | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `copy-with-model`  | `/copy-with-model`            | Copy last assistant message to the clipboard in a code fence tagged with the model name.                                                        |
+| `copy-trajectory`  | `/copy-trajectory [thinking]` | Copy the whole conversation (user + assistant text, tool calls stripped) to the clipboard; `thinking` also includes assistant thinking blocks.  |
+| `name-with-ai`     | `/name-with-ai [name]`        | Generate a short session name from the first user message (or set one manually).                                                                |
+| `zed`              | `/z`                          | Open Zed editor on the current working directory.                                                                                               |
+| `prefer-tools`     | hook (no command)             | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`.                                    |
+| `model-thinking`   | hook (no command)             | Apply native scoped-model thinking levels consistently when selecting a model through the full picker.                                          |
+| `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
+| `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
+| `tps`              | hook (no command)             | Notify tokens/sec and in/out/cache token usage at the end of each agent turn.                                                                   |
 
 ## Install
 
@@ -44,10 +44,13 @@ thinking level after a colon:
 ```
 
 Pi applies those levels while cycling with Ctrl+P and Ctrl+Shift+P. This
-package fills the small consistency gap: choosing a scoped model through the
-full model picker applies its configured level. Pi itself resolves the level
-on startup, including explicit CLI overrides. Resumed
-and forked sessions retain the level restored by Pi; `/new` carries the
+package fills the small consistency gaps: choosing a scoped model through the
+full model picker and starting with a plain explicit `--model` apply its
+configured level. Explicit `--thinking` and `--model ...:<level>` still win.
+One gap is inherent to Pi: it emits no selection event when you pick the
+model that is already active, so re-selecting it in the full picker leaves a
+manual thinking level in place — switch models (or cycle) to snap back.
+Resumed and forked sessions retain the level restored by Pi; `/new` carries the
 previous session's model and active thinking level into the new session.
 
 Use `/scoped-models` to search, enable, disable, and reorder the cycle list.
