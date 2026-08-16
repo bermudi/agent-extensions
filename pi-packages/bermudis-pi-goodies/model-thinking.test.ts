@@ -1,44 +1,13 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import {
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  utimesSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import modelThinking from "./model-thinking.ts";
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
+type Model = NonNullable<ExtensionContext["model"]>;
 type Handler = (event: never, ctx: ExtensionContext) => unknown;
-type CommandHandler = (
-  args: string,
-  ctx: ExtensionContext,
-) => Promise<void> | void;
-
-const temporaryDirectories: string[] = [];
-
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-function temporaryConfig(config?: unknown): string {
-  const directory = mkdtempSync(join(tmpdir(), "model-thinking-test-"));
-  temporaryDirectories.push(directory);
-  const path = join(directory, "model-thinking.json");
-  if (config !== undefined) {
-    writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
-  }
-  return path;
-}
 
 function model(
   provider: string,
@@ -48,12 +17,29 @@ function model(
 }
 
 function context(
-  activeModel: NonNullable<ExtensionContext["model"]>,
+  activeModel: Model,
+  scopedModels: readonly {
+    model: Model;
+    thinkingLevel?: ThinkingLevel;
+  }[],
   notifications: string[] = [],
+  registryModels: readonly Model[] = [],
 ): ExtensionContext {
   return {
     model: activeModel,
+    scopedModels,
     hasUI: true,
+    modelRegistry: {
+      find(provider: string, id: string) {
+        return [
+          activeModel,
+          ...scopedModels.map((entry) => entry.model),
+          ...registryModels,
+        ].find(
+          (candidate) => candidate.provider === provider && candidate.id === id,
+        );
+      },
+    },
     ui: {
       notify(message: string) {
         notifications.push(message);
@@ -64,10 +50,8 @@ function context(
 
 class PiHarness {
   level: ThinkingLevel = "off";
-  clamp: (level: ThinkingLevel) => ThinkingLevel = (level) => level;
+  selectedModel: Model | undefined;
   readonly handlers = new Map<string, Handler[]>();
-  readonly commands = new Map<string, CommandHandler>();
-  private activeContext: ExtensionContext | undefined;
 
   readonly api = {
     on: (event: string, handler: Handler) => {
@@ -75,253 +59,152 @@ class PiHarness {
       handlers.push(handler);
       this.handlers.set(event, handlers);
     },
-    registerCommand: (name: string, command: { handler: CommandHandler }) => {
-      this.commands.set(name, command.handler);
-    },
     getThinkingLevel: () => this.level,
-    setThinkingLevel: (requested: ThinkingLevel) => {
-      const next = this.clamp(requested);
-      if (next === this.level) return;
-      const previousLevel = this.level;
-      this.level = next;
-      if (!this.activeContext) {
-        throw new Error("setThinkingLevel called outside an event");
-      }
-      this.dispatch(
-        "thinking_level_select",
-        { type: "thinking_level_select", level: next, previousLevel },
-        this.activeContext,
-      );
+    setThinkingLevel: (level: ThinkingLevel) => {
+      this.level = level;
+    },
+    setModel: async (model: Model) => {
+      this.selectedModel = model;
+      return true;
     },
   } as unknown as ExtensionAPI;
 
-  emit(event: string, payload: object, ctx: ExtensionContext): void {
-    this.dispatch(event, { type: event, ...payload }, ctx);
-  }
-
-  selectThinking(level: ThinkingLevel, ctx: ExtensionContext): void {
-    const previousLevel = this.level;
-    this.level = level;
-    if (level !== previousLevel) {
-      this.dispatch(
-        "thinking_level_select",
-        { type: "thinking_level_select", level, previousLevel },
-        ctx,
-      );
-    }
-  }
-
-  private dispatch(
+  async emit(
     event: string,
     payload: object,
     ctx: ExtensionContext,
-  ): void {
-    const previousContext = this.activeContext;
-    this.activeContext = ctx;
-    try {
-      for (const handler of this.handlers.get(event) ?? []) {
-        void handler(payload as never, ctx);
-      }
-    } finally {
-      this.activeContext = previousContext;
+  ): Promise<void> {
+    for (const handler of this.handlers.get(event) ?? []) {
+      await handler(payload as never, ctx);
     }
   }
 }
 
-describe("model-thinking", () => {
-  test("applies exact model settings before provider defaults", () => {
-    const path = temporaryConfig({
-      providers: { anthropic: "high" },
-      models: { "anthropic/claude-test": "low" },
-    });
-    const pi = new PiHarness();
-    modelThinking(pi.api, { configPath: path });
-    const ctx = context(model("anthropic", "claude-test"));
+function scoped(
+  provider: string,
+  id: string,
+  thinkingLevel?: ThinkingLevel,
+): {
+  model: NonNullable<ExtensionContext["model"]>;
+  thinkingLevel?: ThinkingLevel;
+} {
+  return { model: model(provider, id), thinkingLevel };
+}
 
-    pi.emit("session_start", { reason: "startup" }, ctx);
+describe("model-thinking", () => {
+  test("does not override Pi's resolved startup level", async () => {
+    const pi = new PiHarness();
+    modelThinking(pi.api);
+    const activeModel = model("zai", "glm-5.2");
+    pi.level = "low";
+
+    await pi.emit(
+      "session_start",
+      { reason: "startup" },
+      context(activeModel, [scoped("zai", "glm-5.2", "high")]),
+    );
 
     expect(pi.level).toBe("low");
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
-      providers: { anthropic: "high" },
-      models: { "anthropic/claude-test": "low" },
-    });
   });
 
-  test("supports max and does not remember its own clamped change", () => {
-    const path = temporaryConfig({ providers: { openai: "max" } });
+  test("does not override a manual level on reload", async () => {
     const pi = new PiHarness();
-    pi.clamp = (level) => (level === "max" ? "high" : level);
-    modelThinking(pi.api, { configPath: path });
-    const ctx = context(model("openai", "reasoning-model"));
+    modelThinking(pi.api);
+    const activeModel = model("zai", "glm-5.2");
+    pi.level = "low";
 
-    pi.emit("session_start", { reason: "startup" }, ctx);
-
-    expect(pi.level).toBe("high");
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
-      providers: { openai: "max" },
-    });
-  });
-
-  test("does not remember automatic or manual thinking changes", () => {
-    const path = temporaryConfig({ providers: { anthropic: "high" } });
-    const pi = new PiHarness();
-    modelThinking(pi.api, { configPath: path });
-    const first = context(model("anthropic", "first"));
-    const secondModel = model("anthropic", "second");
-    const second = context(secondModel);
-
-    pi.emit("session_start", { reason: "startup" }, first);
-    pi.selectThinking("off", second); // Native inheritance/clamping during switch.
-    pi.emit(
-      "model_select",
-      {
-        model: secondModel,
-        previousModel: first.model,
-        source: "set",
-      },
-      second,
+    await pi.emit(
+      "session_start",
+      { reason: "reload" },
+      context(activeModel, [scoped("zai", "glm-5.2", "high")]),
     );
-    pi.selectThinking("medium", second); // User selection after model_select.
+
+    expect(pi.level).toBe("low");
+  });
+
+  test("applies a scoped level when the full model picker selects a model", async () => {
+    const pi = new PiHarness();
+    modelThinking(pi.api);
+    const activeModel = model("anthropic", "claude-test");
+    const notifications: string[] = [];
+
+    await pi.emit(
+      "model_select",
+      { source: "set" },
+      context(
+        activeModel,
+        [scoped("anthropic", "claude-test", "low")],
+        notifications,
+      ),
+    );
+
+    expect(pi.level).toBe("low");
+    expect(notifications).toEqual(["Thinking: off → low"]);
+  });
+
+  test("does not override restored session thinking", async () => {
+    const pi = new PiHarness();
+    modelThinking(pi.api);
+    pi.level = "medium";
+    const activeModel = model("zai", "glm-5.2");
+    const ctx = context(activeModel, [scoped("zai", "glm-5.2", "high")]);
+
+    await pi.emit("model_select", { source: "restore" }, ctx);
+    await pi.emit("session_start", { reason: "resume" }, ctx);
+    await pi.emit("session_start", { reason: "fork" }, ctx);
 
     expect(pi.level).toBe("medium");
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
-      providers: { anthropic: "high" },
-    });
   });
 
-  test("does not alter an exact override when the user changes levels", () => {
-    const path = temporaryConfig({
-      providers: { anthropic: "high" },
-      models: { "anthropic/claude-test": "low" },
-    });
+  test("restores both model and thinking level after /new", async () => {
     const pi = new PiHarness();
-    modelThinking(pi.api, { configPath: path });
-    const ctx = context(model("anthropic", "claude-test"));
+    modelThinking(pi.api);
+    const previousModel = model("anthropic", "unmanaged");
+    const newModel = model("opencode", "hy3-free");
+    const scopedModels = [scoped("opencode", "hy3-free", "high")];
+    const ctx = context(newModel, scopedModels, [], [previousModel]);
 
-    pi.emit("session_start", { reason: "startup" }, ctx);
-    pi.selectThinking("high", ctx);
-
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
-      providers: { anthropic: "high" },
-      models: { "anthropic/claude-test": "low" },
-    });
-  });
-
-  test("set saves the current level for the current model and overwrites its entry", async () => {
-    const path = temporaryConfig({
-      providers: { anthropic: "high" },
-      models: {
-        "anthropic/claude-test": "low",
-        "anthropic/other": "medium",
-      },
-    });
-    const pi = new PiHarness();
-    modelThinking(pi.api, { configPath: path });
-    const ctx = context(model("anthropic", "claude-test"));
-    pi.level = "xhigh";
-
-    await pi.commands.get("model-thinking")!("set", ctx);
-
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
-      providers: { anthropic: "high" },
-      models: {
-        "anthropic/claude-test": "xhigh",
-        "anthropic/other": "medium",
-      },
-    });
-  });
-
-  test("set can bootstrap an unmanaged model", async () => {
-    const path = temporaryConfig();
-    const pi = new PiHarness();
-    modelThinking(pi.api, { configPath: path });
-    const ctx = context(model("unmanaged", "model"));
-    pi.level = "xhigh";
-
-    await pi.commands.get("model-thinking")!("set", ctx);
-
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
-      models: { "unmanaged/model": "xhigh" },
-    });
-  });
-
-  test("set refuses to overwrite malformed config", async () => {
-    const path = temporaryConfig();
-    writeFileSync(path, "{ not valid json\n");
-    const pi = new PiHarness();
-    modelThinking(pi.api, { configPath: path });
-    const notifications: string[] = [];
-    const ctx = context(model("unmanaged", "model"), notifications);
-
-    await pi.commands.get("model-thinking")!("set", ctx);
-
-    expect(readFileSync(path, "utf8")).toBe("{ not valid json\n");
-    expect(notifications.some((message) => message.includes("Repair"))).toBe(
-      true,
+    pi.level = "low";
+    await pi.emit(
+      "session_before_switch",
+      { reason: "new" },
+      context(previousModel, scopedModels),
     );
+    await pi.emit("session_start", { reason: "new" }, ctx);
+
+    expect(pi.selectedModel).toEqual(previousModel);
+    expect(pi.level).toBe("low");
   });
 
-  test("reloads a repaired config even when size and mtime are unchanged", () => {
-    const path = temporaryConfig();
-    const unchangedMtime = 1_700_000_000;
-    const invalid = '{"providers":{"a":"????"}}\n';
-    const repaired = '{"providers":{"a":"high"}}\n';
-    expect(Buffer.byteLength(invalid)).toBe(Buffer.byteLength(repaired));
-    writeFileSync(path, invalid);
-    utimesSync(path, unchangedMtime, unchangedMtime);
-
+  test("leaves models without a scoped level alone", async () => {
     const pi = new PiHarness();
-    modelThinking(pi.api, { configPath: path });
-    const ctx = context(model("a", "model"));
+    modelThinking(pi.api);
+    pi.level = "xhigh";
+    const activeModel = model("openai", "unmanaged");
 
-    pi.emit("session_start", { reason: "startup" }, ctx);
-    expect(pi.level).toBe("off");
-
-    writeFileSync(path, repaired);
-    utimesSync(path, unchangedMtime, unchangedMtime);
-    expect(statSync(path).size).toBe(Buffer.byteLength(invalid));
-
-    pi.emit("session_start", { reason: "reload" }, ctx);
-
-    expect(pi.level).toBe("high");
-  });
-
-  test("status reports malformed config instead of treating it as empty", async () => {
-    const path = temporaryConfig();
-    writeFileSync(path, "{ not valid json\n");
-    const pi = new PiHarness();
-    modelThinking(pi.api, { configPath: path });
-    const notifications: string[] = [];
-    const ctx = context(model("unmanaged", "model"), notifications);
-
-    await pi.commands.get("model-thinking")!("", ctx);
-
-    expect(notifications[0]).toContain("config invalid");
-    expect(notifications[0]).toContain("no policy applied");
-  });
-
-  test("reset explicitly clears malformed config", async () => {
-    const path = temporaryConfig();
-    writeFileSync(path, "{ not valid json\n");
-    const pi = new PiHarness();
-    modelThinking(pi.api, { configPath: path });
-    const ctx = context(model("unmanaged", "model"));
-
-    await pi.commands.get("model-thinking")!("reset", ctx);
-
-    expect(() => readFileSync(path, "utf8")).toThrow();
-  });
-
-  test("leaves unmanaged models to Pi and does not create a config", () => {
-    const path = temporaryConfig();
-    const pi = new PiHarness();
-    modelThinking(pi.api, { configPath: path });
-    const ctx = context(model("unmanaged", "model"));
-
-    pi.emit("session_start", { reason: "startup" }, ctx);
-    pi.selectThinking("xhigh", ctx);
+    await pi.emit(
+      "model_select",
+      { source: "set" },
+      context(activeModel, [scoped("zai", "glm-5.2", "high")]),
+    );
 
     expect(pi.level).toBe("xhigh");
-    expect(() => readFileSync(path, "utf8")).toThrow();
+  });
+
+  test("does not notify when the native cycle already applied the level", async () => {
+    const pi = new PiHarness();
+    modelThinking(pi.api);
+    pi.level = "high";
+    const notifications: string[] = [];
+    const activeModel = model("zai", "glm-5.2");
+
+    await pi.emit(
+      "model_select",
+      { source: "cycle" },
+      context(activeModel, [scoped("zai", "glm-5.2", "high")], notifications),
+    );
+
+    expect(pi.level).toBe("high");
+    expect(notifications).toEqual([]);
   });
 });

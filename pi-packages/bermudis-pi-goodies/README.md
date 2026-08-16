@@ -1,7 +1,7 @@
 # bermudis-pi-goodies
 
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
-extensions. One entry point, ten independent features.
+extensions. One entry point, nine independent features.
 
 | Feature | Command / hook | What it does |
 |---------|----------------|--------------|
@@ -10,8 +10,7 @@ extensions. One entry point, ten independent features.
 | `name-with-ai` | `/name-with-ai [name]` | Generate a short session name from the first user message (or set one manually). |
 | `zed` | `/z` | Open Zed editor on the current working directory. |
 | `prefer-tools` | hook (no command) | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`. |
-| `model-thinking` | hook + `/model-thinking` | Apply provider/model thinking defaults and explicitly save per-model defaults. |
-| `fixed-defaults` | hook + `/fixed-defaults` | Keep the global startup provider and model fixed while allowing in-session model changes; `/fixed-defaults set` pins the current model. |
+| `model-thinking` | hook (no command) | Apply native scoped-model thinking levels consistently when selecting a model through the full picker. |
 | `kilo` | provider | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`. |
 | `provider-balance` | footer (no command) | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 | `tps` | hook (no command) | Notify tokens/sec and in/out/cache token usage at the end of each agent turn. |
@@ -28,77 +27,33 @@ Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
 feature is independent — disabling one is a one-line edit in `index.ts`.
 Kilo's provider and its balance footer are bundled here.
 
-## Model-specific thinking
+## Model selection and thinking
 
-This feature is deliberately opt-in: models not covered by the config retain
-Pi's native thinking-level behavior. Create `~/.pi/agent/model-thinking.json`
-with provider defaults, exact model defaults, or both:
-
-```json
-{
-  "providers": {
-    "anthropic": "high",
-    "openai-codex": "xhigh"
-  },
-  "models": {
-    "anthropic/claude-haiku-4-5": "low"
-  }
-}
-```
-
-Exact `provider/model-id` entries take precedence over provider defaults. Use
-`/model-thinking set` to explicitly save the current model's current thinking
-level as an exact-model entry; it also bootstraps models not yet covered by the
-config and overwrites an existing entry. Manual thinking-level changes in Pi do
-not modify this file. All current Pi levels are accepted:
-`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
-`/model-thinking` shows the active resolution and config path;
-`/model-thinking reset` deletes the whole config. A malformed config is reported
-and ignored; `/model-thinking set` refuses to overwrite it until you repair the
-file or reset it.
-
-## Fixed startup model
-
-Pi normally saves the last model and thinking level selected in the global
-settings file. `fixed-defaults` pins only the cross-session provider and model;
-`model-thinking` is the sole owner of model-specific thinking levels.
-
-Create `~/.pi/agent/fixed-defaults.json` to pin a startup model:
+Pi's native model settings are the single source of truth. Add models to
+`enabledModels` in `~/.pi/agent/settings.json` in cycle order. Add an optional
+thinking level after a colon:
 
 ```json
 {
-  "provider": "openai-codex",
-  "model": "gpt-5.6-luna"
+  "enabledModels": [
+    "opencode/hy3-free:high",
+    "zai/glm-5.2:high",
+    "openai-codex/gpt-5.6-terra:medium"
+  ]
 }
 ```
 
-Selecting a different model still changes the active session and its transcript;
-`fixed-defaults` restores the startup model after Pi persists a selection. Pi
-chooses the initial model before extensions receive `session_start`, so if you
-manually create or edit a pin for B while settings still name A, the current
-session remains on A and B starts with the next fresh session. Resuming an
-existing session restores that session's model instead.
+Pi applies those levels while cycling with Ctrl+P and Ctrl+Shift+P. This
+package fills the small consistency gap: choosing a scoped model through the
+full model picker applies its configured level. Pi itself resolves the level
+on startup, including explicit CLI overrides. Resumed
+and forked sessions retain the level restored by Pi; `/new` carries the
+previous session's model and active thinking level into the new session.
 
-`/new` keeps the model and thinking level from the session you were just in,
-rather than switching to the pinned default and the settings thinking level.
-The level is re-applied after any per-model thinking policy, so a `/new`
-carries over a manual override. The pin still applies to a fresh `pi` launch.
-
-Older config files may contain `thinkingLevel`; that field is accepted for
-compatibility but ignored and should be managed in `model-thinking.json` instead.
-`fixed-defaults` logs a warning and shows the migration in its status when it
-finds the legacy field. The `/fixed-defaults set` command rewrites the file in
-the provider/model-only format.
-
-Manage the pin from Pi:
-
-- `/fixed-defaults set` — pin the currently active model as the startup model
-  (written to the override file and applied to `settings.json` immediately).
-- `/fixed-defaults` — show the active model, pinned startup model, and override
-  path.
-- `/fixed-defaults reset` — save the currently active model as Pi's last
-  selection, then delete the override file and stop pinning. With no active
-  model, it refuses to remove the pin.
+Use `/scoped-models` to search, enable, disable, and reorder the cycle list.
+Be aware that pi 0.84.2 currently writes bare model IDs when that screen is
+saved, so saving there removes any `:level` suffixes; restore them in
+`settings.json` afterward.
 
 ## Provider and balance details
 

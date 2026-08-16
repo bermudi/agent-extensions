@@ -1,211 +1,48 @@
-import {
-  getAgentDir,
-  type ExtensionAPI,
-  type ExtensionContext,
+import type {
+  ExtensionAPI,
+  ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import {
-  describeError,
-  unlinkIfPresent,
-  writeJsonFileAtomic,
-} from "./json-file.ts";
-
-const CONFIG_FILENAME = "model-thinking.json";
-const ALL_LEVELS = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
+type Model = NonNullable<ExtensionContext["model"]>;
 
-interface ModelThinkingConfig {
-  models?: Record<string, ThinkingLevel>;
-  providers?: Record<string, ThinkingLevel>;
-}
-
-interface ModelRef {
+interface PreviousSessionState {
   provider: string;
   id: string;
+  thinkingLevel: ThinkingLevel;
 }
 
-interface ModelThinkingOptions {
-  /** Internal seam used by tests; normal callers use Pi's global agent dir. */
-  configPath?: string;
-}
+// The extension factory is recreated when Pi replaces a session. Keep this
+// snapshot at module scope so it survives that recreation.
+let previousSessionState: PreviousSessionState | null = null;
 
-function isThinkingLevel(value: unknown): value is ThinkingLevel {
-  return (
-    typeof value === "string" &&
-    (ALL_LEVELS as readonly string[]).includes(value)
-  );
-}
-
-function normalizeRecord(
-  value: unknown,
-  field: "models" | "providers",
-): Record<string, ThinkingLevel> | undefined {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`\`${field}\` must be an object`);
-  }
-
-  const result: Record<string, ThinkingLevel> = {};
-  for (const [key, level] of Object.entries(value)) {
-    if (!isThinkingLevel(level)) {
-      throw new Error(
-        `\`${field}.${key}\` must be one of: ${ALL_LEVELS.join(", ")}`,
-      );
-    }
-    result[key] = level;
-  }
-  return Object.keys(result).length > 0 ? result : undefined;
-}
-
-function parseConfig(value: unknown): ModelThinkingConfig {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("the top level must be an object");
-  }
-
-  const input = value as Record<string, unknown>;
-  const unknownKeys = Object.keys(input).filter(
-    (key) => key !== "models" && key !== "providers",
-  );
-  if (unknownKeys.length > 0) {
-    throw new Error(`unknown field(s): ${unknownKeys.join(", ")}`);
-  }
-
-  return {
-    models: normalizeRecord(input.models, "models"),
-    providers: normalizeRecord(input.providers, "providers"),
-  };
-}
-
-function fileStamp(path: string): string | undefined {
-  try {
-    const stat = statSync(path);
-    return `${stat.mtimeMs}:${stat.size}`;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return undefined;
-    throw error;
-  }
-}
-
-interface ConfigLoadResult {
-  config: ModelThinkingConfig;
-  /** Non-null when the file exists but could not be read or validated. */
-  error: string | null;
-}
-
-class ConfigStore {
-  readonly path: string;
-  private initialized = false;
-  private cachedStamp: string | undefined;
-  private cachedResult: ConfigLoadResult = { config: {}, error: null };
-
-  constructor(path: string) {
-    this.path = path;
-  }
-
-  load(): ConfigLoadResult {
-    let stamp: string | undefined;
-    try {
-      stamp = fileStamp(this.path);
-    } catch (error) {
-      const message = describeError(error);
-      console.error(`[model-thinking] failed to stat ${this.path}:`, message);
-      return { config: {}, error: message };
-    }
-
-    // Keep retrying a file that previously failed to load. A repair can leave
-    // its size and mtime unchanged, so an error result must not be cached by
-    // the same stamp as a successful read.
-    if (
-      this.initialized &&
-      stamp === this.cachedStamp &&
-      this.cachedResult.error === null
-    ) {
-      return this.cachedResult;
-    }
-
-    this.initialized = true;
-    this.cachedStamp = stamp;
-    if (stamp === undefined) {
-      this.cachedResult = { config: {}, error: null };
-      return this.cachedResult;
-    }
-
-    try {
-      this.cachedResult = {
-        config: parseConfig(
-          JSON.parse(readFileSync(this.path, "utf8")) as unknown,
-        ),
-        error: null,
-      };
-    } catch (error) {
-      const message = describeError(error);
-      console.error(
-        `[model-thinking] invalid config at ${this.path}:`,
-        message,
-      );
-      this.cachedResult = { config: {}, error: message };
-    }
-    return this.cachedResult;
-  }
-
-  save(config: ModelThinkingConfig): void {
-    writeJsonFileAtomic(this.path, config);
-    this.cachedResult = { config, error: null };
-    this.cachedStamp = fileStamp(this.path);
-    this.initialized = true;
-  }
-
-  reset(): boolean {
-    const removed = unlinkIfPresent(this.path);
-    this.initialized = true;
-    this.cachedStamp = undefined;
-    this.cachedResult = { config: {}, error: null };
-    return removed;
-  }
-}
-
-function modelKey(model: ModelRef): string {
-  return `${model.provider}/${model.id}`;
-}
-
-function resolveThinkingLevel(
-  config: ModelThinkingConfig,
-  model: ModelRef | undefined,
-): ThinkingLevel | undefined {
-  if (!model) return undefined;
-  return config.models?.[modelKey(model)] ?? config.providers?.[model.provider];
+function sameModel(left: Model, right: Model): boolean {
+  return left.provider === right.provider && left.id === right.id;
 }
 
 /**
- * Opt-in per-model thinking policy. A provider or exact model must first be
- * present in model-thinking.json; unmanaged models retain Pi's native behavior.
+ * Pi's scoped-models configuration is the source of truth for both the cycle
+ * list and per-model thinking levels. The native cycle path already applies
+ * those levels; this hook fills the two gaps in the native behavior:
+ *
+ * - selecting a model through the full picker should apply its scoped level;
+ *
+ * Pi applies the scoped level during startup, including explicit CLI
+ * overrides, so the startup hook must leave that resolved value alone.
+ *
+ * Resume and fork retain the model and level restored by Pi. /new is not a
+ * session restore in Pi: it starts from the saved default/scoped model, so we
+ * capture and restore the previous session explicitly.
  */
-export default function modelThinking(
-  pi: ExtensionAPI,
-  options: ModelThinkingOptions = {},
-): void {
-  const store = new ConfigStore(
-    options.configPath ?? join(getAgentDir(), CONFIG_FILENAME),
-  );
-  function apply(ctx: ExtensionContext, silent: boolean): void {
+export default function modelThinking(pi: ExtensionAPI): void {
+  function applyScopedLevel(ctx: ExtensionContext, silent: boolean): void {
     const model = ctx.model;
-    const loaded = store.load();
-    // Never treat a broken file as an empty policy: doing so would hide the
-    // error and make a later `/model-thinking set` overwrite it.
-    if (loaded.error || !model) return;
+    if (!model) return;
 
-    const level = resolveThinkingLevel(loaded.config, model);
+    const scoped = ctx.scopedModels.find((entry) =>
+      sameModel(entry.model, model),
+    );
+    const level = scoped?.thinkingLevel as ThinkingLevel | undefined;
     if (level === undefined) return;
 
     const before = pi.getThinkingLevel();
@@ -217,107 +54,77 @@ export default function modelThinking(
     }
   }
 
+  async function restorePreviousSession(
+    ctx: ExtensionContext,
+    previous: PreviousSessionState,
+  ): Promise<void> {
+    const model = ctx.modelRegistry.find(previous.provider, previous.id);
+    if (!model) {
+      console.error(
+        `[model-thinking] could not restore ${previous.provider}/${previous.id} after /new: model is unavailable`,
+      );
+      return;
+    }
+
+    try {
+      const applied = await pi.setModel(model);
+      if (!applied) {
+        console.error(
+          `[model-thinking] could not restore ${previous.provider}/${previous.id} after /new: provider authentication is unavailable`,
+        );
+        return;
+      }
+
+      // setModel emits model_select, where the scoped policy may apply. The
+      // captured session level must have the final word for /new.
+      pi.setThinkingLevel(previous.thinkingLevel);
+    } catch (error) {
+      console.error(
+        `[model-thinking] failed to restore ${previous.provider}/${previous.id} after /new:`,
+        error,
+      );
+    }
+  }
+
   pi.on("model_select", (event, ctx) => {
-    // When Pi restores a model from session history (e.g. resume/fork), keep
-    // the thinking level that was active in that session instead of
-    // overwriting it with the per-model default.
+    // A restored session owns its historical thinking level.
     if (event.source === "restore") return;
-    apply(ctx, false);
+    applyScopedLevel(ctx, false);
   });
 
   pi.on("session_start", (event, ctx) => {
-    if (!ctx.model) return;
-    // Resumed or forked sessions already carry their last thinking level
-    // (restored by Pi from the session's branch). Don't clobber it with
-    // the per-model default; the default only applies to fresh sessions.
-    if (event.reason === "resume" || event.reason === "fork") return;
-    apply(ctx, true);
+    if (event.reason === "new") {
+      const previous = previousSessionState;
+      previousSessionState = null;
+      if (previous) return restorePreviousSession(ctx, previous);
+      return;
+    }
+
+    // Pi restores these sessions' model and thinking level from the session.
+    // Startup is also already resolved by Pi, including --thinking and
+    // --model ...:<level>. Reload preserves the current session, so applying
+    // the scoped default here would clobber a manual change.
+    if (
+      event.reason === "startup" ||
+      event.reason === "reload" ||
+      event.reason === "resume" ||
+      event.reason === "fork"
+    ) {
+      return;
+    }
+    applyScopedLevel(ctx, true);
   });
 
-  pi.registerCommand("model-thinking", {
-    description: "Show, save, or reset model-specific thinking levels",
-    handler: async (args, ctx) => {
-      const command = args.trim();
+  pi.on("session_before_switch", (event, ctx) => {
+    if (event.reason !== "new") return;
 
-      if (command === "set") {
-        const model = ctx.model;
-        if (!model) {
-          ctx.ui.notify(
-            "Cannot save thinking level without an active model.",
-            "warning",
-          );
-          return;
+    const model = ctx.model;
+    previousSessionState = model
+      ? {
+          provider: model.provider,
+          id: model.id,
+          thinkingLevel: pi.getThinkingLevel(),
         }
-
-        const key = modelKey(model);
-        const level = pi.getThinkingLevel();
-        try {
-          const loaded = store.load();
-          if (loaded.error) {
-            ctx.ui.notify(
-              `Cannot save model-thinking config: ${loaded.error}. Repair ${store.path} or run /model-thinking reset first.`,
-              "error",
-            );
-            return;
-          }
-
-          store.save({
-            ...loaded.config,
-            models: { ...loaded.config.models, [key]: level },
-          });
-          ctx.ui.notify(`Saved ${key}: ${level}`, "info");
-        } catch (error) {
-          console.error(
-            "[model-thinking] failed to save current model:",
-            error,
-          );
-          ctx.ui.notify("Failed to save model-thinking config.", "error");
-        }
-        return;
-      }
-
-      if (command === "reset") {
-        try {
-          const removed = store.reset();
-          ctx.ui.notify(
-            removed
-              ? "Model-thinking config cleared."
-              : "No model-thinking config file to clear.",
-            "info",
-          );
-        } catch (error) {
-          console.error("[model-thinking] failed to clear config:", error);
-          ctx.ui.notify("Failed to clear model-thinking config.", "error");
-        }
-        return;
-      }
-
-      if (command !== "") {
-        ctx.ui.notify("Usage: /model-thinking [set|reset]", "warning");
-        return;
-      }
-
-      const model = ctx.model;
-      const loaded = store.load();
-      const resolved = loaded.error
-        ? undefined
-        : resolveThinkingLevel(loaded.config, model);
-      const lines = [
-        `model: ${model ? modelKey(model) : "none"}`,
-        `managed: ${resolved === undefined ? "no" : "yes"}`,
-        `file: ${store.path}`,
-        `saved: ${resolved ?? "none — pi handles this model natively"}`,
-        `current: ${pi.getThinkingLevel()}`,
-        ...(loaded.error
-          ? [`⚠ config invalid — no policy applied: ${loaded.error}`]
-          : []),
-        "",
-        "run `/model-thinking set` to save this model and level; `/model-thinking reset` to clear all configured levels",
-      ];
-      const message = lines.join("\n");
-
-      if (ctx.hasUI) ctx.ui.notify(message, resolved ? "info" : "warning");
-      else console.log(message);
-    },
+      : null;
   });
 }
