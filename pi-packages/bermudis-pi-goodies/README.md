@@ -20,7 +20,7 @@ extensions. One entry point, nine independent features.
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.5.3
+pi install npm:bermudis-pi-goodies@0.5.4
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
