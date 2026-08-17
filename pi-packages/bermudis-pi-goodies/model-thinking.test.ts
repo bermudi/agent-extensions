@@ -12,8 +12,9 @@ type Handler = (event: never, ctx: ExtensionContext) => unknown;
 function model(
   provider: string,
   id: string,
+  name?: string,
 ): NonNullable<ExtensionContext["model"]> {
-  return { provider, id } as NonNullable<ExtensionContext["model"]>;
+  return { provider, id, name } as NonNullable<ExtensionContext["model"]>;
 }
 
 function context(
@@ -147,6 +148,23 @@ describe("model-thinking", () => {
     expect(pi.level).toBe("high");
   });
 
+  test("does not overwrite restored thinking for an unresolved CLI model", async () => {
+    const pi = new PiHarness();
+    modelThinking(pi.api);
+    const restoredModel = model("zai", "glm-5.2");
+    pi.level = "low";
+
+    await withArgv(["pi", "start", "--model", "does-not-exist"], async () => {
+      await pi.emit(
+        "session_start",
+        { reason: "startup" },
+        context(restoredModel, [scoped("zai", "glm-5.2", "high")]),
+      );
+    });
+
+    expect(pi.level).toBe("low");
+  });
+
   test("does not override explicit CLI thinking", async () => {
     const pi = new PiHarness();
     modelThinking(pi.api);
@@ -252,6 +270,30 @@ describe("model-thinking", () => {
         context(activeModel, [scoped("zai", "glm-5.2:high", "medium")]),
       );
     });
+
+    expect(pi.level).toBe("medium");
+  });
+
+  test("applies the scoped level when a fuzzy whole model ID ends in a level", async () => {
+    const pi = new PiHarness();
+    modelThinking(pi.api);
+    // Pi fuzzy-matches "foo:high" against this full ID before considering
+    // ":high" as thinking shorthand.
+    const activeModel = model("gateway", "vendor-foo:high");
+    pi.level = "low";
+
+    await withArgv(
+      ["pi", "start", "--provider", "gateway", "--model", "foo:high"],
+      async () => {
+        await pi.emit(
+          "session_start",
+          { reason: "startup" },
+          context(activeModel, [
+            scoped("gateway", "vendor-foo:high", "medium"),
+          ]),
+        );
+      },
+    );
 
     expect(pi.level).toBe("medium");
   });

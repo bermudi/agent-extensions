@@ -44,44 +44,82 @@ function sameModel(left: ModelRef, right: ModelRef): boolean {
  * value token sets nothing. Degenerate argv where another flag consumes a
  * bare "--model"/"--thinking" as its value is not mirrored.
  *
- * A trailing ":<level>" counts as explicit thinking only when it is not part
- * of the model id: Pi matches the whole pattern against the registry first
- * (colons can be part of registered ids, e.g. "gw/foo:high") and splits the
- * suffix only when nothing matched. The startup active model is Pi's own
- * resolution result, so a whole-pattern match against it — in the same two
- * reference forms findExactModelReferenceMatch uses, canonical
- * "provider/id" and bare "id", lowercased — proves the suffix was the id
- * and no explicit thinking was applied. Fuzzy whole-matches (the pattern a
- * substring of a longer registered id) are not distinguished and keep the
- * conservative skip.
+ * Do not trust the presence of --model alone: an invalid CLI model leaves a
+ * restored session's model active. Before touching thinking, confirm that the
+ * active model could be Pi's resolution of the CLI pattern. This also mirrors
+ * Pi's important ordering for a trailing ":<level>": it fuzzy-matches the
+ * complete pattern before splitting a thinking suffix.
  */
+function cliPatternMatchesActiveModel(
+  pattern: string,
+  provider: string | undefined,
+  activeModel: Model,
+): boolean {
+  const normalizedPattern = pattern.trim().toLowerCase();
+  if (!normalizedPattern) return false;
+
+  const normalizedProvider = provider?.trim().toLowerCase();
+  if (
+    normalizedProvider !== undefined &&
+    activeModel.provider.toLowerCase() !== normalizedProvider
+  ) {
+    return false;
+  }
+
+  let modelPattern = normalizedPattern;
+  const activeProviderPrefix = `${activeModel.provider}/`.toLowerCase();
+  if (modelPattern.startsWith(activeProviderPrefix)) {
+    modelPattern = modelPattern.slice(activeProviderPrefix.length);
+  } else if (
+    normalizedProvider === undefined &&
+    normalizedPattern.includes("/")
+  ) {
+    // Without the registry we cannot safely reinterpret an arbitrary slash as
+    // a provider separator: model IDs themselves may contain slashes.
+    return (
+      normalizedPattern ===
+      `${activeModel.provider}/${activeModel.id}`.toLowerCase()
+    );
+  }
+
+  const id = activeModel.id.toLowerCase();
+  const name = activeModel.name?.toLowerCase();
+  return (
+    modelPattern === id ||
+    id.includes(modelPattern) ||
+    name?.includes(modelPattern) === true
+  );
+}
+
 function plainCliModelNeedsScopedLevel(
-  activeModel: ModelRef | undefined,
+  activeModel: Model | undefined,
 ): boolean {
   const args = process.argv.slice(2);
   let model: string | undefined;
+  let provider: string | undefined;
   let thinking: string | undefined;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === "--model" && index + 1 < args.length) {
       model = args[++index];
+    } else if (arg === "--provider" && index + 1 < args.length) {
+      provider = args[++index];
     } else if (arg === "--thinking" && index + 1 < args.length) {
       const level = args[++index];
       if (THINKING_LEVELS.has(level)) thinking = level;
     }
   }
   if (thinking !== undefined) return false;
-  if (model === undefined) return false;
-  const colon = model.lastIndexOf(":");
-  if (colon === -1 || !THINKING_LEVELS.has(model.slice(colon + 1))) return true;
-  const reference = model.trim().toLowerCase();
-  const wholeModelReference =
-    activeModel !== undefined &&
-    (reference === `${activeModel.provider}/${activeModel.id}`.toLowerCase() ||
-      reference === activeModel.id.toLowerCase());
-  // Whole-pattern match ⇒ the suffix was part of the model id and Pi applied
-  // no explicit thinking; the scoped level still needs to fill the gap.
-  return wholeModelReference;
+  if (model === undefined || activeModel === undefined) return false;
+
+  // Pi first attempts the complete pattern. This confirms both that --model
+  // actually selected the active model (rather than falling back to a
+  // restored session) and that a ":<level>" suffix belongs to its ID.
+  if (cliPatternMatchesActiveModel(model, provider, activeModel)) return true;
+
+  // Either the CLI model did not resolve, or Pi split a trailing valid
+  // ":<level>" and applied explicit thinking. Both cases must be left alone.
+  return false;
 }
 
 /**
