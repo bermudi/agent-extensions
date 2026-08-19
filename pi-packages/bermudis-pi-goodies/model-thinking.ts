@@ -5,9 +5,12 @@
  * ("zai/glm-5.3:high"), but pi's /scoped-models screen rewrites
  * enabledModels with bare model ids, destroying any :level suffix on every
  * save. Rather than fight that writer, levels live in a sidecar keyed by
- * provider/id:
+ * provider/id, plus a separate logical global default. Keeping the latter is
+ * necessary because Pi persists every setThinkingLevel() call as its global
+ * default:
  *
  *   ~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json
+ *   ~/.pi/agent/data/bermudis-pi-goodies/thinking-default.json
  *
  * /scoped-models keeps owning which models are enabled and their cycle
  * order; /levels (registered here) owns the per-model thinking level; the
@@ -38,12 +41,22 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   Container,
+  Key,
+  matchesKey,
   Spacer,
   Text,
   getKeybindings,
+  type KeybindingsManager,
 } from "@earendil-works/pi-tui";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { writeJsonFileAtomic } from "./json-file.ts";
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
@@ -67,6 +80,10 @@ const DEFAULT_LEVELS_PATH = join(
   "bermudis-pi-goodies",
   "thinking-levels.json",
 );
+
+function defaultLevelPath(levelsPath: string): string {
+  return join(dirname(levelsPath), "thinking-default.json");
+}
 
 export function modelKey(model: Pick<Model, "provider" | "id">): string {
   return `${model.provider}/${model.id}`;
@@ -114,6 +131,130 @@ export function writeStoredLevels(
   path: string = DEFAULT_LEVELS_PATH,
 ): void {
   writeJsonFileAtomic(path, levels);
+}
+
+function readInheritedLevel(path: string): StoredLevel | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== "string" || !THINKING_LEVELS.has(value)) {
+      throw new Error("default level is not a valid thinking level");
+    }
+    return value as StoredLevel;
+  } catch (error) {
+    console.error(`[model-thinking] ignoring invalid ${path}:`, error);
+    return undefined;
+  }
+}
+
+/**
+ * Apply just this dialog's changes to a freshly-read sidecar.  The dialog
+ * may have been open while another Pi session saved its own rows, so writing
+ * `edited` wholesale would discard those rows.
+ */
+export function mergeStoredLevels(
+  initial: Readonly<Record<string, StoredLevel>>,
+  edited: Readonly<Record<string, StoredLevel>>,
+  current: Readonly<Record<string, StoredLevel>>,
+  rows: readonly { key: string }[],
+): Record<string, StoredLevel> {
+  const merged: Record<string, StoredLevel> = { ...current };
+  for (const row of rows) {
+    const was = initial[row.key];
+    const next = edited[row.key];
+    if (was === next) continue;
+    if (next === undefined) delete merged[row.key];
+    else merged[row.key] = next;
+  }
+  return merged;
+}
+
+const SIDECAR_LOCK_WAIT_MS = 10;
+const SIDECAR_LOCK_TIMEOUT_MS = 5_000;
+const STALE_SIDECAR_LOCK_MS = 30_000;
+const lockWaitArray = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Serialize the read/merge/write transaction across Pi processes. Atomic
+ * rename alone cannot prevent two dialogs that close at the same instant
+ * from both reading the same old sidecar and overwriting each other.
+ */
+function withSidecarLock<T>(path: string, operation: () => T): T {
+  const lockPath = `${path}.lock`;
+  mkdirSync(dirname(path), { recursive: true });
+  const deadline = Date.now() + SIDECAR_LOCK_TIMEOUT_MS;
+  let descriptor: number | undefined;
+
+  while (descriptor === undefined) {
+    try {
+      descriptor = openSync(lockPath, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+
+      // A crashed process must not block /levels forever. A normal locked
+      // transaction only reads and renames one small file, so 30 seconds is
+      // deliberately generous.
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > STALE_SIDECAR_LOCK_MS) {
+          unlinkSync(lockPath);
+          continue;
+        }
+      } catch (lockError) {
+        if ((lockError as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw lockError;
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for thinking-level sidecar lock`);
+      }
+      Atomics.wait(lockWaitArray, 0, 0, SIDECAR_LOCK_WAIT_MS);
+    }
+  }
+
+  let result: T | undefined;
+  let operationError: unknown;
+  try {
+    result = operation();
+  } catch (error) {
+    operationError = error;
+  }
+  let cleanupError: unknown;
+  try {
+    closeSync(descriptor);
+    unlinkSync(lockPath);
+  } catch (error) {
+    cleanupError = error;
+  }
+  if (operationError !== undefined && cleanupError !== undefined) {
+    throw new AggregateError(
+      [operationError, cleanupError],
+      `failed to update ${path} and release its lock`,
+    );
+  }
+  if (operationError !== undefined) throw operationError;
+  if (cleanupError !== undefined) throw cleanupError;
+  return result as T;
+}
+
+function mergeAndWriteStoredLevels(
+  initial: Readonly<Record<string, StoredLevel>>,
+  edited: Readonly<Record<string, StoredLevel>>,
+  rows: readonly { key: string }[],
+  path: string,
+): void {
+  withSidecarLock(path, () => {
+    writeStoredLevels(
+      mergeStoredLevels(initial, edited, readStoredLevels(path), rows),
+      path,
+    );
+  });
 }
 
 /** The level ladder a row can cycle through: inherit + the model's levels. */
@@ -193,6 +334,10 @@ function applyStoredLevel(
   ctx: ExtensionContext,
   notify: boolean,
   levelsPath: string,
+  restoreInherited: boolean,
+  inheritedLevel: ThinkingLevel,
+  source?: "set" | "cycle",
+  setManagedLevel?: (level: ThinkingLevel) => void,
 ): void {
   const model = ctx.model;
   if (!model) return;
@@ -202,15 +347,25 @@ function applyStoredLevel(
   const scoped = ctx.scopedModels.find((entry) =>
     sameModel(entry.model, model),
   );
-  if (scoped?.thinkingLevel !== undefined) return;
+  if (scoped?.thinkingLevel !== undefined) {
+    // Pi applies a pinned level while cycling scoped models, but direct
+    // selection from the full picker goes through setModel() and carries the
+    // previous level instead. Apply the pin in that one missing path.
+    if (source === "set") {
+      (setManagedLevel ?? pi.setThinkingLevel.bind(pi))(scoped.thinkingLevel);
+    }
+    return;
+  }
 
   const level = readStoredLevels(levelsPath)[modelKey(model)];
-  if (level === undefined) return;
+  if (level === undefined && !restoreInherited) return;
 
   const before = pi.getThinkingLevel();
   // "off" is a valid runtime level (pi clamps per model); the declared API
   // type only models the non-off ladder.
-  pi.setThinkingLevel(level as ThinkingLevel);
+  (setManagedLevel ?? pi.setThinkingLevel.bind(pi))(
+    (level ?? inheritedLevel) as ThinkingLevel,
+  );
   if (notify && pi.getThinkingLevel() !== before) {
     ctx.ui.notify(`Thinking: ${before} → ${pi.getThinkingLevel()}`, "info");
   }
@@ -227,6 +382,7 @@ interface LevelsRow {
 }
 
 export class LevelsSelectorComponent extends Container {
+  private static readonly maxVisibleRows = 7;
   private selectedIndex = 0;
   private readonly listContainer = new Container();
   private closed = false;
@@ -240,6 +396,7 @@ export class LevelsSelectorComponent extends Container {
     private readonly done: (
       result: Record<string, StoredLevel> | undefined,
     ) => void,
+    private readonly keybindings: KeybindingsManager = getKeybindings(),
   ) {
     super();
     this.addChild(new DynamicBorder());
@@ -281,7 +438,21 @@ export class LevelsSelectorComponent extends Container {
   private updateList(): void {
     this.listContainer.clear();
     const width = Math.max(...this.rows.map((row) => row.key.length));
-    for (const [index, row] of this.rows.entries()) {
+    const start = Math.max(
+      0,
+      Math.min(
+        this.selectedIndex -
+          Math.floor(LevelsSelectorComponent.maxVisibleRows / 2),
+        this.rows.length - LevelsSelectorComponent.maxVisibleRows,
+      ),
+    );
+    const end = Math.min(
+      start + LevelsSelectorComponent.maxVisibleRows,
+      this.rows.length,
+    );
+    for (let index = start; index < end; index++) {
+      const row = this.rows[index];
+      if (!row) continue;
       const selected = index === this.selectedIndex;
       const marker =
         row.key === this.activeKey
@@ -296,6 +467,18 @@ export class LevelsSelectorComponent extends Container {
       this.listContainer.addChild(
         new Text(
           selected ? this.theme.fg("accent", `→ ${line}`) : `  ${line}`,
+          1,
+          0,
+        ),
+      );
+    }
+    if (start > 0 || end < this.rows.length) {
+      this.listContainer.addChild(
+        new Text(
+          this.theme.fg(
+            "muted",
+            `  (${this.selectedIndex + 1}/${this.rows.length})`,
+          ),
           1,
           0,
         ),
@@ -321,27 +504,28 @@ export class LevelsSelectorComponent extends Container {
   }
 
   handleInput(data: string): void {
-    const kb = getKeybindings();
-    if (kb.matches(data, "tui.select.up") || data === "k") {
+    if (
+      this.keybindings.matches(data, "tui.select.up") ||
+      matchesKey(data, "k")
+    ) {
       this.selectedIndex = Math.max(0, this.selectedIndex - 1);
       this.updateList();
-    } else if (kb.matches(data, "tui.select.down") || data === "j") {
+    } else if (
+      this.keybindings.matches(data, "tui.select.down") ||
+      matchesKey(data, "j")
+    ) {
       this.selectedIndex = Math.min(
         this.rows.length - 1,
         this.selectedIndex + 1,
       );
       this.updateList();
-    } else if (
-      kb.matches(data, "tui.select.confirm") ||
-      data === "\n" ||
-      data === "\r"
-    ) {
+    } else if (this.keybindings.matches(data, "tui.select.confirm")) {
       this.finish(this.collect());
-    } else if (kb.matches(data, "tui.select.cancel")) {
+    } else if (this.keybindings.matches(data, "tui.select.cancel")) {
       this.finish(undefined);
-    } else if (data === "\x1b[D" || data === "h") {
+    } else if (matchesKey(data, Key.left) || matchesKey(data, "h")) {
       this.cycle(-1);
-    } else if (data === "\x1b[C" || data === "l") {
+    } else if (matchesKey(data, Key.right) || matchesKey(data, "l")) {
       this.cycle(1);
     }
   }
@@ -350,6 +534,8 @@ export class LevelsSelectorComponent extends Container {
 export interface ModelThinkingOptions {
   /** Override the sidecar path (tests). */
   levelsPath?: string;
+  /** Override the logical global-default sidecar path (tests). */
+  inheritedLevelPath?: string;
 }
 
 export default function modelThinking(
@@ -357,6 +543,40 @@ export default function modelThinking(
   options: ModelThinkingOptions = {},
 ): void {
   const levelsPath = options.levelsPath ?? DEFAULT_LEVELS_PATH;
+  const inheritedLevelPath =
+    options.inheritedLevelPath ?? defaultLevelPath(levelsPath);
+  // Pi exposes the active level but not the persisted setting that supplied
+  // it. Capture it before this extension applies a model-specific value:
+  // setThinkingLevel() writes its argument back as Pi's global default.
+  // Keep that value separately so a prior session's scoped value cannot
+  // become this session's default through Pi's settings writer.
+  const savedInheritedLevel = readInheritedLevel(inheritedLevelPath);
+  let inheritedLevel = savedInheritedLevel ?? pi.getThinkingLevel();
+  if (savedInheritedLevel === undefined) {
+    writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
+  }
+  const managedLevels: ThinkingLevel[] = [];
+  const setManagedLevel = (level: ThinkingLevel): void => {
+    const before = pi.getThinkingLevel();
+    if (before === level) return;
+    // Pi emits this event asynchronously. Record it first so its event does
+    // not get mistaken for a user changing the global default.
+    managedLevels.push(level);
+    pi.setThinkingLevel(level);
+    const effective = pi.getThinkingLevel();
+    if (effective !== level)
+      managedLevels[managedLevels.length - 1] = effective;
+  };
+
+  pi.on("thinking_level_select", (event) => {
+    const managed = managedLevels.indexOf(event.level);
+    if (managed !== -1) {
+      managedLevels.splice(managed, 1);
+      return;
+    }
+    inheritedLevel = event.level;
+    writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
+  });
 
   pi.registerCommand("levels", {
     description:
@@ -385,7 +605,7 @@ export default function modelThinking(
       const result = await ctx.ui.custom<
         Record<string, StoredLevel> | undefined
       >(
-        (_tui, theme, _keybindings, done) =>
+        (_tui, theme, keybindings, done) =>
           new LevelsSelectorComponent(
             "Thinking levels",
             rows,
@@ -393,12 +613,24 @@ export default function modelThinking(
             { ...values },
             theme,
             done,
+            keybindings,
           ),
       );
       if (result === undefined) return;
 
-      writeStoredLevels(result, levelsPath);
-      applyStoredLevel(pi, ctx, true, levelsPath);
+      // Read again after the dialog closes.  This preserves edits another
+      // session made while this one was open; only rows changed here win.
+      mergeAndWriteStoredLevels(values, result, rows, levelsPath);
+      applyStoredLevel(
+        pi,
+        ctx,
+        true,
+        levelsPath,
+        true,
+        inheritedLevel,
+        undefined,
+        setManagedLevel,
+      );
       ctx.ui.notify("Saved thinking levels", "info");
     },
   });
@@ -406,7 +638,18 @@ export default function modelThinking(
   pi.on("model_select", (event, ctx) => {
     // A restored session owns its historical thinking level.
     if (event.source === "restore") return;
-    applyStoredLevel(pi, ctx, true, levelsPath);
+    applyStoredLevel(
+      pi,
+      ctx,
+      true,
+      levelsPath,
+      true,
+      inheritedLevel,
+      event.source === "set" || event.source === "cycle"
+        ? event.source
+        : undefined,
+      setManagedLevel,
+    );
   });
 
   pi.on("session_start", (event, ctx) => {
@@ -424,6 +667,15 @@ export default function modelThinking(
     if (event.reason === "startup" && explicitCliThinking()) return;
     // /new: pi starts the fresh session on the saved default model; snap
     // the level to that model's stored level.
-    applyStoredLevel(pi, ctx, event.reason === "new", levelsPath);
+    applyStoredLevel(
+      pi,
+      ctx,
+      event.reason === "new",
+      levelsPath,
+      event.reason === "new",
+      inheritedLevel,
+      undefined,
+      setManagedLevel,
+    );
   });
 }

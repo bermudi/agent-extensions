@@ -13,6 +13,7 @@ import modelThinking, {
   collectLevels,
   cycleLevel,
   LevelsSelectorComponent,
+  mergeStoredLevels,
   modelKey,
   parseStoredLevels,
   readStoredLevels,
@@ -228,6 +229,20 @@ describe("collectLevels", () => {
   });
 });
 
+describe("mergeStoredLevels", () => {
+  test("keeps another session's changes to rows left untouched here", () => {
+    const rows = [{ key: "zai/glm" }, { key: "kilo/flash" }];
+    expect(
+      mergeStoredLevels(
+        { "zai/glm": "low", "kilo/flash": "off" },
+        { "zai/glm": "high", "kilo/flash": "off" },
+        { "zai/glm": "low", "kilo/flash": "xhigh" },
+        rows,
+      ),
+    ).toEqual({ "zai/glm": "high", "kilo/flash": "xhigh" });
+  });
+});
+
 describe("levels selector component", () => {
   const plainTheme = {
     fg: (_color: string, text: string) => text,
@@ -296,6 +311,38 @@ describe("levels selector component", () => {
     s.component.handleInput(ENTER);
 
     expect(s.saved()).toEqual({ "kilo/flash": "xhigh" });
+  });
+
+  test("recognizes Kitty keyboard-protocol arrows and vim keys", () => {
+    const s = selector(rows);
+    s.component.handleInput("\x1b[1;1B"); // Kitty down
+    s.component.handleInput("\x1b[108u"); // Kitty l
+    s.component.handleInput("\x1b[1;1D"); // Kitty left
+    s.component.handleInput("\x1b[104u"); // Kitty h
+    s.component.handleInput(ENTER);
+
+    expect(s.saved()).toEqual({ "kilo/flash": "xhigh" });
+  });
+
+  test("keeps the selected row in a bounded scrolling window", () => {
+    const manyRows = Array.from({ length: 9 }, (_, index) => ({
+      key: `provider/model-${index}`,
+      ladder: ladder("off"),
+    }));
+    initTheme(undefined, false);
+    const s = selector(manyRows);
+
+    let text = s.component.render(80).join("\n");
+    expect(text).toContain("provider/model-0");
+    expect(text).toContain("provider/model-6");
+    expect(text).not.toContain("provider/model-8");
+    expect(text).toContain("(1/9)");
+
+    for (let index = 0; index < 8; index++) s.component.handleInput(DOWN);
+    text = s.component.render(80).join("\n");
+    expect(text).toContain("provider/model-8");
+    expect(text).not.toContain("provider/model-0");
+    expect(text).toContain("(9/9)");
   });
 
   test("k clamps at the top row", () => {
@@ -516,7 +563,7 @@ describe("model-thinking hooks", () => {
     expect(pi.level).toBe("medium");
   });
 
-  test("leaves models without a stored level alone", async () => {
+  test("restores the captured global default for an inherited model", async () => {
     const path = levelsPath();
     writeStoredLevels({ "zai/glm-5.3": "high" }, path);
     const pi = new PiHarness();
@@ -529,7 +576,44 @@ describe("model-thinking hooks", () => {
       context(model("openai", "unmanaged")),
     );
 
-    expect(pi.level).toBe("xhigh");
+    // The sidecar must not carry the prior model's xhigh into an inherited
+    // model. Pi's global default was off when the extension initialized.
+    expect(pi.level).toBe("off");
+  });
+
+  test("keeps the global default when a prior session persisted a scoped level", async () => {
+    const path = levelsPath();
+    const inheritedPath = `${path}.default`;
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+
+    const first = new PiHarness();
+    first.level = "low";
+    modelThinking(first.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+    await first.emit(
+      "model_select",
+      { model: model("zai", "glm-5.3"), source: "set" },
+      context(model("zai", "glm-5.3")),
+    );
+    expect(first.level).toBe("high");
+
+    // Pi persisted high when the first session set its scoped value. A new
+    // session must recover low from the extension's default sidecar instead
+    // of treating that persisted scoped value as the global default.
+    const second = new PiHarness();
+    second.level = "high";
+    modelThinking(second.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+    await second.emit(
+      "model_select",
+      { model: model("openai", "unmanaged"), source: "set" },
+      context(model("openai", "unmanaged")),
+    );
+    expect(second.level).toBe("low");
   });
 
   test("defers to a native scoped level instead of the sidecar", async () => {
@@ -546,6 +630,25 @@ describe("model-thinking hooks", () => {
     await pi.emit(
       "model_select",
       { model: model("zai", "glm-5.3"), source: "cycle" },
+      context(
+        model("zai", "glm-5.3"),
+        [],
+        [{ model: model("zai", "glm-5.3"), thinkingLevel: "high" }],
+      ),
+    );
+
+    expect(pi.level).toBe("high");
+  });
+
+  test("applies a native scoped level after direct picker selection", async () => {
+    const path = levelsPath();
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "off";
+
+    await pi.emit(
+      "model_select",
+      { model: model("zai", "glm-5.3"), source: "set" },
       context(
         model("zai", "glm-5.3"),
         [],
@@ -840,7 +943,6 @@ describe("/levels command", () => {
     expect(readStoredLevels(path)).toEqual({
       "zai/glm-5.3": "low",
       "old/model": "high",
-      "kilo/flash": "xhigh",
     });
   });
 });
