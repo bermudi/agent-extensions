@@ -1,46 +1,42 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import modelThinking from "./model-thinking.ts";
+import modelThinking, {
+  buildLadder,
+  modelKey,
+  parseStoredLevels,
+  readStoredLevels,
+  writeStoredLevels,
+} from "./model-thinking.ts";
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
+type StoredLevel = ThinkingLevel | "off";
 type Model = NonNullable<ExtensionContext["model"]>;
 type Handler = (event: never, ctx: ExtensionContext) => unknown;
 
-function model(
-  provider: string,
-  id: string,
-  name?: string,
-): NonNullable<ExtensionContext["model"]> {
-  return { provider, id, name } as NonNullable<ExtensionContext["model"]>;
+function model(provider: string, id: string): Model {
+  return { provider, id } as Model;
+}
+
+function levelsPath(): string {
+  return join(mkdtempSync(join(tmpdir(), "model-thinking-")), "levels.json");
 }
 
 function context(
-  activeModel: Model,
-  scopedModels: readonly {
-    model: Model;
-    thinkingLevel?: ThinkingLevel;
-  }[],
+  activeModel: Model | undefined,
   notifications: string[] = [],
-  registryModels: readonly Model[] = [],
+  scopedModels: readonly { model: Model; thinkingLevel?: ThinkingLevel }[] = [],
 ): ExtensionContext {
   return {
     model: activeModel,
     scopedModels,
+    mode: "tui",
     hasUI: true,
-    modelRegistry: {
-      find(provider: string, id: string) {
-        return [
-          activeModel,
-          ...scopedModels.map((entry) => entry.model),
-          ...registryModels,
-        ].find(
-          (candidate) => candidate.provider === provider && candidate.id === id,
-        );
-      },
-    },
     ui: {
       notify(message: string) {
         notifications.push(message);
@@ -51,9 +47,11 @@ function context(
 
 class PiHarness {
   level: ThinkingLevel = "off";
-  selectedModel: Model | undefined;
-  private currentContext: ExtensionContext | undefined;
   readonly handlers = new Map<string, Handler[]>();
+  readonly commands = new Map<
+    string,
+    (args: string, ctx: ExtensionContext) => Promise<void>
+  >();
 
   readonly api = {
     on: (event: string, handler: Handler) => {
@@ -61,21 +59,17 @@ class PiHarness {
       handlers.push(handler);
       this.handlers.set(event, handlers);
     },
+    registerCommand: (
+      name: string,
+      options: {
+        handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+      },
+    ) => {
+      this.commands.set(name, options.handler);
+    },
     getThinkingLevel: () => this.level,
     setThinkingLevel: (level: ThinkingLevel) => {
       this.level = level;
-    },
-    setModel: async (model: Model) => {
-      const previousModel = this.currentContext?.model;
-      this.selectedModel = model;
-      if (this.currentContext) {
-        await this.emit(
-          "model_select",
-          { model, previousModel, source: "set" },
-          { ...this.currentContext, model },
-        );
-      }
-      return true;
     },
   } as unknown as ExtensionAPI;
 
@@ -84,22 +78,10 @@ class PiHarness {
     payload: object,
     ctx: ExtensionContext,
   ): Promise<void> {
-    this.currentContext = ctx;
     for (const handler of this.handlers.get(event) ?? []) {
       await handler(payload as never, ctx);
     }
   }
-}
-
-function scoped(
-  provider: string,
-  id: string,
-  thinkingLevel?: ThinkingLevel,
-): {
-  model: NonNullable<ExtensionContext["model"]>;
-  thinkingLevel?: ThinkingLevel;
-} {
-  return { model: model(provider, id), thinkingLevel };
 }
 
 async function withArgv(
@@ -115,69 +97,101 @@ async function withArgv(
   }
 }
 
-describe("model-thinking", () => {
-  test("does not override Pi's resolved startup level", async () => {
+describe("model-thinking sidecar", () => {
+  test("round-trips stored levels", () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "high", "kilo/x": "off" }, path);
+    expect(readStoredLevels(path)).toEqual({
+      "zai/glm-5.3": "high",
+      "kilo/x": "off",
+    });
+  });
+
+  test("missing sidecar reads as empty", () => {
+    expect(readStoredLevels(join(levelsPath(), "absent.json"))).toEqual({});
+  });
+
+  test("corrupt sidecar reads as empty and surfaces the failure", () => {
+    const path = levelsPath();
+    writeFileSync(path, "{not json");
+    const errors: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      expect(readStoredLevels(path)).toEqual({});
+    } finally {
+      console.error = original;
+    }
+    expect(errors.length).toBe(1);
+  });
+
+  test("rejects invalid shapes and values", () => {
+    expect(() => parseStoredLevels([])).toThrow();
+    expect(() => parseStoredLevels(null)).toThrow();
+    expect(() => parseStoredLevels({ "no-slash": "high" })).toThrow();
+    expect(() => parseStoredLevels({ "zai/glm": "bogus" })).toThrow();
+    expect(parseStoredLevels({ "zai/glm": "xhigh" })).toEqual({
+      "zai/glm": "xhigh",
+    });
+  });
+
+  test("builds the inherit-first ladder from model support", () => {
+    const reasoning = { reasoning: true } as unknown as Model;
+    const flat = { reasoning: false } as unknown as Model;
+    expect(buildLadder(reasonedModel())).toEqual([
+      undefined,
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+    ]);
+    expect(buildLadder(flat)).toEqual([undefined, "off"]);
+    expect(buildLadder(reasoning)).toContain(undefined);
+  });
+});
+
+function reasonedModel(): Model {
+  return {
+    provider: "zai",
+    id: "glm",
+    reasoning: true,
+  } as unknown as Model;
+}
+
+describe("model-thinking hooks", () => {
+  test("applies the stored level at startup, silently", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
     const pi = new PiHarness();
-    modelThinking(pi.api);
-    const activeModel = model("zai", "glm-5.2");
+    modelThinking(pi.api, { levelsPath: path });
     pi.level = "low";
+    const notifications: string[] = [];
 
     await pi.emit(
       "session_start",
       { reason: "startup" },
-      context(activeModel, [scoped("zai", "glm-5.2", "high")]),
+      context(model("zai", "glm-5.3"), notifications),
     );
 
-    expect(pi.level).toBe("low");
-  });
-
-  test("applies the scoped level for a plain explicit CLI model", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    const activeModel = model("zai", "glm-5.2");
-    pi.level = "low";
-
-    await withArgv(["pi", "start", "--model", "zai/glm-5.2"], async () => {
-      await pi.emit(
-        "session_start",
-        { reason: "startup" },
-        context(activeModel, [scoped("zai", "glm-5.2", "high")]),
-      );
-    });
-
     expect(pi.level).toBe("high");
-  });
-
-  test("does not overwrite restored thinking for an unresolved CLI model", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    const restoredModel = model("zai", "glm-5.2");
-    pi.level = "low";
-
-    await withArgv(["pi", "start", "--model", "does-not-exist"], async () => {
-      await pi.emit(
-        "session_start",
-        { reason: "startup" },
-        context(restoredModel, [scoped("zai", "glm-5.2", "high")]),
-      );
-    });
-
-    expect(pi.level).toBe("low");
+    expect(notifications).toEqual([]);
   });
 
   test("does not override explicit CLI thinking", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "anthropic/claude": "high" }, path);
     const pi = new PiHarness();
-    modelThinking(pi.api);
-    const activeModel = model("zai", "glm-5.2");
+    modelThinking(pi.api, { levelsPath: path });
     pi.level = "low";
 
     await withArgv(
-      ["pi", "start", "--model", "zai/glm-5.2", "--thinking", "low"],
+      ["pi", "start", "--model", "anthropic/claude", "--thinking", "low"],
       async () => {
         await pi.emit(
           "session_start",
           { reason: "startup" },
-          context(activeModel, [scoped("zai", "glm-5.2", "high")]),
+          context(model("anthropic", "claude")),
         );
       },
     );
@@ -185,220 +199,38 @@ describe("model-thinking", () => {
     expect(pi.level).toBe("low");
   });
 
-  test("does not override a thinking level in the CLI model", async () => {
+  test("does not override a thinking level carried by the CLI model", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "low" }, path);
     const pi = new PiHarness();
-    modelThinking(pi.api);
-    const activeModel = model("zai", "glm-5.2");
-    pi.level = "low";
-
-    await withArgv(
-      ["pi", "start", "--model", "zai/glm-5.2:medium"],
-      async () => {
-        await pi.emit(
-          "session_start",
-          { reason: "startup" },
-          context(activeModel, [scoped("zai", "glm-5.2", "high")]),
-        );
-      },
-    );
-
-    expect(pi.level).toBe("low");
-  });
-
-  test("applies the scoped level of the last --model when several are given", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    // Pi's parser lets the last --model win, so only "b" matters; the
-    // ":low" suffix on the first occurrence must not suppress the scoped
-    // level of the effective model.
-    const activeModel = model("anthropic", "claude-test");
-    pi.level = "low";
-
-    await withArgv(
-      [
-        "pi",
-        "start",
-        "--model",
-        "zai/glm-5.2:low",
-        "--model",
-        "anthropic/claude-test",
-      ],
-      async () => {
-        await pi.emit(
-          "session_start",
-          { reason: "startup" },
-          context(activeModel, [scoped("anthropic", "claude-test", "high")]),
-        );
-      },
-    );
-
-    expect(pi.level).toBe("high");
-  });
-
-  test("applies the scoped level when a colon-terminated id is a registered model", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    // "glm-5.2:high" is the model's registered id, not thinking shorthand:
-    // Pi exact-matches the whole pattern, so no explicit thinking is applied
-    // and the scoped level must fill the startup gap.
-    const activeModel = model("zai", "glm-5.2:high");
-    pi.level = "low";
-
-    await withArgv(["pi", "start", "--model", "zai/glm-5.2:high"], async () => {
-      await pi.emit(
-        "session_start",
-        { reason: "startup" },
-        context(activeModel, [scoped("zai", "glm-5.2:high", "medium")]),
-      );
-    });
-
-    expect(pi.level).toBe("medium");
-  });
-
-  test("applies the scoped level for a bare colon-terminated CLI model id", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    // Without a provider prefix, Pi resolves the bare exact id the same
-    // way: the whole pattern is the model, no thinking suffix is parsed.
-    const activeModel = model("zai", "glm-5.2:high");
-    pi.level = "off";
-
-    await withArgv(["pi", "start", "--model", "glm-5.2:high"], async () => {
-      await pi.emit(
-        "session_start",
-        { reason: "startup" },
-        context(activeModel, [scoped("zai", "glm-5.2:high", "medium")]),
-      );
-    });
-
-    expect(pi.level).toBe("medium");
-  });
-
-  test("applies the scoped level when a fuzzy whole model ID ends in a level", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    // Pi fuzzy-matches "foo:high" against this full ID before considering
-    // ":high" as thinking shorthand.
-    const activeModel = model("gateway", "vendor-foo:high");
-    pi.level = "low";
-
-    await withArgv(
-      ["pi", "start", "--provider", "gateway", "--model", "foo:high"],
-      async () => {
-        await pi.emit(
-          "session_start",
-          { reason: "startup" },
-          context(activeModel, [
-            scoped("gateway", "vendor-foo:high", "medium"),
-          ]),
-        );
-      },
-    );
-
-    expect(pi.level).toBe("medium");
-  });
-
-  test("keeps the global level for a colon-terminated id without a scoped entry", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    // A colon-terminated id resolves exactly like any other model: with no
-    // scoped entry there is nothing to apply and the global level stands.
-    const activeModel = model("zai", "glm-5.2:high");
-    pi.level = "low";
-
-    await withArgv(["pi", "start", "--model", "zai/glm-5.2:high"], async () => {
-      await pi.emit(
-        "session_start",
-        { reason: "startup" },
-        context(activeModel, [scoped("anthropic", "claude-test", "high")]),
-      );
-    });
-
-    expect(pi.level).toBe("low");
-  });
-
-  test("applies the scoped level when --thinking is invalid", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    // Pi drops invalid --thinking values with a CLI warning, leaving the
-    // plain explicit model on the global level; the scoped level applies.
-    const activeModel = model("anthropic", "claude-test");
-    pi.level = "low";
-
-    await withArgv(
-      [
-        "pi",
-        "start",
-        "--model",
-        "anthropic/claude-test",
-        "--thinking",
-        "bogus",
-      ],
-      async () => {
-        await pi.emit(
-          "session_start",
-          { reason: "startup" },
-          context(activeModel, [scoped("anthropic", "claude-test", "high")]),
-        );
-      },
-    );
-
-    expect(pi.level).toBe("high");
-  });
-
-  test("keeps the last valid --thinking authoritative across an invalid repeat", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    // Pi keeps the earlier valid "low"; the invalid repeat is dropped, so
-    // explicit CLI thinking still wins over the scoped level.
-    const activeModel = model("anthropic", "claude-test");
-    pi.level = "low";
-
-    await withArgv(
-      [
-        "pi",
-        "start",
-        "--model",
-        "anthropic/claude-test",
-        "--thinking",
-        "low",
-        "--thinking",
-        "bogus",
-      ],
-      async () => {
-        await pi.emit(
-          "session_start",
-          { reason: "startup" },
-          context(activeModel, [scoped("anthropic", "claude-test", "high")]),
-        );
-      },
-    );
-
-    expect(pi.level).toBe("low");
-  });
-
-  test("does not override the level carried by the last --model", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    // The last --model carries its own ":high" level, which Pi applies; a
-    // scoped entry for that model must not stomp the explicit pattern.
-    const activeModel = model("zai", "glm-5.2");
+    modelThinking(pi.api, { levelsPath: path });
     pi.level = "high";
 
+    await withArgv(["pi", "start", "--model", "zai/glm-5.3:high"], async () => {
+      await pi.emit(
+        "session_start",
+        { reason: "startup" },
+        context(model("zai", "glm-5.3")),
+      );
+    });
+
+    expect(pi.level).toBe("high");
+  });
+
+  test("applies the stored level when --thinking is invalid", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "anthropic/claude": "high" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "low";
+
     await withArgv(
-      [
-        "pi",
-        "start",
-        "--model",
-        "anthropic/claude-test",
-        "--model",
-        "zai/glm-5.2:high",
-      ],
+      ["pi", "start", "--model", "anthropic/claude", "--thinking", "bogus"],
       async () => {
         await pi.emit(
           "session_start",
           { reason: "startup" },
-          context(activeModel, [scoped("zai", "glm-5.2", "low")]),
+          context(model("anthropic", "claude")),
         );
       },
     );
@@ -406,170 +238,226 @@ describe("model-thinking", () => {
     expect(pi.level).toBe("high");
   });
 
-  test("ignores a trailing --model without a value", async () => {
+  test("applies the stored level when the full picker selects a model", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "anthropic/claude": "low" }, path);
     const pi = new PiHarness();
-    modelThinking(pi.api);
-    // Pi's parser requires a following token; a trailing --model sets
-    // nothing and startup takes the normal already-resolved path.
-    const activeModel = model("zai", "glm-5.2");
-    pi.level = "low";
-
-    await withArgv(["pi", "start", "--model"], async () => {
-      await pi.emit(
-        "session_start",
-        { reason: "startup" },
-        context(activeModel, [scoped("zai", "glm-5.2", "high")]),
-      );
-    });
-
-    expect(pi.level).toBe("low");
-  });
-
-  test("does not override a manual level on reload", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    const activeModel = model("zai", "glm-5.2");
-    pi.level = "low";
-
-    await pi.emit(
-      "session_start",
-      { reason: "reload" },
-      context(activeModel, [scoped("zai", "glm-5.2", "high")]),
-    );
-
-    expect(pi.level).toBe("low");
-  });
-
-  test("applies a scoped level when the full model picker selects a model", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    const activeModel = model("anthropic", "claude-test");
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "off";
     const notifications: string[] = [];
 
-    // Pi emits model_select (source "set") only when the picked model
-    // differs from the active one, with ctx.model already updated to the
-    // picked model. Re-selecting the active model fires no event at all —
-    // a documented limitation, not a case this handler can cover.
     await pi.emit(
       "model_select",
-      {
-        model: activeModel,
-        previousModel: model("zai", "glm-5.2"),
-        source: "set",
-      },
-      context(
-        activeModel,
-        [scoped("anthropic", "claude-test", "low")],
-        notifications,
-      ),
+      { model: model("anthropic", "claude"), source: "set" },
+      context(model("anthropic", "claude"), notifications),
     );
 
     expect(pi.level).toBe("low");
     expect(notifications).toEqual(["Thinking: off → low"]);
   });
 
-  test("does not override restored session thinking", async () => {
+  test("applies the stored level after Ctrl+P cycling", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "medium" }, path);
     const pi = new PiHarness();
-    modelThinking(pi.api);
-    pi.level = "medium";
-    const activeModel = model("zai", "glm-5.2");
-    const ctx = context(activeModel, [scoped("zai", "glm-5.2", "high")]);
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "high";
 
-    await pi.emit("model_select", { source: "restore" }, ctx);
-    await pi.emit("session_start", { reason: "resume" }, ctx);
-    await pi.emit("session_start", { reason: "fork" }, ctx);
+    await pi.emit(
+      "model_select",
+      { model: model("zai", "glm-5.3"), source: "cycle" },
+      context(model("zai", "glm-5.3")),
+    );
 
     expect(pi.level).toBe("medium");
   });
 
-  test("restores both model and thinking level after /new", async () => {
-    const oldPi = new PiHarness();
-    modelThinking(oldPi.api);
-    const newPi = new PiHarness();
-    modelThinking(newPi.api);
-    const previousModel = model("anthropic", "managed");
-    const newModel = model("opencode", "hy3-free");
-    const scopedModels = [
-      scoped("anthropic", "managed", "low"),
-      scoped("opencode", "hy3-free", "high"),
-    ];
-    const notifications: string[] = [];
-    const ctx = context(newModel, scopedModels, notifications, [previousModel]);
-
-    oldPi.level = "medium";
-    await oldPi.emit(
-      "session_before_switch",
-      { reason: "new" },
-      context(previousModel, scopedModels),
-    );
-    newPi.level = "high";
-    await newPi.emit("session_start", { reason: "new" }, ctx);
-
-    expect(newPi.selectedModel).toEqual(previousModel);
-    expect(newPi.level).toBe("medium");
-    expect(notifications).toEqual([]);
-  });
-
-  test("restores thinking for an active custom model absent from the registry", async () => {
+  test("does not notify when the level already matches", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
     const pi = new PiHarness();
-    modelThinking(pi.api);
-    const previousModel = model("custom-provider", "custom-model");
-    const newModel = model("opencode", "hy3-free");
-    const newContext = context(newModel, [
-      scoped("opencode", "hy3-free", "high"),
-    ]);
-    const customContext = {
-      ...newContext,
-      model: previousModel,
-      modelRegistry: {
-        find() {
-          return undefined;
-        },
-      },
-    } as unknown as ExtensionContext;
-
-    pi.level = "low";
-    await pi.emit(
-      "session_before_switch",
-      { reason: "new" },
-      context(previousModel, []),
-    );
+    modelThinking(pi.api, { levelsPath: path });
     pi.level = "high";
-    await pi.emit("session_start", { reason: "new" }, customContext);
-
-    expect(pi.selectedModel).toBeUndefined();
-    expect(pi.level).toBe("low");
-  });
-
-  test("leaves models without a scoped level alone", async () => {
-    const pi = new PiHarness();
-    modelThinking(pi.api);
-    pi.level = "xhigh";
-    const activeModel = model("openai", "unmanaged");
+    const notifications: string[] = [];
 
     await pi.emit(
       "model_select",
-      { source: "set" },
-      context(activeModel, [scoped("zai", "glm-5.2", "high")]),
+      { model: model("zai", "glm-5.3"), source: "cycle" },
+      context(model("zai", "glm-5.3"), notifications),
+    );
+
+    expect(notifications).toEqual([]);
+  });
+
+  test("snaps the level after /new, with notification", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "medium" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "low";
+    const notifications: string[] = [];
+
+    await pi.emit(
+      "session_start",
+      { reason: "new" },
+      context(model("zai", "glm-5.3"), notifications),
+    );
+
+    expect(pi.level).toBe("medium");
+    expect(notifications).toEqual(["Thinking: low → medium"]);
+  });
+
+  test("does not override restored session thinking", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "medium";
+    const ctx = context(model("zai", "glm-5.3"));
+
+    await pi.emit("model_select", { source: "restore" }, ctx);
+    await pi.emit("session_start", { reason: "resume" }, ctx);
+    await pi.emit("session_start", { reason: "fork" }, ctx);
+    await pi.emit("session_start", { reason: "reload" }, ctx);
+
+    expect(pi.level).toBe("medium");
+  });
+
+  test("leaves models without a stored level alone", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "xhigh";
+
+    await pi.emit(
+      "model_select",
+      { model: model("openai", "unmanaged"), source: "set" },
+      context(model("openai", "unmanaged")),
     );
 
     expect(pi.level).toBe("xhigh");
   });
 
-  test("does not notify when the native cycle already applied the level", async () => {
+  test("defers to a native scoped level instead of the sidecar", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "low" }, path);
     const pi = new PiHarness();
-    modelThinking(pi.api);
-    pi.level = "high";
-    const notifications: string[] = [];
-    const activeModel = model("zai", "glm-5.2");
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "off";
 
+    // --models "zai/glm-5.3:high" gives the session a native scoped level;
+    // pi applied it itself during the cycle; the sidecar's "low" must not
+    // stomp it in the model_select handler.
+    pi.level = "high";
     await pi.emit(
       "model_select",
-      { source: "cycle" },
-      context(activeModel, [scoped("zai", "glm-5.2", "high")], notifications),
+      { model: model("zai", "glm-5.3"), source: "cycle" },
+      context(
+        model("zai", "glm-5.3"),
+        [],
+        [{ model: model("zai", "glm-5.3"), thinkingLevel: "high" }],
+      ),
     );
 
     expect(pi.level).toBe("high");
-    expect(notifications).toEqual([]);
+  });
+
+  test("applies the sidecar level when the scoped entry has none", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "medium" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "off";
+
+    await pi.emit(
+      "model_select",
+      { model: model("zai", "glm-5.3"), source: "cycle" },
+      context(
+        model("zai", "glm-5.3"),
+        [],
+        [{ model: model("zai", "glm-5.3"), thinkingLevel: undefined }],
+      ),
+    );
+
+    expect(pi.level).toBe("medium");
+  });
+
+  test("stores and looks up by provider/id key", () => {
+    expect(modelKey(model("zai", "glm-5.3"))).toBe("zai/glm-5.3");
+    expect(modelKey({ provider: "kilo", id: "deepseek/v4" })).toBe(
+      "kilo/deepseek/v4",
+    );
+  });
+});
+
+describe("/levels command", () => {
+  test("warns when no scoped models are configured", async () => {
+    const path = levelsPath();
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    const notifications: string[] = [];
+    const ctx = {
+      ...context(undefined, notifications),
+      scopedModels: [],
+    } as unknown as ExtensionContext;
+
+    await pi.commands.get("levels")?.("", ctx);
+
+    expect(notifications[0]).toContain("No scoped models");
+    expect(readStoredLevels(path)).toEqual({});
+  });
+
+  test("saves the edited map and applies it to the active model", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "low" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    const notifications: string[] = [];
+    const ctx = {
+      ...context(model("zai", "glm-5.3"), notifications),
+      scopedModels: [
+        { model: model("zai", "glm-5.3"), thinkingLevel: undefined },
+        { model: model("kilo", "flash"), thinkingLevel: undefined },
+      ],
+      ui: {
+        notify(message: string) {
+          notifications.push(message);
+        },
+        custom: async <T>() => {
+          // Simulate: cycle glm to inherit, set flash to xhigh.
+          const stored = readStoredLevels(path);
+          delete stored["zai/glm-5.3"];
+          return { ...stored, "kilo/flash": "xhigh" } as T;
+        },
+      },
+    } as unknown as ExtensionContext;
+
+    await pi.commands.get("levels")?.("", ctx);
+
+    expect(readStoredLevels(path)).toEqual({ "kilo/flash": "xhigh" });
+    // Active model glm has no stored level anymore: nothing to apply.
+    expect(notifications).toEqual(["Saved thinking levels"]);
+  });
+
+  test("cancel writes nothing", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "low" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    const ctx = {
+      ...context(model("zai", "glm-5.3")),
+      scopedModels: [
+        { model: model("zai", "glm-5.3"), thinkingLevel: undefined },
+      ],
+      ui: {
+        notify() {},
+        custom: async <T>() => undefined as T,
+      },
+    } as unknown as ExtensionContext;
+
+    await pi.commands.get("levels")?.("", ctx);
+
+    expect(readStoredLevels(path)).toEqual({ "zai/glm-5.3": "low" });
   });
 });

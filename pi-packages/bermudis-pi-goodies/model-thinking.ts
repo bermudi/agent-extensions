@@ -1,11 +1,56 @@
-import type {
-  ExtensionAPI,
-  ExtensionContext,
+/**
+ * Per-model thinking levels, stored in an extension-owned sidecar file.
+ *
+ * Pi's native home for this is the `enabledModels` scoped-models config
+ * ("zai/glm-5.3:high"), but pi's /scoped-models screen rewrites
+ * enabledModels with bare model ids, destroying any :level suffix on every
+ * save. Rather than fight that writer, levels live in a sidecar keyed by
+ * provider/id:
+ *
+ *   ~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json
+ *
+ * /scoped-models keeps owning which models are enabled and their cycle
+ * order; /levels (registered here) owns the per-model thinking level; the
+ * hooks below apply the stored level whenever a model becomes active:
+ * full-picker selection, Ctrl+P cycling, startup, and /new (which pi
+ * starts on the saved default model).
+ *
+ * Explicit CLI intent still wins at startup: `--thinking <level>` or
+ * `--model <pattern>:<level>` suppress the stored level for that session.
+ * A model whose registered id genuinely ends in ":<level>" is
+ * indistinguishable from thinking shorthand without the registry; such a
+ * model opts out of its stored level for that startup — switch or cycle
+ * to re-apply, or use --thinking explicitly.
+ *
+ * Resumed and forked sessions keep the level restored by pi (model_select
+ * with source "restore" is ignored). Pi emits model_select only when the
+ * model actually changes, so re-selecting the already-active model in the
+ * full picker fires no event and its stored level cannot re-apply there.
+ */
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import {
+  DynamicBorder,
+  getAgentDir,
+  keyHint,
+  rawKeyHint,
+  Theme,
+  type ExtensionAPI,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+  Container,
+  Spacer,
+  Text,
+  getKeybindings,
+} from "@earendil-works/pi-tui";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { writeJsonFileAtomic } from "./json-file.ts";
 
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 type Model = NonNullable<ExtensionContext["model"]>;
-type ModelRef = Pick<Model, "provider" | "id">;
+/** Stored levels include "off", which the ExtensionAPI type omits. */
+type StoredLevel = ThinkingLevel | "off";
 
 const THINKING_LEVELS = new Set([
   "off",
@@ -17,222 +62,328 @@ const THINKING_LEVELS = new Set([
   "max",
 ]);
 
-interface PreviousSessionState {
-  provider: string;
-  id: string;
-  thinkingLevel: ThinkingLevel;
+const DEFAULT_LEVELS_PATH = join(
+  getAgentDir(),
+  "data",
+  "bermudis-pi-goodies",
+  "thinking-levels.json",
+);
+
+export function modelKey(model: Pick<Model, "provider" | "id">): string {
+  return `${model.provider}/${model.id}`;
 }
 
-// The extension factory is recreated when Pi replaces a session. Keep this
-// snapshot at module scope so it survives that recreation.
-let previousSessionState: PreviousSessionState | null = null;
+/** Validate the sidecar shape; only this module's own writer produces it. */
+export function parseStoredLevels(raw: unknown): Record<string, StoredLevel> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("sidecar is not a JSON object");
+  }
+  const levels: Record<string, StoredLevel> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!key.includes("/")) {
+      throw new Error(`key ${JSON.stringify(key)} is not a provider/id pair`);
+    }
+    if (typeof value !== "string" || !THINKING_LEVELS.has(value)) {
+      throw new Error(`invalid thinking level for ${key}: ${String(value)}`);
+    }
+    levels[key] = value as StoredLevel;
+  }
+  return levels;
+}
 
-function sameModel(left: ModelRef, right: ModelRef): boolean {
-  return left.provider === right.provider && left.id === right.id;
+export function readStoredLevels(
+  path: string = DEFAULT_LEVELS_PATH,
+): Record<string, StoredLevel> {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+  try {
+    return parseStoredLevels(JSON.parse(raw));
+  } catch (error) {
+    // A corrupt sidecar must not take the session down; re-save from /levels.
+    console.error(`[model-thinking] ignoring invalid ${path}:`, error);
+    return {};
+  }
+}
+
+export function writeStoredLevels(
+  levels: Record<string, StoredLevel>,
+  path: string = DEFAULT_LEVELS_PATH,
+): void {
+  writeJsonFileAtomic(path, levels);
+}
+
+/** The level ladder a row can cycle through: inherit + the model's levels. */
+export function buildLadder(model: Model): (StoredLevel | undefined)[] {
+  return [undefined, ...getSupportedThinkingLevels(model)];
 }
 
 /**
- * Pi resolves scoped thinking for its normal initial-model path, but an
- * explicit plain `--model` takes a different path and falls back to the
- * global level. There is no CLI-selection detail on session_start, so use
- * argv only to distinguish that one case from Pi's already-resolved startup
- * state. Explicit `--thinking` and `--model ...:<level>` remain authoritative.
- *
- * Mirrors Pi's parseArgs semantics for these two flags: the last --model
- * wins, --thinking counts only when its value is a valid level (invalid
- * values are dropped with a CLI warning), and a trailing flag without a
- * value token sets nothing. Degenerate argv where another flag consumes a
- * bare "--model"/"--thinking" as its value is not mirrored.
- *
- * Do not trust the presence of --model alone: an invalid CLI model leaves a
- * restored session's model active. Before touching thinking, confirm that the
- * active model could be Pi's resolution of the CLI pattern. This also mirrors
- * Pi's important ordering for a trailing ":<level>": it fuzzy-matches the
- * complete pattern before splitting a thinking suffix.
+ * Mirrors Pi's parseArgs semantics for the two flags that express explicit
+ * thinking intent: the last --model wins, --thinking counts only when its
+ * value is a valid level, and a trailing flag without a value token sets
+ * nothing. Degenerate argv where another flag consumes a bare
+ * "--model"/"--thinking" as its value is not mirrored.
  */
-function cliPatternMatchesActiveModel(
-  pattern: string,
-  provider: string | undefined,
-  activeModel: Model,
-): boolean {
-  const normalizedPattern = pattern.trim().toLowerCase();
-  if (!normalizedPattern) return false;
-
-  const normalizedProvider = provider?.trim().toLowerCase();
-  if (
-    normalizedProvider !== undefined &&
-    activeModel.provider.toLowerCase() !== normalizedProvider
-  ) {
-    return false;
-  }
-
-  let modelPattern = normalizedPattern;
-  const activeProviderPrefix = `${activeModel.provider}/`.toLowerCase();
-  if (modelPattern.startsWith(activeProviderPrefix)) {
-    modelPattern = modelPattern.slice(activeProviderPrefix.length);
-  } else if (
-    normalizedProvider === undefined &&
-    normalizedPattern.includes("/")
-  ) {
-    // Without the registry we cannot safely reinterpret an arbitrary slash as
-    // a provider separator: model IDs themselves may contain slashes.
-    return (
-      normalizedPattern ===
-      `${activeModel.provider}/${activeModel.id}`.toLowerCase()
-    );
-  }
-
-  const id = activeModel.id.toLowerCase();
-  const name = activeModel.name?.toLowerCase();
-  return (
-    modelPattern === id ||
-    id.includes(modelPattern) ||
-    name?.includes(modelPattern) === true
-  );
-}
-
-function plainCliModelNeedsScopedLevel(
-  activeModel: Model | undefined,
-): boolean {
+function explicitCliThinking(): boolean {
   const args = process.argv.slice(2);
   let model: string | undefined;
-  let provider: string | undefined;
   let thinking: string | undefined;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === "--model" && index + 1 < args.length) {
       model = args[++index];
-    } else if (arg === "--provider" && index + 1 < args.length) {
-      provider = args[++index];
     } else if (arg === "--thinking" && index + 1 < args.length) {
       const level = args[++index];
       if (THINKING_LEVELS.has(level)) thinking = level;
     }
   }
-  if (thinking !== undefined) return false;
-  if (model === undefined || activeModel === undefined) return false;
-
-  // Pi first attempts the complete pattern. This confirms both that --model
-  // actually selected the active model (rather than falling back to a
-  // restored session) and that a ":<level>" suffix belongs to its ID.
-  if (cliPatternMatchesActiveModel(model, provider, activeModel)) return true;
-
-  // Either the CLI model did not resolve, or Pi split a trailing valid
-  // ":<level>" and applied explicit thinking. Both cases must be left alone.
+  if (thinking !== undefined) return true;
+  if (model !== undefined) {
+    const colon = model.lastIndexOf(":");
+    if (colon > 0 && THINKING_LEVELS.has(model.slice(colon + 1))) return true;
+  }
   return false;
 }
 
-/**
- * Pi's scoped-models configuration is the source of truth for both the cycle
- * list and per-model thinking levels. The native cycle path already applies
- * those levels; this hook fills the two gaps in the native behavior:
- *
- * - selecting a model through the full picker should apply its scoped level;
- *
- * Pi emits model_select only when the model actually changes, so picking the
- * already-active model in the full picker fires no event and its scoped
- * level cannot be re-applied on that path; a manual level survives until a
- * different model is selected.
- *
- * Pi applies the scoped level during normal startup selection. A plain
- * explicit `--model` is the exception; the startup hook covers that case
- * without overriding explicit CLI thinking choices.
- *
- * Resume and fork retain the model and level restored by Pi. /new is not a
- * session restore in Pi: it starts from the saved default/scoped model, so we
- * capture and restore the previous session explicitly.
- */
-export default function modelThinking(pi: ExtensionAPI): void {
-  let restoringPreviousSession = false;
+function sameModel(
+  left: Pick<Model, "provider" | "id">,
+  right: Pick<Model, "provider" | "id">,
+): boolean {
+  return left.provider === right.provider && left.id === right.id;
+}
 
-  function applyScopedLevel(ctx: ExtensionContext, silent: boolean): void {
-    const model = ctx.model;
-    if (!model) return;
+function applyStoredLevel(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  notify: boolean,
+  levelsPath: string,
+): void {
+  const model = ctx.model;
+  if (!model) return;
+  // A native scoped level for this session (via --models "x:level" or a
+  // hand-suffixed enabledModels entry) is pi-owned state; the sidecar only
+  // fills in where pi has no level, never overrides one.
+  const scoped = ctx.scopedModels.find((entry) =>
+    sameModel(entry.model, model),
+  );
+  if (scoped?.thinkingLevel !== undefined) return;
 
-    const scoped = ctx.scopedModels.find((entry) =>
-      sameModel(entry.model, model),
+  const level = readStoredLevels(levelsPath)[modelKey(model)];
+  if (level === undefined) return;
+
+  const before = pi.getThinkingLevel();
+  // "off" is a valid runtime level (pi clamps per model); the declared API
+  // type only models the non-off ladder.
+  pi.setThinkingLevel(level as ThinkingLevel);
+  if (notify && pi.getThinkingLevel() !== before) {
+    ctx.ui.notify(`Thinking: ${before} → ${pi.getThinkingLevel()}`, "info");
+  }
+}
+
+interface LevelsRow {
+  key: string;
+  ladder: (StoredLevel | undefined)[];
+}
+
+class LevelsSelectorComponent extends Container {
+  private selectedIndex = 0;
+  private readonly listContainer = new Container();
+  private closed = false;
+
+  constructor(
+    title: string,
+    private readonly rows: LevelsRow[],
+    private readonly activeKey: string | undefined,
+    private readonly values: Record<string, StoredLevel | undefined>,
+    private readonly theme: Theme,
+    private readonly done: (
+      result: Record<string, StoredLevel> | undefined,
+    ) => void,
+  ) {
+    super();
+    this.addChild(new DynamicBorder());
+    this.addChild(new Spacer(1));
+    this.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
+    this.addChild(new Spacer(1));
+    this.addChild(
+      new Text(
+        theme.fg("muted", "inherit = follow pi's global default level"),
+        1,
+        0,
+      ),
     );
-    const level = scoped?.thinkingLevel as ThinkingLevel | undefined;
-    if (level === undefined) return;
+    this.addChild(new Spacer(1));
+    this.addChild(this.listContainer);
+    this.addChild(new Spacer(1));
+    this.addChild(
+      new Text(
+        rawKeyHint("↑↓", "navigate") +
+          "  " +
+          rawKeyHint("←→", "cycle level") +
+          "  " +
+          keyHint("tui.select.confirm", "save") +
+          "  " +
+          keyHint("tui.select.cancel", "cancel"),
+        1,
+        0,
+      ),
+    );
+    this.addChild(new Spacer(1));
+    this.addChild(new DynamicBorder());
+    this.updateList();
+  }
 
-    const before = pi.getThinkingLevel();
-    pi.setThinkingLevel(level);
-    const after = pi.getThinkingLevel();
+  private levelLabel(key: string): string {
+    return this.values[key] ?? "inherit";
+  }
 
-    if (after !== before && !silent) {
-      ctx.ui.notify(`Thinking: ${before} → ${after}`, "info");
+  private updateList(): void {
+    this.listContainer.clear();
+    const width = Math.max(...this.rows.map((row) => row.key.length));
+    for (const [index, row] of this.rows.entries()) {
+      const selected = index === this.selectedIndex;
+      const marker =
+        row.key === this.activeKey
+          ? this.theme.fg("accent", "● ")
+          : this.theme.fg("muted", "  ");
+      const level = this.levelLabel(row.key);
+      const levelText =
+        level === "inherit"
+          ? this.theme.fg("muted", level)
+          : this.theme.fg("accent", level);
+      const line = `${marker}${row.key.padEnd(width)}  ${levelText}`;
+      this.listContainer.addChild(
+        new Text(
+          selected ? this.theme.fg("accent", `→ ${line}`) : `  ${line}`,
+          1,
+          0,
+        ),
+      );
     }
   }
 
-  async function restorePreviousSession(
-    ctx: ExtensionContext,
-    previous: PreviousSessionState,
-  ): Promise<void> {
-    // Custom models supplied via --model may be synthesized for the current
-    // session and therefore not be present in the registry. If /new already
-    // selected that same model, the model itself is successfully restored;
-    // only the historical thinking level still needs to be applied.
-    if (ctx.model && sameModel(ctx.model, previous)) {
-      pi.setThinkingLevel(previous.thinkingLevel);
-      return;
-    }
+  private cycle(delta: number): void {
+    const row = this.rows[this.selectedIndex];
+    if (!row) return;
+    let index = row.ladder.indexOf(this.values[row.key]);
+    if (index === -1) index = delta > 0 ? -1 : 1;
+    index = (index + delta + row.ladder.length) % row.ladder.length;
+    this.values[row.key] = row.ladder[index];
+    this.updateList();
+  }
 
-    const model = ctx.modelRegistry.find(previous.provider, previous.id);
-    if (!model) {
-      console.error(
-        `[model-thinking] could not restore ${previous.provider}/${previous.id} after /new: model is unavailable`,
+  private collect(): Record<string, StoredLevel> {
+    const result: Record<string, StoredLevel | undefined> = { ...this.values };
+    for (const row of this.rows) {
+      if (result[row.key] === undefined) delete result[row.key];
+    }
+    return result as Record<string, StoredLevel>;
+  }
+
+  private finish(result: Record<string, StoredLevel> | undefined): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.done(result);
+  }
+
+  handleInput(data: string): void {
+    const kb = getKeybindings();
+    if (kb.matches(data, "tui.select.up") || data === "k") {
+      this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+      this.updateList();
+    } else if (kb.matches(data, "tui.select.down") || data === "j") {
+      this.selectedIndex = Math.min(
+        this.rows.length - 1,
+        this.selectedIndex + 1,
       );
-      return;
+      this.updateList();
+    } else if (
+      kb.matches(data, "tui.select.confirm") ||
+      data === "\n" ||
+      data === "\r"
+    ) {
+      this.finish(this.collect());
+    } else if (kb.matches(data, "tui.select.cancel")) {
+      this.finish(undefined);
+    } else if (data === "\x1b[D" || data === "h") {
+      this.cycle(-1);
+    } else if (data === "\x1b[C" || data === "l") {
+      this.cycle(1);
     }
+  }
+}
 
-    let applied = false;
-    try {
-      restoringPreviousSession = true;
-      applied = await pi.setModel(model);
-      if (!applied) {
-        console.error(
-          `[model-thinking] could not restore ${previous.provider}/${previous.id} after /new: provider authentication is unavailable`,
+export interface ModelThinkingOptions {
+  /** Override the sidecar path (tests). */
+  levelsPath?: string;
+}
+
+export default function modelThinking(
+  pi: ExtensionAPI,
+  options: ModelThinkingOptions = {},
+): void {
+  const levelsPath = options.levelsPath ?? DEFAULT_LEVELS_PATH;
+
+  pi.registerCommand("levels", {
+    description:
+      "Set per-model thinking levels (applied on switch; survives /scoped-models)",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("/levels requires interactive mode", "warning");
+        return;
+      }
+      const scoped = ctx.scopedModels;
+      if (scoped.length === 0) {
+        ctx.ui.notify(
+          "No scoped models — enable models with /scoped-models first; levels are set per enabled model.",
+          "warning",
         );
         return;
       }
-    } catch (error) {
-      console.error(
-        `[model-thinking] failed to restore ${previous.provider}/${previous.id} after /new:`,
-        error,
-      );
-    } finally {
-      restoringPreviousSession = false;
-    }
 
-    if (applied) {
-      // setModel emits model_select, where the scoped policy may apply. The
-      // captured session level must have the final word for /new.
-      pi.setThinkingLevel(previous.thinkingLevel);
-    }
-  }
+      const rows: LevelsRow[] = scoped.map((entry) => ({
+        key: modelKey(entry.model),
+        ladder: buildLadder(entry.model),
+      }));
+      const values = readStoredLevels(levelsPath);
+      const activeKey = ctx.model ? modelKey(ctx.model) : undefined;
+
+      const result = await ctx.ui.custom<
+        Record<string, StoredLevel> | undefined
+      >(
+        (_tui, theme, _keybindings, done) =>
+          new LevelsSelectorComponent(
+            "Thinking levels",
+            rows,
+            activeKey,
+            { ...values },
+            theme,
+            done,
+          ),
+      );
+      if (result === undefined) return;
+
+      writeStoredLevels(result, levelsPath);
+      applyStoredLevel(pi, ctx, true, levelsPath);
+      ctx.ui.notify("Saved thinking levels", "info");
+    },
+  });
 
   pi.on("model_select", (event, ctx) => {
     // A restored session owns its historical thinking level.
     if (event.source === "restore") return;
-    // Pi suppresses this event when the selected model equals the active
-    // one (see _emitModelSelect), which is why re-selecting the current
-    // model in the full picker does not re-apply its scoped level.
-    applyScopedLevel(ctx, restoringPreviousSession);
+    applyStoredLevel(pi, ctx, true, levelsPath);
   });
 
   pi.on("session_start", (event, ctx) => {
-    if (event.reason === "new") {
-      const previous = previousSessionState;
-      previousSessionState = null;
-      if (previous) return restorePreviousSession(ctx, previous);
-      return;
-    }
-
     // Pi restores these sessions' model and thinking level from the session.
-    // Startup is already resolved by Pi except for a plain explicit --model,
-    // which bypasses the enabledModels startup selection. Reload preserves
-    // the current session, so applying the scoped default there would clobber
-    // a manual change.
+    // Reload preserves the current session, so applying the stored level
+    // there would clobber a manual change.
     if (
       event.reason === "reload" ||
       event.reason === "resume" ||
@@ -240,21 +391,10 @@ export default function modelThinking(pi: ExtensionAPI): void {
     ) {
       return;
     }
-    if (event.reason === "startup" && !plainCliModelNeedsScopedLevel(ctx.model))
-      return;
-    applyScopedLevel(ctx, true);
-  });
-
-  pi.on("session_before_switch", (event, ctx) => {
-    if (event.reason !== "new") return;
-
-    const model = ctx.model;
-    previousSessionState = model
-      ? {
-          provider: model.provider,
-          id: model.id,
-          thinkingLevel: pi.getThinkingLevel(),
-        }
-      : null;
+    // Explicit CLI thinking intent wins for the launched session.
+    if (event.reason === "startup" && explicitCliThinking()) return;
+    // /new: pi starts the fresh session on the saved default model; snap
+    // the level to that model's stored level.
+    applyStoredLevel(pi, ctx, event.reason === "new", levelsPath);
   });
 }

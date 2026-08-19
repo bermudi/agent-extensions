@@ -10,7 +10,7 @@ extensions. One entry point, nine independent features.
 | `name-with-ai`     | `/name-with-ai [name]`        | Generate a short session name from the first user message (or set one manually).                                                                |
 | `zed`              | `/z`                          | Open Zed editor on the current working directory.                                                                                               |
 | `prefer-tools`     | hook (no command)             | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`.                                    |
-| `model-thinking`   | hook (no command)             | Apply native scoped-model thinking levels consistently when selecting a model through the full picker.                                          |
+| `model-thinking`   | hook + `/levels`              | Per-model thinking levels stored in an extension sidecar (pi's /scoped-models rewrites `enabledModels` bare, wiping `:level` suffixes); `/levels` edits them, hooks apply them whenever a model becomes active. |
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
 | `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 | `tps`              | hook (no command)             | Notify tokens/sec and in/out/cache token usage at the end of each agent turn.                                                                   |
@@ -29,36 +29,41 @@ Kilo's provider and its balance footer are bundled here.
 
 ## Model selection and thinking
 
-Pi's native model settings are the single source of truth. Add models to
-`enabledModels` in `~/.pi/agent/settings.json` in cycle order. Add an optional
-thinking level after a colon:
+Pi's native scoped-models config would put per-model thinking levels in
+`enabledModels` entries like `"zai/glm-5.3:high"`, but the `/scoped-models`
+screen (which maintains that list) rewrites it with bare model ids on every
+save, destroying any `:level` suffix. So this package stores levels in its
+own sidecar file:
 
-```json
-{
-  "enabledModels": [
-    "opencode/hy3-free:high",
-    "zai/glm-5.2:high",
-    "openai-codex/gpt-5.6-terra:medium"
-  ]
-}
+```
+~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json
 ```
 
-Pi applies those levels while cycling with Ctrl+P and Ctrl+Shift+P. This
-package fills the small consistency gaps: choosing a scoped model through the
-full model picker and starting with a plain explicit `--model` apply its
-configured level. Explicit `--thinking` and `--model ...:<level>` still win
-(unless the `:<level>` ending is the model's registered id, in which case the
-scoped level applies).
-One gap is inherent to Pi: it emits no selection event when you pick the
-model that is already active, so re-selecting it in the full picker leaves a
-manual thinking level in place — switch models (or cycle) to snap back.
-Resumed and forked sessions retain the level restored by Pi; `/new` carries the
-previous session's model and active thinking level into the new session.
+The split of ownership is clean: `/scoped-models` owns which models are
+enabled and their Ctrl+P cycle order; `/levels` owns the per-model thinking
+level and can never be wiped by the other screen.
 
-Use `/scoped-models` to search, enable, disable, and reorder the cycle list.
-Be aware that pi 0.84.2 currently writes bare model IDs when that screen is
-saved, so saving there removes any `:level` suffixes; restore them in
-`settings.json` afterward.
+Use `/levels` to edit: ↑↓ moves between scoped models, ←→ cycles each
+model's level through the ladder it actually supports plus `inherit`
+(which leaves pi's global default in charge), Enter saves atomically and
+applies to the active model immediately, Esc cancels.
+
+Hooks apply the stored level whenever a model becomes active: full-picker
+selection, Ctrl+P cycling, startup, and `/new` (which pi starts on the
+saved default model). A native scoped level for the session — via
+`--models "x:high"` or a hand-suffixed enabledModels entry — always wins;
+the sidecar only fills in where pi itself has no level. Explicit
+`--thinking` or `--model ...:<level>` still
+wins for that launched session — a model whose registered id genuinely ends
+in `:<level>` is indistinguishable from that shorthand without the registry,
+so it opts out of its stored level for that startup; switch or cycle to
+re-apply. Resumed and forked sessions keep the level restored by pi.
+
+One gap is inherent to Pi: it emits no `model_select` when you pick the
+model that is already active, so re-selecting it in the full picker leaves
+a manual thinking level in place — switch models (or cycle) to snap back.
+Saving the `/scoped-models` screen in pi 0.84.2 writes bare model ids, which
+is now harmless: bare ids are exactly what this design expects.
 
 ## Provider and balance details
 
