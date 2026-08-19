@@ -31,8 +31,7 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
   DynamicBorder,
   getAgentDir,
-  keyHint,
-  rawKeyHint,
+  keyText,
   Theme,
   type ExtensionAPI,
   type ExtensionContext,
@@ -123,6 +122,38 @@ export function buildLadder(model: Model): (StoredLevel | undefined)[] {
 }
 
 /**
+ * Step a row's value through its ladder. A current value outside the
+ * ladder (e.g. a stored level the model no longer supports) snaps to
+ * inherit from either direction rather than jumping to an arbitrary rung.
+ */
+export function cycleLevel(
+  ladder: readonly (StoredLevel | undefined)[],
+  current: StoredLevel | undefined,
+  delta: number,
+): StoredLevel | undefined {
+  let index = ladder.indexOf(current);
+  if (index === -1) index = delta > 0 ? -1 : 1;
+  index = (index + delta + ladder.length) % ladder.length;
+  return ladder[index];
+}
+
+/**
+ * Collect the saveable map: explicit levels for shown rows, minus every
+ * row left on inherit. Stored keys with no row (models no longer scoped)
+ * survive untouched — that is what makes levels outlive /scoped-models.
+ */
+export function collectLevels(
+  values: Readonly<Record<string, StoredLevel | undefined>>,
+  rows: readonly { key: string }[],
+): Record<string, StoredLevel> {
+  const result: Record<string, StoredLevel | undefined> = { ...values };
+  for (const row of rows) {
+    if (result[row.key] === undefined) delete result[row.key];
+  }
+  return result as Record<string, StoredLevel>;
+}
+
+/**
  * Mirrors Pi's parseArgs semantics for the two flags that express explicit
  * thinking intent: the last --model wins, --thinking counts only when its
  * value is a valid level, and a trailing flag without a value token sets
@@ -185,12 +216,17 @@ function applyStoredLevel(
   }
 }
 
+/** A keybinding hint formatted with the injected theme, not the global one. */
+function hint(theme: Theme, keys: string, description: string): string {
+  return theme.fg("dim", keys) + theme.fg("muted", ` ${description}`);
+}
+
 interface LevelsRow {
   key: string;
   ladder: (StoredLevel | undefined)[];
 }
 
-class LevelsSelectorComponent extends Container {
+export class LevelsSelectorComponent extends Container {
   private selectedIndex = 0;
   private readonly listContainer = new Container();
   private closed = false;
@@ -222,13 +258,13 @@ class LevelsSelectorComponent extends Container {
     this.addChild(new Spacer(1));
     this.addChild(
       new Text(
-        rawKeyHint("↑↓", "navigate") +
+        hint(this.theme, "↑↓", "navigate") +
           "  " +
-          rawKeyHint("←→", "cycle level") +
+          hint(this.theme, "←→", "cycle level") +
           "  " +
-          keyHint("tui.select.confirm", "save") +
+          hint(this.theme, keyText("tui.select.confirm"), "save") +
           "  " +
-          keyHint("tui.select.cancel", "cancel"),
+          hint(this.theme, keyText("tui.select.cancel"), "cancel"),
         1,
         0,
       ),
@@ -270,19 +306,12 @@ class LevelsSelectorComponent extends Container {
   private cycle(delta: number): void {
     const row = this.rows[this.selectedIndex];
     if (!row) return;
-    let index = row.ladder.indexOf(this.values[row.key]);
-    if (index === -1) index = delta > 0 ? -1 : 1;
-    index = (index + delta + row.ladder.length) % row.ladder.length;
-    this.values[row.key] = row.ladder[index];
+    this.values[row.key] = cycleLevel(row.ladder, this.values[row.key], delta);
     this.updateList();
   }
 
   private collect(): Record<string, StoredLevel> {
-    const result: Record<string, StoredLevel | undefined> = { ...this.values };
-    for (const row of this.rows) {
-      if (result[row.key] === undefined) delete result[row.key];
-    }
-    return result as Record<string, StoredLevel>;
+    return collectLevels(this.values, this.rows);
   }
 
   private finish(result: Record<string, StoredLevel> | undefined): void {

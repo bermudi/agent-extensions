@@ -5,9 +5,14 @@ import { join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import modelThinking, {
   buildLadder,
+  collectLevels,
+  cycleLevel,
+  LevelsSelectorComponent,
   modelKey,
   parseStoredLevels,
   readStoredLevels,
@@ -111,6 +116,13 @@ describe("model-thinking sidecar", () => {
     expect(readStoredLevels(join(levelsPath(), "absent.json"))).toEqual({});
   });
 
+  test("rethrows read errors other than a missing file", () => {
+    // A directory path fails with EISDIR, not ENOENT: the failure must
+    // surface instead of being silently read as an empty sidecar.
+    const dir = mkdtempSync(join(tmpdir(), "model-thinking-dir-"));
+    expect(() => readStoredLevels(dir)).toThrow();
+  });
+
   test("corrupt sidecar reads as empty and surfaces the failure", () => {
     const path = levelsPath();
     writeFileSync(path, "{not json");
@@ -158,6 +170,187 @@ function reasonedModel(): Model {
     reasoning: true,
   } as unknown as Model;
 }
+
+describe("cycleLevel", () => {
+  const ladder: (StoredLevel | undefined)[] = [undefined, "off", "low", "high"];
+
+  test("forward from inherit enters the first supported level", () => {
+    expect(cycleLevel(ladder, undefined, 1)).toBe("off");
+  });
+
+  test("forward from the last rung wraps to inherit", () => {
+    expect(cycleLevel(ladder, "high", 1)).toBe(undefined);
+  });
+
+  test("backward from inherit wraps to the last rung", () => {
+    expect(cycleLevel(ladder, undefined, -1)).toBe("high");
+  });
+
+  test("backward from the first rung wraps to inherit", () => {
+    expect(cycleLevel(ladder, "off", -1)).toBe(undefined);
+  });
+
+  test("steps one rung at a time mid-ladder", () => {
+    expect(cycleLevel(ladder, "low", 1)).toBe("high");
+    expect(cycleLevel(ladder, "high", -1)).toBe("low");
+  });
+
+  test("snaps an unsupported stored value to inherit from either direction", () => {
+    expect(cycleLevel(ladder, "max", 1)).toBe(undefined);
+    expect(cycleLevel(ladder, "max", -1)).toBe(undefined);
+  });
+});
+
+describe("collectLevels", () => {
+  test("drops rows left on inherit and keeps explicit levels", () => {
+    expect(
+      collectLevels({ "zai/glm": undefined, "kilo/flash": "xhigh" }, [
+        { key: "zai/glm" },
+        { key: "kilo/flash" },
+      ]),
+    ).toEqual({ "kilo/flash": "xhigh" });
+  });
+
+  test("keeps stored keys for models that are no longer scoped", () => {
+    expect(
+      collectLevels({ "zai/glm": "high", "old/model": "low" }, [
+        { key: "zai/glm" },
+      ]),
+    ).toEqual({ "zai/glm": "high", "old/model": "low" });
+  });
+
+  test("a stored level cycled back to inherit is removed", () => {
+    const values: Record<string, StoredLevel | undefined> = {
+      "zai/glm": "high",
+    };
+    values["zai/glm"] = cycleLevel([undefined, "off", "high"], "high", 1);
+    expect(collectLevels(values, [{ key: "zai/glm" }])).toEqual({});
+  });
+});
+
+describe("levels selector component", () => {
+  const plainTheme = {
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+
+  const UP = "\x1b[A";
+  const DOWN = "\x1b[B";
+  const LEFT = "\x1b[D";
+  const RIGHT = "\x1b[C";
+  const ENTER = "\r";
+  const ESCAPE = "\x1b";
+
+  const ladder = (...levels: StoredLevel[]): (StoredLevel | undefined)[] => [
+    undefined,
+    ...levels,
+  ];
+  const rows = [
+    { key: "zai/glm", ladder: ladder("off", "high") },
+    { key: "kilo/flash", ladder: ladder("off", "low", "xhigh") },
+  ];
+
+  function selector(
+    rowList: typeof rows,
+    values: Record<string, StoredLevel | undefined> = {},
+  ) {
+    let calls = 0;
+    let cancelled = false;
+    let saved: Record<string, StoredLevel> | undefined;
+    const component = new LevelsSelectorComponent(
+      "Thinking levels",
+      rowList,
+      undefined,
+      values,
+      plainTheme,
+      (result) => {
+        calls += 1;
+        cancelled = result === undefined;
+        saved = result;
+      },
+    );
+    return {
+      component,
+      doneCalls: () => calls,
+      wasCancelled: () => cancelled,
+      saved: () => saved,
+    };
+  }
+
+  test("navigates with j/k and cycles the selected row", () => {
+    const s = selector(rows);
+    s.component.handleInput(RIGHT); // row 0: inherit -> off
+    s.component.handleInput("j"); // move to row 1
+    s.component.handleInput(RIGHT); // row 1: inherit -> off
+    s.component.handleInput(ENTER);
+
+    expect(s.doneCalls()).toBe(1);
+    expect(s.wasCancelled()).toBe(false);
+    expect(s.saved()).toEqual({ "zai/glm": "off", "kilo/flash": "off" });
+  });
+
+  test("arrow keys navigate and cycle backward with wrap", () => {
+    const s = selector(rows);
+    s.component.handleInput(DOWN); // move to row 1
+    s.component.handleInput(LEFT); // inherit wraps backward to xhigh
+    s.component.handleInput(ENTER);
+
+    expect(s.saved()).toEqual({ "kilo/flash": "xhigh" });
+  });
+
+  test("k clamps at the top row", () => {
+    const s = selector(rows);
+    s.component.handleInput("k"); // stays on row 0
+    s.component.handleInput(RIGHT); // cycles row 0, not row 1
+    s.component.handleInput(ENTER);
+
+    expect(s.saved()).toEqual({ "zai/glm": "off" });
+  });
+
+  test("j clamps at the bottom row", () => {
+    const s = selector(rows);
+    s.component.handleInput("j");
+    s.component.handleInput("j"); // clamped on row 1
+    s.component.handleInput(RIGHT);
+    s.component.handleInput(ENTER);
+
+    expect(s.saved()).toEqual({ "kilo/flash": "off" });
+  });
+
+  test("Enter finishes once; later input cannot reopen or flip the result", () => {
+    const s = selector(rows);
+    s.component.handleInput(RIGHT);
+    s.component.handleInput(ENTER);
+    s.component.handleInput(RIGHT); // no-op after close
+    s.component.handleInput(ESCAPE); // must not turn the save into a cancel
+
+    expect(s.doneCalls()).toBe(1);
+    expect(s.wasCancelled()).toBe(false);
+    expect(s.saved()).toEqual({ "zai/glm": "off" });
+  });
+
+  test("escape cancels without saving", () => {
+    const s = selector(rows);
+    s.component.handleInput(RIGHT);
+    s.component.handleInput(ESCAPE);
+
+    expect(s.doneCalls()).toBe(1);
+    expect(s.wasCancelled()).toBe(true);
+    expect(s.saved()).toBeUndefined();
+  });
+
+  test("renders model keys, inherit labels, and stored levels", () => {
+    // DynamicBorder (pi's component) reads pi's global theme in render().
+    initTheme(undefined, false);
+    const s = selector(rows, { "zai/glm": "high" });
+    const text = s.component.render(80).join("\n");
+
+    expect(text).toContain("zai/glm");
+    expect(text).toContain("kilo/flash");
+    expect(text).toContain("high");
+    expect(text).toContain("inherit"); // row 1 has no stored level
+  });
+});
 
 describe("model-thinking hooks", () => {
   test("applies the stored level at startup, silently", async () => {
@@ -389,6 +582,133 @@ describe("model-thinking hooks", () => {
       "kilo/deepseek/v4",
     );
   });
+
+  test("startup with no stored level for the model is untouched", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "low";
+
+    await pi.emit(
+      "session_start",
+      { reason: "startup" },
+      context(model("openai", "unmanaged")),
+    );
+
+    expect(pi.level).toBe("low");
+  });
+
+  test("keeps the last valid --thinking across an invalid repeat", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "anthropic/claude": "high" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "low";
+
+    await withArgv(
+      [
+        "pi",
+        "start",
+        "--model",
+        "anthropic/claude",
+        "--thinking",
+        "low",
+        "--thinking",
+        "bogus",
+      ],
+      async () => {
+        await pi.emit(
+          "session_start",
+          { reason: "startup" },
+          context(model("anthropic", "claude")),
+        );
+      },
+    );
+
+    expect(pi.level).toBe("low");
+  });
+
+  test("ignores a trailing --thinking without a value", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "anthropic/claude": "high" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "low";
+
+    await withArgv(["pi", "start", "--thinking"], async () => {
+      await pi.emit(
+        "session_start",
+        { reason: "startup" },
+        context(model("anthropic", "claude")),
+      );
+    });
+
+    expect(pi.level).toBe("high");
+  });
+
+  test("ignores a :level suffix on an earlier, overridden --model", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "low" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "high";
+
+    // Pi's parser lets the last --model win; only it carries thinking
+    // intent, and it is a plain id here — so the stored level applies.
+    await withArgv(
+      ["pi", "start", "--model", "zai/glm-5.3:high", "--model", "zai/glm-5.3"],
+      async () => {
+        await pi.emit(
+          "session_start",
+          { reason: "startup" },
+          context(model("zai", "glm-5.3")),
+        );
+      },
+    );
+
+    expect(pi.level).toBe("low");
+  });
+
+  test("ignores equals-form --model=x:level, like pi's parser", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "low" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "high";
+
+    // Pi only parses space-separated --model; the equals form lands in
+    // unknownFlags and sets no model or thinking. The mirror must agree,
+    // or it would suppress the stored level for a session pi treats as
+    // having no explicit thinking.
+    await withArgv(["pi", "start", "--model=zai/glm-5.3:high"], async () => {
+      await pi.emit(
+        "session_start",
+        { reason: "startup" },
+        context(model("zai", "glm-5.3")),
+      );
+    });
+
+    expect(pi.level).toBe("low");
+  });
+
+  test("applies a stored off level and notifies", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "off" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "high";
+    const notifications: string[] = [];
+
+    await pi.emit(
+      "model_select",
+      { model: model("zai", "glm-5.3"), source: "cycle" },
+      context(model("zai", "glm-5.3"), notifications),
+    );
+
+    expect(pi.level).toBe("off");
+    expect(notifications).toEqual(["Thinking: high → off"]);
+  });
 });
 
 describe("/levels command", () => {
@@ -459,5 +779,68 @@ describe("/levels command", () => {
     await pi.commands.get("levels")?.("", ctx);
 
     expect(readStoredLevels(path)).toEqual({ "zai/glm-5.3": "low" });
+  });
+
+  test("applies a saved level change to the active model", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "off" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "high";
+    const notifications: string[] = [];
+    const ctx = {
+      ...context(model("zai", "glm-5.3"), notifications),
+      scopedModels: [
+        { model: model("zai", "glm-5.3"), thinkingLevel: undefined },
+      ],
+      ui: {
+        notify(message: string) {
+          notifications.push(message);
+        },
+        custom: async <T>() => ({ "zai/glm-5.3": "low" }) as T,
+      },
+    } as unknown as ExtensionContext;
+
+    await pi.commands.get("levels")?.("", ctx);
+
+    expect(readStoredLevels(path)).toEqual({ "zai/glm-5.3": "low" });
+    expect(pi.level).toBe("low");
+    expect(notifications).toEqual([
+      "Thinking: high → low",
+      "Saved thinking levels",
+    ]);
+  });
+
+  test("preserves stored levels for models that are no longer scoped", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "low", "old/model": "high" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    const notifications: string[] = [];
+    const ctx = {
+      ...context(model("zai", "glm-5.3"), notifications),
+      scopedModels: [
+        { model: model("zai", "glm-5.3"), thinkingLevel: undefined },
+      ],
+      ui: {
+        notify(message: string) {
+          notifications.push(message);
+        },
+        custom: async <T>() =>
+          ({
+            "zai/glm-5.3": "low",
+            "old/model": "high",
+            "kilo/flash": "xhigh",
+          }) as T,
+      },
+    } as unknown as ExtensionContext;
+
+    await pi.commands.get("levels")?.("", ctx);
+
+    expect(readStoredLevels(path)).toEqual({
+      "zai/glm-5.3": "low",
+      "old/model": "high",
+      "kilo/flash": "xhigh",
+    });
   });
 });
