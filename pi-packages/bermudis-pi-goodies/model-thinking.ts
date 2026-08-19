@@ -555,27 +555,59 @@ export default function modelThinking(
   if (savedInheritedLevel === undefined) {
     writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
   }
-  const managedLevels: ThinkingLevel[] = [];
+  // Counter-based managed-event suppression. Pi emits
+  // thinking_level_select synchronously inside setThinkingLevel (the
+  // handler runs before the first await in emit). Increment before the
+  // call; the event handler decrements. If no event fires (clamped to the
+  // same value), decrement here. Unlike a level-matching queue, a counter
+  // is immune to clamping (the event level may differ from the requested
+  // level) and never leaves stale entries.
+  let managedSetCount = 0;
   const setManagedLevel = (level: ThinkingLevel): void => {
     const before = pi.getThinkingLevel();
     if (before === level) return;
-    // Pi emits this event asynchronously. Record it first so its event does
-    // not get mistaken for a user changing the global default.
-    managedLevels.push(level);
+    managedSetCount++;
     pi.setThinkingLevel(level);
     const effective = pi.getThinkingLevel();
-    if (effective !== level)
-      managedLevels[managedLevels.length - 1] = effective;
+    if (effective === before) managedSetCount--;
   };
 
+  // Deferred save: Pi also emits thinking_level_select automatically when
+  // switching models or applying native scoped levels — always before
+  // model_select, in the same macrotask. By deferring the save to the next
+  // macrotask (setTimeout 0), model_select and session_start can cancel it
+  // before it fires. A genuine user key press is a separate macrotask, so
+  // the timer completes and the save takes effect.
+  let pendingSave: {
+    level: ThinkingLevel;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+
+  function scheduleInheritedSave(level: ThinkingLevel): void {
+    if (pendingSave) clearTimeout(pendingSave.timer);
+    pendingSave = {
+      level,
+      timer: setTimeout(() => {
+        inheritedLevel = pendingSave!.level;
+        writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
+        pendingSave = null;
+      }, 0),
+    };
+  }
+
+  function cancelPendingInheritedSave(): void {
+    if (pendingSave) {
+      clearTimeout(pendingSave.timer);
+      pendingSave = null;
+    }
+  }
+
   pi.on("thinking_level_select", (event) => {
-    const managed = managedLevels.indexOf(event.level);
-    if (managed !== -1) {
-      managedLevels.splice(managed, 1);
+    if (managedSetCount > 0) {
+      managedSetCount--;
       return;
     }
-    inheritedLevel = event.level;
-    writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
+    scheduleInheritedSave(event.level);
   });
 
   pi.registerCommand("levels", {
@@ -636,6 +668,10 @@ export default function modelThinking(
   });
 
   pi.on("model_select", (event, ctx) => {
+    // Cancel a pending save from the thinking_level_select that Pi emits
+    // just before model_select during a model switch — that level change is
+    // Pi-internal (native scoped level, re-clamping), not a user choice.
+    cancelPendingInheritedSave();
     // A restored session owns its historical thinking level.
     if (event.source === "restore") return;
     applyStoredLevel(
@@ -653,6 +689,9 @@ export default function modelThinking(
   });
 
   pi.on("session_start", (event, ctx) => {
+    // Same cancellation as model_select: Pi may emit thinking_level_select
+    // during session creation before session_start fires.
+    cancelPendingInheritedSave();
     // Pi restores these sessions' model and thinking level from the session.
     // Reload preserves the current session, so applying the stored level
     // there would clobber a manual change.
@@ -665,14 +704,18 @@ export default function modelThinking(
     }
     // Explicit CLI thinking intent wins for the launched session.
     if (event.reason === "startup" && explicitCliThinking()) return;
-    // /new: pi starts the fresh session on the saved default model; snap
-    // the level to that model's stored level.
+    // /new and ordinary startup: snap the level to the active model's
+    // stored level, or restore the preserved global default when the model
+    // has no stored level. The latter is necessary because Pi persists every
+    // setThinkingLevel() call as its global default — a prior session's
+    // scoped value pollutes it, and only the sidecar can recover the true
+    // default.
     applyStoredLevel(
       pi,
       ctx,
       event.reason === "new",
       levelsPath,
-      event.reason === "new",
+      true,
       inheritedLevel,
       undefined,
       setManagedLevel,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -58,6 +58,12 @@ class PiHarness {
     string,
     (args: string, ctx: ExtensionContext) => Promise<void>
   >();
+  /**
+   * When set, setThinkingLevel clamps the requested level to the nearest
+   * value in this list (like Pi does per model capabilities). When unset,
+   * the level is accepted as-is.
+   */
+  availableLevels: readonly ThinkingLevel[] | undefined;
 
   readonly api = {
     on: (event: string, handler: Handler) => {
@@ -75,9 +81,49 @@ class PiHarness {
     },
     getThinkingLevel: () => this.level,
     setThinkingLevel: (level: ThinkingLevel) => {
-      this.level = level;
+      const effective = this.clamp(level);
+      if (effective === this.level) return;
+      const previous = this.level;
+      this.level = effective;
+      // Pi emits thinking_level_select synchronously inside setThinkingLevel
+      // (the handler runs before the first await in emit). Mirror that so
+      // the extension's managed-event suppression is exercised.
+      for (const handler of this.handlers.get("thinking_level_select") ?? []) {
+        handler(
+          { level: effective, previousLevel: previous } as never,
+          {} as ExtensionContext,
+        );
+      }
     },
   } as unknown as ExtensionAPI;
+
+  private clamp(level: ThinkingLevel): ThinkingLevel {
+    if (!this.availableLevels) return level;
+    if (this.availableLevels.includes(level)) return level;
+    // Clamp to the nearest supported level (like Pi's clampThinkingLevel).
+    const order: readonly ThinkingLevel[] = [
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ];
+    const requestedRank = order.indexOf(level);
+    const available = this.availableLevels
+      .slice()
+      .sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    // Pick the closest available level at or below the requested rank;
+    // if none, pick the lowest available above.
+    let result: ThinkingLevel | undefined;
+    for (const candidate of available) {
+      if (order.indexOf(candidate) <= requestedRank) {
+        result = candidate;
+      }
+    }
+    return result ?? available[0] ?? "off";
+  }
 
   async emit(
     event: string,
@@ -101,6 +147,16 @@ async function withArgv(
   } finally {
     process.argv = original;
   }
+}
+
+/**
+ * Flush the macrotask queue so a deferred setTimeout(0) save completes.
+ * The extension defers inheritedLevel saves to the next macrotask so that
+ * model_select/session_start can cancel Pi-internal thinking_level_select
+ * events. Tests that need to observe the saved value must await this.
+ */
+function flushTimers(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 1));
 }
 
 describe("model-thinking sidecar", () => {
@@ -686,12 +742,22 @@ describe("model-thinking hooks", () => {
     );
   });
 
-  test("startup with no stored level for the model is untouched", async () => {
+  test("startup with no stored level recovers the preserved global default", async () => {
+    // Issue 2: Pi persists every setThinkingLevel() call as its global
+    // default. A prior session's scoped level pollutes it. Ordinary
+    // startup must restore the preserved default from the sidecar, not
+    // leave the polluted value in place.
     const path = levelsPath();
+    const inheritedPath = `${path}.default`;
     writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+    writeFileSync(inheritedPath, JSON.stringify("low"));
+
     const pi = new PiHarness();
-    modelThinking(pi.api, { levelsPath: path });
-    pi.level = "low";
+    pi.level = "high"; // Pi persisted high from a prior session's scoped level
+    modelThinking(pi.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
 
     await pi.emit(
       "session_start",
@@ -699,6 +765,25 @@ describe("model-thinking hooks", () => {
       context(model("openai", "unmanaged")),
     );
 
+    // The extension recovers low from its default sidecar instead of
+    // treating Pi's polluted high as the global default.
+    expect(pi.level).toBe("low");
+  });
+
+  test("startup with no stored level and no pollution is a no-op", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+    const pi = new PiHarness();
+    pi.level = "low"; // Pi's persisted global default — no pollution
+    modelThinking(pi.api, { levelsPath: path }); // captures inheritedLevel = low
+
+    await pi.emit(
+      "session_start",
+      { reason: "startup" },
+      context(model("openai", "unmanaged")),
+    );
+
+    // inheritedLevel matches Pi's level — setManagedLevel is a no-op.
     expect(pi.level).toBe("low");
   });
 
@@ -811,6 +896,137 @@ describe("model-thinking hooks", () => {
 
     expect(pi.level).toBe("off");
     expect(notifications).toEqual(["Thinking: high → off"]);
+  });
+
+  // Issue 1: Pi emits thinking_level_select automatically when switching
+  // models or applying native scoped levels — before model_select, in the
+  // same macrotask. The extension must not save that as the global default.
+  test("model switch with native scoped level does not overwrite the global default", async () => {
+    const path = levelsPath();
+    const inheritedPath = `${path}.default`;
+    const pi = new PiHarness();
+    pi.level = "low";
+    modelThinking(pi.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+
+    // Pi cycles to a model natively pinned to high: it emits
+    // thinking_level_select(high) then model_select(cycle) in the same
+    // macrotask. The extension's model_select handler sees the scoped level
+    // and defers to it.
+    pi.level = "high"; // Pi applied the scoped level
+    await pi.emit(
+      "thinking_level_select",
+      { level: "high", previousLevel: "low" },
+      context(model("zai", "glm-5.3")),
+    );
+    await pi.emit(
+      "model_select",
+      {
+        model: model("zai", "glm-5.3"),
+        previousModel: model("openai", "unmanaged"),
+        source: "cycle",
+      },
+      context(
+        model("zai", "glm-5.3"),
+        [],
+        [{ model: model("zai", "glm-5.3"), thinkingLevel: "high" }],
+      ),
+    );
+    await flushTimers();
+
+    // The global default sidecar must still be low, not high.
+    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("low");
+  });
+
+  test("user thinking-level change is saved as the global default", async () => {
+    const path = levelsPath();
+    const inheritedPath = `${path}.default`;
+    const pi = new PiHarness();
+    pi.level = "low";
+    modelThinking(pi.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+
+    // User cycles thinking level via keybinding: Pi emits
+    // thinking_level_select with no following model_select.
+    pi.level = "medium";
+    await pi.emit(
+      "thinking_level_select",
+      { level: "medium", previousLevel: "low" },
+      context(model("openai", "unmanaged")),
+    );
+    await flushTimers();
+
+    // The user's choice is saved as the global default.
+    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("medium");
+  });
+
+  // Issue 3: Pi clamps the requested level to model capabilities. The
+  // managed-event suppression must not break when the event's level differs
+  // from the requested level, and must not leave stale entries when no
+  // event fires.
+  test("clamping does not break managed-event suppression", async () => {
+    const path = levelsPath();
+    const inheritedPath = `${path}.default`;
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+    const pi = new PiHarness();
+    // Model only supports off, low, medium — high clamps to medium.
+    pi.availableLevels = ["off", "low", "medium"];
+    pi.level = "low";
+    modelThinking(pi.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+
+    await pi.emit(
+      "model_select",
+      { model: model("zai", "glm-5.3"), source: "set" },
+      context(model("zai", "glm-5.3")),
+    );
+    await flushTimers();
+
+    // The stored level "high" clamped to "medium" — applied correctly.
+    expect(pi.level).toBe("medium");
+    // The clamped managed event did not overwrite the global default.
+    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("low");
+  });
+
+  test("clamping to the same value leaves no stale suppression", async () => {
+    const path = levelsPath();
+    const inheritedPath = `${path}.default`;
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+    const pi = new PiHarness();
+    // Model supports off, low, medium — high clamps to medium.
+    pi.availableLevels = ["off", "low", "medium"];
+    pi.level = "medium"; // already at the clamped value
+    modelThinking(pi.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+
+    // setManagedLevel(high) clamps to medium which is already the current
+    // level — no event fires, no stale counter entry remains.
+    await pi.emit(
+      "model_select",
+      { model: model("zai", "glm-5.3"), source: "set" },
+      context(model("zai", "glm-5.3")),
+    );
+
+    // Now a genuine user change to medium must NOT be suppressed by a
+    // stale counter entry from the no-op managed call.
+    pi.level = "low"; // user changed to something else first
+    await pi.emit(
+      "thinking_level_select",
+      { level: "medium", previousLevel: "low" },
+      context(model("zai", "glm-5.3")),
+    );
+    await flushTimers();
+
+    // The user's choice is saved — not suppressed by a stale entry.
+    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("medium");
   });
 });
 
