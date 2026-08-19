@@ -8,7 +8,7 @@
  *   - name-with-ai     /name-with-ai     generate a session name via the model
  *   - zed              /z                open Zed on cwd
  *   - prefer-tools     hook              block legacy tools (use trash/rg/fd/uv)
- *   - model-thinking   hook              apply native scoped-model thinking levels consistently
+ *   - model-thinking   hook              manage per-model thinking levels in an extension-owned sidecar
  *   - kilo             provider          access Kilo Gateway models
  *   - provider-balance footer            show Kilo credits or Codex quota in the footer
  *   - tps              hook              notify tokens/sec and usage at each agent turn end

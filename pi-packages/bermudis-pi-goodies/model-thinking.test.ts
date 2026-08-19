@@ -204,6 +204,18 @@ describe("model-thinking sidecar", () => {
     });
   });
 
+  test("rejects keys with an empty provider or id", () => {
+    expect(() => parseStoredLevels({ "/": "high" })).toThrow();
+    expect(() => parseStoredLevels({ "provider/": "high" })).toThrow();
+    expect(() => parseStoredLevels({ "/id": "high" })).toThrow();
+    expect(parseStoredLevels({ "provider/id": "high" })).toEqual({
+      "provider/id": "high",
+    });
+    expect(parseStoredLevels({ "provider/nested/id": "high" })).toEqual({
+      "provider/nested/id": "high",
+    });
+  });
+
   test("builds the inherit-first ladder from model support", () => {
     const reasoning = { reasoning: true } as unknown as Model;
     const flat = { reasoning: false } as unknown as Model;
@@ -452,6 +464,28 @@ describe("levels selector component", () => {
     expect(text).toContain("kilo/flash");
     expect(text).toContain("high");
     expect(text).toContain("inherit"); // row 1 has no stored level
+  });
+
+  test("native scoped rows are read-only and labeled", () => {
+    initTheme(undefined, false);
+    let saved: Record<string, StoredLevel> | undefined;
+    const component = new LevelsSelectorComponent(
+      "Thinking levels",
+      [{ key: "zai/glm", ladder: ladder("off", "high"), native: "high" }],
+      undefined,
+      {},
+      plainTheme,
+      (result) => {
+        saved = result;
+      },
+    );
+
+    component.handleInput(RIGHT); // no-op for a native scoped row
+    component.handleInput(ENTER);
+
+    expect(saved).toEqual({});
+    const text = component.render(80).join("\n");
+    expect(text).toContain("native: high");
   });
 });
 
@@ -1160,5 +1194,51 @@ describe("/levels command", () => {
       "zai/glm-5.3": "low",
       "old/model": "high",
     });
+  });
+
+  test("renders native scoped models as read-only", async () => {
+    const path = levelsPath();
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    let component: LevelsSelectorComponent | undefined;
+    const ctx = {
+      ...context(model("zai", "glm-5.3")),
+      scopedModels: [
+        { model: model("zai", "glm-5.3"), thinkingLevel: "high" },
+        { model: model("kilo", "flash"), thinkingLevel: undefined },
+      ],
+      ui: {
+        notify() {},
+        custom: async <T>(
+          fn: (
+            tui: unknown,
+            theme: Theme,
+            keybindings: unknown,
+            done: (result: T) => void,
+          ) => unknown,
+        ) => {
+          component = fn(
+            null,
+            {
+              fg: (_color: string, text: string) => text,
+              bold: (text: string) => text,
+            } as Theme,
+            null,
+            () => {},
+          ) as LevelsSelectorComponent;
+          return undefined as T;
+        },
+      },
+    } as unknown as ExtensionContext;
+
+    await pi.commands.get("levels")?.("", ctx);
+
+    expect(component).toBeDefined();
+    initTheme(undefined, false);
+    const text = component!.render(80).join("\n");
+    expect(text).toContain("zai/glm-5.3");
+    expect(text).toContain("kilo/flash");
+    expect(text).toContain("native: high");
+    expect(text).toContain("inherit");
   });
 });

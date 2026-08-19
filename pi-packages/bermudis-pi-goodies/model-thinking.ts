@@ -64,7 +64,7 @@ type Model = NonNullable<ExtensionContext["model"]>;
 /** Stored levels include "off", which the ExtensionAPI type omits. */
 type StoredLevel = ThinkingLevel | "off";
 
-const THINKING_LEVELS = new Set([
+const THINKING_LEVEL_ORDER: readonly StoredLevel[] = [
   "off",
   "minimal",
   "low",
@@ -72,7 +72,8 @@ const THINKING_LEVELS = new Set([
   "high",
   "xhigh",
   "max",
-]);
+];
+const THINKING_LEVELS = new Set<StoredLevel>(THINKING_LEVEL_ORDER);
 
 const DEFAULT_LEVELS_PATH = join(
   getAgentDir(),
@@ -96,10 +97,13 @@ export function parseStoredLevels(raw: unknown): Record<string, StoredLevel> {
   }
   const levels: Record<string, StoredLevel> = {};
   for (const [key, value] of Object.entries(raw)) {
-    if (!key.includes("/")) {
+    if (!/^[^/]+\/.+/.test(key)) {
       throw new Error(`key ${JSON.stringify(key)} is not a provider/id pair`);
     }
-    if (typeof value !== "string" || !THINKING_LEVELS.has(value)) {
+    if (
+      typeof value !== "string" ||
+      !THINKING_LEVELS.has(value as StoredLevel)
+    ) {
       throw new Error(`invalid thinking level for ${key}: ${String(value)}`);
     }
     levels[key] = value as StoredLevel;
@@ -143,7 +147,10 @@ function readInheritedLevel(path: string): StoredLevel | undefined {
   }
   try {
     const value: unknown = JSON.parse(raw);
-    if (typeof value !== "string" || !THINKING_LEVELS.has(value)) {
+    if (
+      typeof value !== "string" ||
+      !THINKING_LEVELS.has(value as StoredLevel)
+    ) {
       throw new Error("default level is not a valid thinking level");
     }
     return value as StoredLevel;
@@ -178,14 +185,16 @@ export function mergeStoredLevels(
 const SIDECAR_LOCK_WAIT_MS = 10;
 const SIDECAR_LOCK_TIMEOUT_MS = 5_000;
 const STALE_SIDECAR_LOCK_MS = 30_000;
-const lockWaitArray = new Int32Array(new SharedArrayBuffer(4));
 
 /**
  * Serialize the read/merge/write transaction across Pi processes. Atomic
  * rename alone cannot prevent two dialogs that close at the same instant
  * from both reading the same old sidecar and overwriting each other.
  */
-function withSidecarLock<T>(path: string, operation: () => T): T {
+async function withSidecarLock<T>(
+  path: string,
+  operation: () => T,
+): Promise<T> {
   const lockPath = `${path}.lock`;
   mkdirSync(dirname(path), { recursive: true });
   const deadline = Date.now() + SIDECAR_LOCK_TIMEOUT_MS;
@@ -214,42 +223,34 @@ function withSidecarLock<T>(path: string, operation: () => T): T {
       if (Date.now() >= deadline) {
         throw new Error(`timed out waiting for thinking-level sidecar lock`);
       }
-      Atomics.wait(lockWaitArray, 0, 0, SIDECAR_LOCK_WAIT_MS);
+      await new Promise((resolve) => setTimeout(resolve, SIDECAR_LOCK_WAIT_MS));
     }
   }
 
-  let result: T | undefined;
-  let operationError: unknown;
   try {
-    result = operation();
-  } catch (error) {
-    operationError = error;
+    return operation();
+  } finally {
+    try {
+      closeSync(descriptor);
+    } catch {
+      // Best effort: the descriptor may already be invalid.
+    }
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      // Best effort: the lock file may already be gone; the sidecar was
+      // already written under the held descriptor.
+    }
   }
-  let cleanupError: unknown;
-  try {
-    closeSync(descriptor);
-    unlinkSync(lockPath);
-  } catch (error) {
-    cleanupError = error;
-  }
-  if (operationError !== undefined && cleanupError !== undefined) {
-    throw new AggregateError(
-      [operationError, cleanupError],
-      `failed to update ${path} and release its lock`,
-    );
-  }
-  if (operationError !== undefined) throw operationError;
-  if (cleanupError !== undefined) throw cleanupError;
-  return result as T;
 }
 
-function mergeAndWriteStoredLevels(
+async function mergeAndWriteStoredLevels(
   initial: Readonly<Record<string, StoredLevel>>,
   edited: Readonly<Record<string, StoredLevel>>,
   rows: readonly { key: string }[],
   path: string,
-): void {
-  withSidecarLock(path, () => {
+): Promise<void> {
+  await withSidecarLock(path, () => {
     writeStoredLevels(
       mergeStoredLevels(initial, edited, readStoredLevels(path), rows),
       path,
@@ -259,7 +260,11 @@ function mergeAndWriteStoredLevels(
 
 /** The level ladder a row can cycle through: inherit + the model's levels. */
 export function buildLadder(model: Model): (StoredLevel | undefined)[] {
-  return [undefined, ...getSupportedThinkingLevels(model)];
+  const levels = [...getSupportedThinkingLevels(model)] as StoredLevel[];
+  levels.sort(
+    (a, b) => THINKING_LEVEL_ORDER.indexOf(a) - THINKING_LEVEL_ORDER.indexOf(b),
+  );
+  return [undefined, ...levels];
 }
 
 /**
@@ -311,13 +316,14 @@ function explicitCliThinking(): boolean {
       model = args[++index];
     } else if (arg === "--thinking" && index + 1 < args.length) {
       const level = args[++index];
-      if (THINKING_LEVELS.has(level)) thinking = level;
+      if (THINKING_LEVELS.has(level as StoredLevel)) thinking = level;
     }
   }
   if (thinking !== undefined) return true;
   if (model !== undefined) {
     const colon = model.lastIndexOf(":");
-    if (colon > 0 && THINKING_LEVELS.has(model.slice(colon + 1))) return true;
+    if (colon > 0 && THINKING_LEVELS.has(model.slice(colon + 1) as StoredLevel))
+      return true;
   }
   return false;
 }
@@ -334,7 +340,6 @@ function applyStoredLevel(
   ctx: ExtensionContext,
   notify: boolean,
   levelsPath: string,
-  restoreInherited: boolean,
   inheritedLevel: ThinkingLevel,
   source?: "set" | "cycle",
   setManagedLevel?: (level: ThinkingLevel) => void,
@@ -358,8 +363,6 @@ function applyStoredLevel(
   }
 
   const level = readStoredLevels(levelsPath)[modelKey(model)];
-  if (level === undefined && !restoreInherited) return;
-
   const before = pi.getThinkingLevel();
   // "off" is a valid runtime level (pi clamps per model); the declared API
   // type only models the non-off ladder.
@@ -379,6 +382,8 @@ function hint(theme: Theme, keys: string, description: string): string {
 interface LevelsRow {
   key: string;
   ladder: (StoredLevel | undefined)[];
+  /** A native scoped-model thinking level; if set, this row is read-only. */
+  native?: StoredLevel;
 }
 
 export class LevelsSelectorComponent extends Container {
@@ -431,8 +436,9 @@ export class LevelsSelectorComponent extends Container {
     this.updateList();
   }
 
-  private levelLabel(key: string): string {
-    return this.values[key] ?? "inherit";
+  private levelLabel(row: LevelsRow): string {
+    if (row.native !== undefined) return `native: ${row.native}`;
+    return this.values[row.key] ?? "inherit";
   }
 
   private updateList(): void {
@@ -458,11 +464,13 @@ export class LevelsSelectorComponent extends Container {
         row.key === this.activeKey
           ? this.theme.fg("accent", "● ")
           : this.theme.fg("muted", "  ");
-      const level = this.levelLabel(row.key);
+      const level = this.levelLabel(row);
       const levelText =
-        level === "inherit"
+        row.native !== undefined
           ? this.theme.fg("muted", level)
-          : this.theme.fg("accent", level);
+          : level === "inherit"
+            ? this.theme.fg("muted", level)
+            : this.theme.fg("accent", level);
       const line = `${marker}${row.key.padEnd(width)}  ${levelText}`;
       this.listContainer.addChild(
         new Text(
@@ -488,7 +496,7 @@ export class LevelsSelectorComponent extends Container {
 
   private cycle(delta: number): void {
     const row = this.rows[this.selectedIndex];
-    if (!row) return;
+    if (!row || row.native !== undefined) return;
     this.values[row.key] = cycleLevel(row.ladder, this.values[row.key], delta);
     this.updateList();
   }
@@ -630,6 +638,10 @@ export default function modelThinking(
       const rows: LevelsRow[] = scoped.map((entry) => ({
         key: modelKey(entry.model),
         ladder: buildLadder(entry.model),
+        native:
+          entry.thinkingLevel !== undefined
+            ? (entry.thinkingLevel as StoredLevel)
+            : undefined,
       }));
       const values = readStoredLevels(levelsPath);
       const activeKey = ctx.model ? modelKey(ctx.model) : undefined;
@@ -652,13 +664,12 @@ export default function modelThinking(
 
       // Read again after the dialog closes.  This preserves edits another
       // session made while this one was open; only rows changed here win.
-      mergeAndWriteStoredLevels(values, result, rows, levelsPath);
+      await mergeAndWriteStoredLevels(values, result, rows, levelsPath);
       applyStoredLevel(
         pi,
         ctx,
         true,
         levelsPath,
-        true,
         inheritedLevel,
         undefined,
         setManagedLevel,
@@ -679,7 +690,6 @@ export default function modelThinking(
       ctx,
       true,
       levelsPath,
-      true,
       inheritedLevel,
       event.source === "set" || event.source === "cycle"
         ? event.source
@@ -715,7 +725,6 @@ export default function modelThinking(
       ctx,
       event.reason === "new",
       levelsPath,
-      true,
       inheritedLevel,
       undefined,
       setManagedLevel,
