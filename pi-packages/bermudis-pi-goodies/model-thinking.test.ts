@@ -733,6 +733,13 @@ describe("model-thinking hooks", () => {
       levelsPath: path,
       inheritedLevelPath: inheritedPath,
     });
+    // session_start fires first in real Pi, capturing the inherited default
+    // (low) and writing it to the sidecar before any model switch.
+    await first.emit(
+      "session_start",
+      { reason: "startup" },
+      context(model("openai", "start")),
+    );
     await first.emit(
       "model_select",
       { model: model("zai", "glm-5.3"), source: "set" },
@@ -749,6 +756,11 @@ describe("model-thinking hooks", () => {
       levelsPath: path,
       inheritedLevelPath: inheritedPath,
     });
+    await second.emit(
+      "session_start",
+      { reason: "startup" },
+      context(model("openai", "start")),
+    );
     await second.emit(
       "model_select",
       { model: model("openai", "unmanaged"), source: "set" },
@@ -1079,6 +1091,13 @@ describe("model-thinking hooks", () => {
       thinkingLevelMap: { high: null },
     } as Model;
 
+    // session_start fires first in real Pi, capturing the inherited default
+    // (low) and writing it to the sidecar before any model switch.
+    await pi.emit(
+      "session_start",
+      { reason: "startup" },
+      context(model("openai", "start")),
+    );
     await pi.emit(
       "model_select",
       { model: limitedModel, source: "set" },
@@ -1434,6 +1453,211 @@ describe("model-thinking hooks", () => {
 
     // The extension's intent is saved, not suppressed.
     expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("high");
+  });
+
+  // Finding 3: An extension calling setThinkingLevel("high") followed
+  // immediately by setModel(...) can have "high" discarded by the old
+  // stale-event check if another extension's thinking_level_select handler
+  // awaits and delays ours past model_select. The new code distinguishes
+  // stale re-clamp events from genuine user changes by matching
+  // switchReclampLevel (test path) or isInternalModelSwitchLevel (production).
+  test("setThinkingLevel before setModel is saved even when the event is delayed", async () => {
+    const path = levelsPath();
+    const inheritedPath = `${path}.default`;
+    writeStoredLevels({ "zai/glm-5.3": "low" }, path);
+    writeFileSync(inheritedPath, JSON.stringify("low"));
+    const pi = new PiHarness();
+    pi.level = "low";
+    modelThinking(pi.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+
+    await pi.emit(
+      "session_start",
+      { reason: "startup" },
+      context(model("openai", "start")),
+    );
+
+    // Simulate: user set "high", then setModel re-clamped to "medium" (new
+    // model doesn't support "high"), then applyStoredLevel applied "low"
+    // (stored level). The thinking_level_select for "high" is delayed past
+    // model_select (another extension's handler awaited).
+    pi.level = "medium"; // Pi's re-clamp inside setModel
+    await pi.emit(
+      "model_select",
+      {
+        model: model("zai", "glm-5.3"),
+        previousModel: model("openai", "start"),
+        source: "set",
+      },
+      context(model("zai", "glm-5.3")),
+    );
+    // applyStoredLevel applied "low" (stored level). switchReclampLevel =
+    // "medium" (the re-clamp level before applyStoredLevel).
+    expect(pi.level).toBe("low");
+
+    // The delayed thinking_level_select for the user's "high" arrives.
+    // event.level (high) !== current (low). switchReclampLevel (medium) !==
+    // event.level (high) → genuine user change, not a stale re-clamp.
+    await pi.emit(
+      "thinking_level_select",
+      { level: "high", previousLevel: "low" },
+      context(model("zai", "glm-5.3")),
+    );
+    await flushTimers();
+
+    // The user's "high" is saved as the global default, not dropped.
+    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("high");
+
+    // The delayed re-clamp event ("medium") also arrives — it should be
+    // dropped because it matches switchReclampLevel.
+    await pi.emit(
+      "thinking_level_select",
+      { level: "medium", previousLevel: "high" },
+      context(model("zai", "glm-5.3")),
+    );
+    await flushTimers();
+
+    // The global default is still "high", not overwritten by the re-clamp.
+    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("high");
+  });
+
+  // Finding 4: pi --continue --model zai/glm-5.3 resumes a session but the
+  // user explicitly chose a model. Its stored sidecar level should apply,
+  // not the resumed session's restored level.
+  test("pi --continue --model applies the stored level for the requested model", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "medium"; // restored from the session
+
+    await withArgv(["pi", "start", "--model", "zai/glm-5.3"], async () => {
+      await pi.emit(
+        "session_start",
+        { reason: "startup" },
+        context(model("zai", "glm-5.3"), [], [], [
+          { type: "message", id: "x" }, // resumed session
+        ]),
+      );
+    });
+
+    // The stored level "high" is applied, not the restored "medium".
+    expect(pi.level).toBe("high");
+  });
+
+  test("pi --continue --model:high still defers to the explicit thinking level", async () => {
+    const path = levelsPath();
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+    const pi = new PiHarness();
+    modelThinking(pi.api, { levelsPath: path });
+    pi.level = "medium"; // restored from the session
+
+    await withArgv(
+      ["pi", "start", "--model", "zai/glm-5.3:high"],
+      async () => {
+        await pi.emit(
+          "session_start",
+          { reason: "startup" },
+          context(model("zai", "glm-5.3"), [], [], [
+            { type: "message", id: "x" },
+          ]),
+        );
+      },
+    );
+
+    // explicitCliThinking() catches --model X:high → the restored level is
+    // kept, the stored level does not apply.
+    expect(pi.level).toBe("medium");
+  });
+
+  // Finding 5: A resumed session's thinking level is session-specific.
+  // It must not be written to the inherited-default sidecar when a model
+  // switch later triggers getInheritedLevel()'s lazy init.
+  test("a resumed session's level is not persisted as the global default", async () => {
+    const path = levelsPath();
+    const inheritedPath = `${path}.default`;
+    writeStoredLevels({ "zai/glm-5.3": "high" }, path);
+    // No inherited sidecar — first run.
+    const pi = new PiHarness();
+    modelThinking(pi.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+    pi.level = "medium"; // restored from the session
+
+    // Resume the session — no --model, so the restored level is kept.
+    await pi.emit(
+      "session_start",
+      { reason: "startup" },
+      context(model("zai", "glm-5.3"), [], [], [
+        { type: "message", id: "x" },
+      ]),
+    );
+    expect(pi.level).toBe("medium");
+
+    // Switch to a model with no stored level. getInheritedLevel() lazily
+    // captures pi.getThinkingLevel() ("medium") but must NOT write it to
+    // the sidecar — it's the session's restored level, not the global default.
+    await pi.emit(
+      "model_select",
+      {
+        model: model("openai", "unmanaged"),
+        previousModel: model("zai", "glm-5.3"),
+        source: "set",
+      },
+      context(model("openai", "unmanaged")),
+    );
+
+    // The sidecar must not exist — the session's "medium" was not persisted.
+    expect(() => readFileSync(inheritedPath, "utf8")).toThrow();
+
+    // A subsequent genuine user change IS written to the sidecar.
+    pi.level = "low";
+    await pi.emit(
+      "thinking_level_select",
+      { level: "low", previousLevel: "medium" },
+      context(model("openai", "unmanaged")),
+    );
+    await flushTimers();
+
+    // The user's "low" is saved as the global default.
+    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("low");
+  });
+
+  test("a CLI --thinking session's level is not persisted as the global default", async () => {
+    const path = levelsPath();
+    const inheritedPath = `${path}.default`;
+    const pi = new PiHarness();
+    modelThinking(pi.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+    pi.level = "high"; // CLI override
+
+    await withArgv(["pi", "start", "--thinking", "high"], async () => {
+      await pi.emit(
+        "session_start",
+        { reason: "startup" },
+        context(model("openai", "start")),
+      );
+    });
+
+    // Switch to a model with no stored level.
+    await pi.emit(
+      "model_select",
+      {
+        model: model("openai", "unmanaged"),
+        previousModel: model("openai", "start"),
+        source: "set",
+      },
+      context(model("openai", "unmanaged")),
+    );
+
+    // The sidecar must not exist — the CLI-overridden "high" was not
+    // persisted as the global default.
+    expect(() => readFileSync(inheritedPath, "utf8")).toThrow();
   });
 });
 

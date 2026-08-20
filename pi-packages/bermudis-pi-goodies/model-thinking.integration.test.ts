@@ -153,4 +153,36 @@ describe("model-thinking real Pi lifecycle", () => {
 
     expect(JSON.parse(readFileSync(inheritedLevelPath, "utf8"))).toBe("low");
   });
+
+  // Finding 3: a genuine user/extension setThinkingLevel issued after
+  // setModel must be saved as the global default, even when an earlier
+  // extension's thinking_level_select handler awaits and delays ours past
+  // model_select. The durable session-branch check distinguishes the
+  // internal re-clamp (parented by the model_change entry) from the user
+  // change (parented by its own thinking_level_change entry).
+  test("saves a genuine setThinkingLevel after setModel even when delayed", async () => {
+    const gpt5 = builtinModel("openai", "gpt-5");
+    const { inheritedLevelPath, session } = await createModelThinkingSession(
+      {},
+      "low",
+      (pi) => {
+        // An earlier extension's thinking_level_select handler awaits,
+        // delaying our handler past model_select's dispatch.
+        pi.on("thinking_level_select", async () => {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        });
+      },
+    );
+
+    await session.setModel(gpt5);
+    // Immediately set a genuine user level — its thinking_level_select
+    // event is queued behind the earlier extension's await.
+    session.setThinkingLevel("high");
+    // Wait long enough for both the re-clamp and user events to flush
+    // through the 25ms-delayed handler chain.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(session.thinkingLevel).toBe("high");
+    expect(JSON.parse(readFileSync(inheritedLevelPath, "utf8"))).toBe("high");
+  });
 });

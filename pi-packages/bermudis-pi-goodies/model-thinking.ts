@@ -31,9 +31,12 @@
  * conversation entries; those are detected by looking for message entries
  * (Pi seeds every new session with model_change/thinking_level_change
  * before session_start, so a non-empty entry list alone is not evidence of
- * a resume) and left alone. Pi emits model_select only when the model
- * actually changes, so re-selecting the already-active model in the full
- * picker fires no event and its stored level cannot re-apply there.
+ * a resume) and left alone — unless a bare --model (without :level) was
+ * passed, in which case the user explicitly chose a model for the resumed
+ * session and its stored level applies. Pi emits model_select only when
+ * the model actually changes, so re-selecting the already-active model in
+ * the full picker fires no event and its stored level cannot re-apply
+ * there.
  */
 import {
   clampThinkingLevel,
@@ -337,6 +340,25 @@ function explicitCliThinking(): boolean {
   return false;
 }
 
+/**
+ * Detect a bare --model flag (without a :level suffix) on the CLI. This
+ * signals that the user explicitly chose a model for the session — even
+ * when resuming via pi --continue. In that case the stored sidecar level
+ * for the requested model should apply, rather than keeping the resumed
+ * session's restored level. Mirrors the same parseArgs edge cases as
+ * explicitCliThinking: the last --model wins, a trailing flag without a
+ * value token sets nothing, and the equals form is not parsed by Pi.
+ */
+function explicitCliModelSelection(): boolean {
+  if (explicitCliThinking()) return false; // :level or --thinking already handled
+  const args = process.argv.slice(2);
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === "--model" && index + 1 < args.length) return true;
+  }
+  return false;
+}
+
 function sameModel(
   left: Pick<Model, "provider" | "id">,
   right: Pick<Model, "provider" | "id">,
@@ -635,10 +657,18 @@ export default function modelThinking(
   // event, so the deferred capture is equivalent to a factory-time capture.
   const savedInheritedLevel = readInheritedLevel(inheritedLevelPath);
   let inheritedLevel: ThinkingLevel | undefined = savedInheritedLevel;
+  // Only a fresh session (ordinary startup, /new) may persist the lazily
+  // captured level as the global default. Resumed, reloaded, forked, and
+  // CLI-override sessions carry a session-specific level that must not be
+  // written to the default sidecar — doing so would permanently overwrite
+  // the true global default with a session override (Finding 5).
+  let canPersistInheritedLevel = false;
   function getInheritedLevel(): ThinkingLevel {
     if (inheritedLevel === undefined) {
       inheritedLevel = pi.getThinkingLevel();
-      writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
+      if (canPersistInheritedLevel) {
+        writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
+      }
     }
     return inheritedLevel;
   }
@@ -667,6 +697,23 @@ export default function modelThinking(
   // only for that test-only situation; production uses the durable
   // model-change/thinking-change ordering in isInternalModelSwitchLevel().
   let switchExpectedLevel: ThinkingLevel | undefined;
+  // The level Pi's re-clamp set inside setModel, captured before
+  // applyStoredLevel overwrites it. Used to distinguish stale re-clamp
+  // events from genuine user changes overtaken by a model switch (Finding 3).
+  let switchReclampLevel: ThinkingLevel | undefined;
+  // Whether the current switch's re-clamp was a no-op (Pi's setThinkingLevel
+  // inside setModel didn't change the level, so no thinking_level_select
+  // event was emitted for it). When true, isInternalModelSwitchLevel true
+  // results are false positives — a subsequent user thinking change matches
+  // the same branch pattern (thinking_level_change at -1, model_change at
+  // -2) because no re-clamp thinking_level_change was appended between them.
+  // Computed by comparing switchReclampLevel with lastSettledLevel (the
+  // pre-switch level). Cleared after each thinking_level_select event so it
+  // doesn't leak across switches.
+  let switchReclampWasNoOp: boolean | undefined;
+  // Tracks pi.getThinkingLevel() at the end of every handler. Used to
+  // compute switchReclampWasNoOp in model_select.
+  let lastSettledLevel: ThinkingLevel | undefined;
   let pendingFallbackSave:
     | {
         level: ThinkingLevel;
@@ -710,16 +757,71 @@ export default function modelThinking(
       managedTransitions.splice(managedIndex, 1);
       return;
     }
+    // Production uses the durable session-branch ordering to identify
+    // Pi's internal re-clamp. Check it before the stale-event check below
+    // because isInternalModelSwitchLevel can distinguish a re-clamp from a
+    // genuine user change even when both have event.level !== current (the
+    // re-clamp's thinking_level_change is parented by the just-appended
+    // model_change; a user change is not). The stale check below is a
+    // fallback for the test-only path that lacks getBranch.
+    const internal = isInternalModelSwitchLevel(event, ctx);
+    // Consume switchReclampWasNoOp for this event so it doesn't leak across
+    // switches. switchReclampLevel is NOT cleared here — it's only cleared
+    // when a stale re-clamp event matches it (below). This allows a
+    // subsequent re-clamp event to still be identified after a non-matching
+    // user event has passed through. model_select overwrites both on the
+    // next switch, so they don't leak across switches in practice.
+    const reclampWasNoOp = switchReclampWasNoOp;
+    switchReclampWasNoOp = undefined;
+    if (internal === true) {
+      // The branch pattern matches (thinking_level_change at -1, model_change
+      // at -2). When the re-clamp was a no-op (switchReclampWasNoOp === true),
+      // no thinking_level_change was appended by Pi, so a subsequent user
+      // thinking change matches the same pattern — a false positive. In that
+      // case, fall through to save the user's change. Otherwise, this is a
+      // genuine re-clamp event — drop it. When switchReclampWasNoOp is
+      // undefined (event arrived before model_select ran), drop it as a safe
+      // default — the event must be a re-clamp, not a user change (user
+      // changes only happen after setModel returns, which is after
+      // model_select is dispatched).
+      if (reclampWasNoOp !== true) {
+        return;
+      }
+      // False positive: fall through to save the genuine user change.
+    }
     const current = pi.getThinkingLevel();
     if (event.level !== current) {
-      // Stale internal emit from a model switch: Pi fired it during
-      // setModel, but another extension's handler awaited and delayed ours
-      // past model_select. Our applyStoredLevel has since moved pi's state,
-      // so the event's level no longer matches reality. Drop it.
-      return;
+      // The event's level no longer matches pi's current level. Two cases:
+      //   1. A stale internal re-clamp from a model switch: Pi fired
+      //      thinking_level_select inside setModel, but another extension's
+      //      handler awaited and delayed ours past model_select. Our
+      //      applyStoredLevel has since moved pi's state.
+      //   2. A genuine user/extension change (e.g. setThinkingLevel("high")
+      //      followed immediately by setModel(...)) that was overtaken by
+      //      the model switch's applyStoredLevel (Finding 3).
+      // In production, isInternalModelSwitchLevel already returned false
+      // (or a false positive was caught above), ruling out case 1 when the
+      // branch is intact — so this is case 2, and we fall through to save
+      // it. In the test-only path (internal === undefined), use
+      // switchReclampLevel to distinguish: a match is case 1, a non-match
+      // is case 2. When reclampWasNoOp is true, the re-clamp was a no-op
+      // (no event), so this must be case 2 — save it.
+      if (internal === undefined) {
+        if (reclampWasNoOp === true) {
+          // Re-clamp was a no-op, so this stale event is a user change.
+          // Fall through to save.
+        } else if (
+          switchReclampLevel !== undefined &&
+          event.level === switchReclampLevel
+        ) {
+          switchReclampLevel = undefined;
+          return;
+        }
+        // Fall through — might be a genuine user change.
+      }
+      // Production (internal === false): genuine user/extension change
+      // overtaken by a model switch. Fall through to save it.
     }
-    const internal = isInternalModelSwitchLevel(event, ctx);
-    if (internal) return;
     if (
       internal === undefined &&
       switchExpectedLevel !== undefined &&
@@ -727,6 +829,7 @@ export default function modelThinking(
     ) {
       // The internal re-clamp landed exactly where the switch settled.
       switchExpectedLevel = undefined;
+      lastSettledLevel = pi.getThinkingLevel();
       return;
     }
     // Genuine user/extension intent (keybinding change, or an extension's
@@ -738,10 +841,12 @@ export default function modelThinking(
     switchExpectedLevel = undefined;
     if (internal === undefined) {
       scheduleFallbackSave(event.level);
+      lastSettledLevel = event.level;
       return;
     }
     inheritedLevel = event.level;
     writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
+    lastSettledLevel = event.level;
   });
 
   pi.registerCommand("levels", {
@@ -808,9 +913,26 @@ export default function modelThinking(
     cancelFallbackSave();
     // A restored session owns its historical thinking level.
     if (event.source === "restore") {
+      canPersistInheritedLevel = false;
       switchExpectedLevel = pi.getThinkingLevel();
+      switchReclampLevel = pi.getThinkingLevel();
+      switchReclampWasNoOp = undefined;
+      lastSettledLevel = pi.getThinkingLevel();
       return;
     }
+    // Capture the re-clamp level (Pi's setThinkingLevel inside setModel)
+    // before applyStoredLevel overwrites it. A delayed thinking_level_select
+    // matching this level is the stale re-clamp and is dropped; a non-match
+    // is a genuine user change overtaken by the switch (Finding 3).
+    switchReclampLevel = pi.getThinkingLevel();
+    // Detect whether the re-clamp was a no-op by comparing the post-re-clamp
+    // level with the pre-switch level (lastSettledLevel from the previous
+    // handler). When the re-clamp is a no-op, no thinking_level_select event
+    // is emitted, and isInternalModelSwitchLevel can produce false positives
+    // for subsequent user thinking changes (Finding 3).
+    switchReclampWasNoOp =
+      lastSettledLevel !== undefined &&
+      switchReclampLevel === lastSettledLevel;
     applyStoredLevel(
       pi,
       ctx,
@@ -825,24 +947,34 @@ export default function modelThinking(
     // Record the level the switch settled at so a delayed internal
     // thinking_level_select (case 2 above) is recognized and dropped.
     switchExpectedLevel = pi.getThinkingLevel();
+    lastSettledLevel = pi.getThinkingLevel();
   });
 
   pi.on("session_start", (event, ctx) => {
     cancelFallbackSave();
     // Pi restores these sessions' model and thinking level from the session.
     // Reload preserves the current session, so applying the stored level
-    // there would clobber a manual change.
+    // there would clobber a manual change. The inherited default must not
+    // be persisted from these session-specific levels (Finding 5).
     if (
       event.reason === "reload" ||
       event.reason === "resume" ||
       event.reason === "fork"
     ) {
+      canPersistInheritedLevel = false;
       switchExpectedLevel = pi.getThinkingLevel();
+      switchReclampLevel = pi.getThinkingLevel();
+      switchReclampWasNoOp = undefined;
+      lastSettledLevel = pi.getThinkingLevel();
       return;
     }
     // Explicit CLI thinking intent wins for the launched session.
     if (event.reason === "startup" && explicitCliThinking()) {
+      canPersistInheritedLevel = false;
       switchExpectedLevel = pi.getThinkingLevel();
+      switchReclampLevel = pi.getThinkingLevel();
+      switchReclampWasNoOp = undefined;
+      lastSettledLevel = pi.getThinkingLevel();
       return;
     }
     // pi --continue and the startup-picker resume an existing session but
@@ -852,20 +984,31 @@ export default function modelThinking(
     // before session_start), so a non-empty entry list is NOT evidence of a
     // resume. A resumed session carries real messages; a fresh one does not.
     // The restored thinking level must survive, not be replaced by the
-    // sidecar's default.
-    if (
-      event.reason === "startup" &&
-      hasConversationEntries(ctx.sessionManager)
-    ) {
+    // sidecar's default — UNLESS the user passed a bare --model (without
+    // :level), which means they explicitly chose a model for the resumed
+    // session and its stored level should apply (Finding 4).
+    const resumed =
+      event.reason === "startup" && hasConversationEntries(ctx.sessionManager);
+    canPersistInheritedLevel = !resumed;
+    if (resumed && !explicitCliModelSelection()) {
       switchExpectedLevel = pi.getThinkingLevel();
+      switchReclampLevel = pi.getThinkingLevel();
+      switchReclampWasNoOp = undefined;
+      lastSettledLevel = pi.getThinkingLevel();
       return;
     }
-    // /new and ordinary startup: snap the level to the active model's
-    // stored level, or restore the preserved global default when the model
-    // has no stored level. The latter is necessary because Pi persists every
-    // setThinkingLevel() call as its global default — a prior session's
-    // scoped value pollutes it, and only the sidecar can recover the true
-    // default.
+    // /new, ordinary startup, and pi --continue --model X: snap the level to
+    // the active model's stored level, or restore the preserved global
+    // default when the model has no stored level. The latter is necessary
+    // because Pi persists every setThinkingLevel() call as its global
+    // default — a prior session's scoped value pollutes it, and only the
+    // sidecar can recover the true default. For --continue --model X,
+    // canPersistInheritedLevel is false so the resumed session's level is
+    // not written as the global default (Finding 5).
+    switchReclampLevel = pi.getThinkingLevel();
+    switchReclampWasNoOp =
+      lastSettledLevel !== undefined &&
+      switchReclampLevel === lastSettledLevel;
     applyStoredLevel(
       pi,
       ctx,
@@ -876,5 +1019,6 @@ export default function modelThinking(
       setManagedLevel,
     );
     switchExpectedLevel = pi.getThinkingLevel();
+    lastSettledLevel = pi.getThinkingLevel();
   });
 }
