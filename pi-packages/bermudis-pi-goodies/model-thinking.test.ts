@@ -33,6 +33,32 @@ function levelsPath(): string {
   return join(mkdtempSync(join(tmpdir(), "model-thinking-")), "levels.json");
 }
 
+/**
+ * Pi seeds every new session with an initial model_change and
+ * thinking_level_change before session_start fires (createAgentSession in
+ * sdk.js appends them for new sessions). They are NOT conversation messages
+ * and must not be mistaken for a resumed session.
+ */
+function freshSessionEntries(m: Model): unknown[] {
+  return [
+    {
+      type: "model_change",
+      id: "m1",
+      parentId: null,
+      timestamp: "",
+      provider: m.provider,
+      modelId: m.id,
+    },
+    {
+      type: "thinking_level_change",
+      id: "t1",
+      parentId: "m1",
+      timestamp: "",
+      thinkingLevel: "low",
+    },
+  ];
+}
+
 function context(
   activeModel: Model | undefined,
   notifications: string[] = [],
@@ -514,11 +540,12 @@ describe("model-thinking hooks", () => {
     modelThinking(pi.api, { levelsPath: path });
     pi.level = "low";
     const notifications: string[] = [];
+    const m = model("zai", "glm-5.3");
 
     await pi.emit(
       "session_start",
       { reason: "startup" },
-      context(model("zai", "glm-5.3"), notifications),
+      context(m, notifications, [], freshSessionEntries(m)),
     );
 
     expect(pi.level).toBe("high");
@@ -1080,23 +1107,22 @@ describe("model-thinking hooks", () => {
       { model: model("zai", "glm-5.3"), source: "set" },
       context(model("zai", "glm-5.3")),
     );
-    // Flush the modelSwitchPending flag so the subsequent user change is
-    // not suppressed by it (in real Pi the user's key press is a later
-    // macrotask, after the flag's setTimeout(0) clear has fired).
     await flushTimers();
 
-    // Now a genuine user change to medium must NOT be suppressed by a
-    // stale counter entry from the no-op managed call.
-    pi.level = "low"; // user changed to something else first
+    // A genuine user change to a level different from the switch's settled
+    // level must NOT be suppressed. In real Pi, setThinkingLevel updates
+    // pi.level synchronously before emitting, so event.level always matches
+    // pi.getThinkingLevel() for genuine user changes.
+    pi.level = "low"; // user changed via keybinding
     await pi.emit(
       "thinking_level_select",
-      { level: "medium", previousLevel: "low" },
+      { level: "low", previousLevel: "medium" },
       context(model("zai", "glm-5.3")),
     );
     await flushTimers();
 
     // The user's choice is saved — not suppressed by a stale entry.
-    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("medium");
+    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("low");
   });
 
   // Fix 1: pi.getThinkingLevel() is a runtime action that throws during
@@ -1165,17 +1191,21 @@ describe("model-thinking hooks", () => {
     expect(pi.level).toBe("medium");
   });
 
-  test("fresh startup with entries absent still applies the stored level", async () => {
+  test("fresh startup with Pi's initial entries still applies the stored level", async () => {
     const path = levelsPath();
     writeStoredLevels({ "zai/glm-5.3": "high" }, path);
     const pi = new PiHarness();
     modelThinking(pi.api, { levelsPath: path });
     pi.level = "low";
+    const m = model("zai", "glm-5.3");
 
+    // Pi always appends model_change + thinking_level_change before
+    // session_start, even for fresh sessions. These are NOT messages and
+    // must not be mistaken for a resumed session.
     await pi.emit(
       "session_start",
       { reason: "startup" },
-      context(model("zai", "glm-5.3"), [], [], []), // no entries = fresh
+      context(m, [], [], freshSessionEntries(m)),
     );
 
     expect(pi.level).toBe("high");
@@ -1289,9 +1319,10 @@ describe("model-thinking hooks", () => {
         [{ model: model("zai", "glm-5.3"), thinkingLevel: "high" }],
       ),
     );
-    await flushTimers(); // modelSwitchPending clears
+    await flushTimers();
 
-    // A genuine user change in a later macrotask is saved.
+    // A genuine user change to a level different from the switch's settled
+    // level is saved.
     pi.level = "medium";
     await pi.emit(
       "thinking_level_select",
@@ -1301,6 +1332,103 @@ describe("model-thinking hooks", () => {
     await flushTimers();
 
     expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("medium");
+  });
+
+  // Finding 3: a delayed internal thinking_level_select (from Pi's
+  // setThinkingLevel call inside setModel) can arrive after model_select
+  // if another extension's handler awaits I/O. The old timer-based
+  // suppression cleared after one macrotask, so a sufficiently delayed
+  // internal event leaked through and was saved as user intent. The new
+  // switchExpectedLevel check persists until the matching event clears it.
+  test("delayed internal thinking_level_select after timers flush is not saved", async () => {
+    const path = levelsPath();
+    const inheritedPath = `${path}.default`;
+    writeFileSync(inheritedPath, JSON.stringify("low"));
+    const pi = new PiHarness();
+    pi.level = "low";
+    modelThinking(pi.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+
+    // Pi cycles to a model natively pinned to high.
+    pi.level = "high"; // Pi applied the scoped level
+    await pi.emit(
+      "model_select",
+      {
+        model: model("zai", "glm-5.3"),
+        previousModel: model("openai", "unmanaged"),
+        source: "cycle",
+      },
+      context(
+        model("zai", "glm-5.3"),
+        [],
+        [{ model: model("zai", "glm-5.3"), thinkingLevel: "high" }],
+      ),
+    );
+    // Flush all timers — with the old timer-based suppression, this would
+    // clear modelSwitchPending. The delayed internal event below would
+    // then leak through and be saved. switchExpectedLevel persists.
+    await flushTimers();
+    await flushTimers();
+
+    // The delayed internal thinking_level_select arrives. Pi's level is
+    // still "high" (the scoped level), so event.level matches current.
+    // switchExpectedLevel is "high" → recognized as internal, suppressed.
+    await pi.emit(
+      "thinking_level_select",
+      { level: "high", previousLevel: "low" },
+      context(model("zai", "glm-5.3")),
+    );
+    await flushTimers();
+
+    // The global default must still be low, not high.
+    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("low");
+  });
+
+  // Finding 4: an extension that calls pi.setThinkingLevel immediately
+  // after `await pi.setModel(model)` (Pi's bundled preset example uses
+  // this sequence) must have its change recognized and saved. The old
+  // timer-based suppression was still active during the immediate
+  // follow-up call (setTimeout(0) hadn't fired yet), so the intentional
+  // change was suppressed and the sidecar became stale.
+  test("immediate extension setThinkingLevel after setModel is saved", async () => {
+    const path = levelsPath();
+    const inheritedPath = `${path}.default`;
+    writeFileSync(inheritedPath, JSON.stringify("low"));
+    const pi = new PiHarness();
+    pi.level = "low";
+    modelThinking(pi.api, {
+      levelsPath: path,
+      inheritedLevelPath: inheritedPath,
+    });
+
+    // Model switch to a model with no stored level: applyStoredLevel
+    // applies the inherited default "low" (no-op, level already "low").
+    await pi.emit(
+      "model_select",
+      {
+        model: model("zai", "glm-5.3"),
+        previousModel: model("openai", "unmanaged"),
+        source: "set",
+      },
+      context(model("zai", "glm-5.3")),
+    );
+    // NO flushTimers here — the extension's setThinkingLevel follows
+    // immediately in the same macrotask, before any timer would fire.
+
+    // The extension explicitly sets "high" right after setModel.
+    // pi.setThinkingLevel updates pi.level synchronously before emitting.
+    pi.level = "high";
+    await pi.emit(
+      "thinking_level_select",
+      { level: "high", previousLevel: "low" },
+      context(model("zai", "glm-5.3")),
+    );
+    await flushTimers();
+
+    // The extension's intent is saved, not suppressed.
+    expect(JSON.parse(readFileSync(inheritedPath, "utf8"))).toBe("high");
   });
 });
 

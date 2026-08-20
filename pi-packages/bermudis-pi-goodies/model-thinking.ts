@@ -28,10 +28,12 @@
  * Resumed and forked sessions keep the level restored by pi (model_select
  * with source "restore" is ignored). pi --continue and startup-picker
  * resumes also emit session_start with reason "startup" but carry restored
- * entries; those are detected via sessionManager.getEntries() and left
- * alone. Pi emits model_select only when the model actually changes, so
- * re-selecting the already-active model in the full picker fires no event
- * and its stored level cannot re-apply there.
+ * conversation entries; those are detected by looking for message entries
+ * (Pi seeds every new session with model_change/thinking_level_change
+ * before session_start, so a non-empty entry list alone is not evidence of
+ * a resume) and left alone. Pi emits model_select only when the model
+ * actually changes, so re-selecting the already-active model in the full
+ * picker fires no event and its stored level cannot re-apply there.
  */
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
@@ -338,6 +340,19 @@ function sameModel(
   return left.provider === right.provider && left.id === right.id;
 }
 
+/**
+ * Distinguish a resumed conversation from a fresh session at startup.
+ * Pi seeds every new session with an initial `model_change` and
+ * `thinking_level_change` before `session_start` fires, so a non-empty
+ * entry list is NOT evidence of a resume. A resumed session (`pi --continue`,
+ * startup-picker resume) carries real messages; a fresh one does not.
+ */
+function hasConversationEntries(
+  sessionManager: ExtensionContext["sessionManager"],
+): boolean {
+  return sessionManager.getEntries().some((entry) => entry.type === "message");
+}
+
 function applyStoredLevel(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -596,29 +611,28 @@ export default function modelThinking(
 
   // Model-switch suppression. Pi calls setThinkingLevel (re-clamp / scoped
   // level) inside setModel/cycleModel and emits thinking_level_select
-  // without awaiting it, then emits model_select. If another extension's
-  // thinking_level_select handler awaits, our handler can run AFTER
-  // model_select — so cancelling a pending save in model_select is not
-  // enough. A flag set in model_select/session_start and checked in the
-  // thinking_level_select handler covers both orderings. The flag clears
-  // on the next macrotask (after all microtask-based emit handlers have
-  // drained); a genuine user key press is a separate macrotask, so it is
-  // never suppressed.
-  let modelSwitchPending = false;
-  let modelSwitchClearTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function markModelSwitch(): void {
-    modelSwitchPending = true;
-    if (modelSwitchClearTimer) clearTimeout(modelSwitchClearTimer);
-    modelSwitchClearTimer = setTimeout(() => {
-      modelSwitchPending = false;
-      modelSwitchClearTimer = null;
-    }, 0);
-  }
+  // without awaiting it, then emits model_select. Two cases must be
+  // suppressed so Pi's internal re-clamp is never saved as the user's
+  // global default:
+  //   1. The internal event arrives before model_select (the common case).
+  //      It schedules a deferred save that model_select cancels.
+  //   2. Another extension's thinking_level_select handler awaits, so our
+  //      handler runs after model_select — possibly long after. A timer
+  //      cannot bound this window: too short and the delayed internal event
+  //      leaks through and is saved (Finding 3); too long and a legitimate
+  //      pi.setThinkingLevel issued right after `await pi.setModel` is
+  //      suppressed (Finding 4 — Pi's bundled preset uses exactly that
+  //      sequence). Instead, after each switch settles we record the level
+  //      pi landed at. A later thinking_level_select that still matches
+  //      that level is the internal re-clamp; one whose level no longer
+  //      matches pi.getThinkingLevel() is a stale internal emit whose state
+  //      has since moved on. Both are dropped. Anything else is genuine
+  //      user/extension intent and saved.
+  let switchExpectedLevel: ThinkingLevel | undefined;
 
   // Deferred save: a genuine user thinking-level change (keybinding,
   // settings) is saved as the global default on the next macrotask. The
-  // modelSwitchPending flag and cancelPendingInheritedSave() together
+  // switchExpectedLevel check and cancelPendingInheritedSave() together
   // suppress saves from Pi-internal level changes during model switches.
   let pendingSave: {
     level: ThinkingLevel;
@@ -649,7 +663,22 @@ export default function modelThinking(
       managedSetCount--;
       return;
     }
-    if (modelSwitchPending) return;
+    const current = pi.getThinkingLevel();
+    if (event.level !== current) {
+      // Stale internal emit from a model switch: Pi fired it during
+      // setModel, but another extension's handler awaited and delayed ours
+      // past model_select. Our applyStoredLevel has since moved pi's state,
+      // so the event's level no longer matches reality. Drop it.
+      return;
+    }
+    if (switchExpectedLevel !== undefined && event.level === switchExpectedLevel) {
+      // The internal re-clamp landed exactly where the switch settled.
+      switchExpectedLevel = undefined;
+      return;
+    }
+    // Genuine user/extension intent (keybinding change, or an extension's
+    // pi.setThinkingLevel issued after `await pi.setModel`). Save it.
+    switchExpectedLevel = undefined;
     scheduleInheritedSave(event.level);
   });
 
@@ -714,14 +743,12 @@ export default function modelThinking(
   });
 
   pi.on("model_select", (event, ctx) => {
-    // Mark a model switch so a thinking_level_select from Pi's internal
-    // re-clamp (which Pi emits without awaiting) is suppressed even if it
-    // arrives after this handler — another extension's thinking_level_select
-    // handler can await and delay ours past model_select.
-    markModelSwitch();
     cancelPendingInheritedSave();
     // A restored session owns its historical thinking level.
-    if (event.source === "restore") return;
+    if (event.source === "restore") {
+      switchExpectedLevel = pi.getThinkingLevel();
+      return;
+    }
     applyStoredLevel(
       pi,
       ctx,
@@ -733,12 +760,12 @@ export default function modelThinking(
         : undefined,
       setManagedLevel,
     );
+    // Record the level the switch settled at so a delayed internal
+    // thinking_level_select (case 2 above) is recognized and dropped.
+    switchExpectedLevel = pi.getThinkingLevel();
   });
 
   pi.on("session_start", (event, ctx) => {
-    // Same suppression as model_select: Pi may emit thinking_level_select
-    // during session creation before session_start fires.
-    markModelSwitch();
     cancelPendingInheritedSave();
     // Pi restores these sessions' model and thinking level from the session.
     // Reload preserves the current session, so applying the stored level
@@ -748,19 +775,27 @@ export default function modelThinking(
       event.reason === "resume" ||
       event.reason === "fork"
     ) {
+      switchExpectedLevel = pi.getThinkingLevel();
       return;
     }
     // Explicit CLI thinking intent wins for the launched session.
-    if (event.reason === "startup" && explicitCliThinking()) return;
+    if (event.reason === "startup" && explicitCliThinking()) {
+      switchExpectedLevel = pi.getThinkingLevel();
+      return;
+    }
     // pi --continue and the startup-picker resume an existing session but
-    // emit reason "startup" (not "resume"). Detect them via the session
-    // entries: a fresh session has none, a restored one has its history.
+    // emit reason "startup" (not "resume"). Distinguish them from a fresh
+    // session by looking for conversation entries: Pi appends an initial
+    // model_change and thinking_level_change to every new session (even
+    // before session_start), so a non-empty entry list is NOT evidence of a
+    // resume. A resumed session carries real messages; a fresh one does not.
     // The restored thinking level must survive, not be replaced by the
     // sidecar's default.
     if (
       event.reason === "startup" &&
-      ctx.sessionManager.getEntries().length > 0
+      hasConversationEntries(ctx.sessionManager)
     ) {
+      switchExpectedLevel = pi.getThinkingLevel();
       return;
     }
     // /new and ordinary startup: snap the level to the active model's
@@ -778,5 +813,6 @@ export default function modelThinking(
       undefined,
       setManagedLevel,
     );
+    switchExpectedLevel = pi.getThinkingLevel();
   });
 }
