@@ -35,7 +35,10 @@
  * actually changes, so re-selecting the already-active model in the full
  * picker fires no event and its stored level cannot re-apply there.
  */
-import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import {
+  clampThinkingLevel,
+  getSupportedThinkingLevels,
+} from "@earendil-works/pi-ai";
 import {
   DynamicBorder,
   getAgentDir,
@@ -43,6 +46,7 @@ import {
   Theme,
   type ExtensionAPI,
   type ExtensionContext,
+  type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
   Container,
@@ -353,6 +357,49 @@ function hasConversationEntries(
   return sessionManager.getEntries().some((entry) => entry.type === "message");
 }
 
+/**
+ * Pi appends a model-change entry before its internal re-clamp's thinking
+ * entry. That durable ordering identifies a switch-owned level change before
+ * its asynchronous extension event reaches us, even if another extension
+ * delays model_select long enough for a timer to fire.
+ *
+ * `undefined` is solely for the deliberately minimal unit-test context; real
+ * Pi has getBranch(). It lets those unit tests retain their fallback coverage
+ * while integration tests exercise this production path.
+ */
+function isInternalModelSwitchLevel(
+  event: { level: ThinkingLevel; previousLevel: ThinkingLevel },
+  ctx: ExtensionContext,
+): boolean | undefined {
+  const sessionManager = (
+    ctx as unknown as {
+      sessionManager?: { getBranch?: () => SessionEntry[] };
+    }
+  ).sessionManager;
+  if (!sessionManager?.getBranch) return undefined;
+
+  const branch = sessionManager.getBranch();
+  const thinking = branch.at(-1);
+  const modelChange = branch.at(-2);
+  const model = ctx.model;
+  if (
+    !model ||
+    thinking?.type !== "thinking_level_change" ||
+    modelChange?.type !== "model_change" ||
+    thinking.thinkingLevel !== event.level ||
+    modelChange.provider !== model.provider ||
+    modelChange.modelId !== model.id
+  ) {
+    return false;
+  }
+
+  // The event has no selection source, but only Pi's switch path can append
+  // a thinking change directly under its just-appended model change. A real
+  // change made after the switch is parented by that internal thinking entry;
+  // if Pi's re-clamp was a no-op, it emits no event to mistake for user intent.
+  return true;
+}
+
 function applyStoredLevel(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -360,7 +407,7 @@ function applyStoredLevel(
   levelsPath: string,
   inheritedLevel: ThinkingLevel,
   source?: "set" | "cycle",
-  setManagedLevel?: (level: ThinkingLevel) => void,
+  setManagedLevel?: (level: ThinkingLevel, model: Model) => void,
 ): void {
   const model = ctx.model;
   if (!model) return;
@@ -376,7 +423,10 @@ function applyStoredLevel(
     // both carry the previous level instead. Apply the pin in those paths.
     // "cycle" is left to Pi, which already applies the scoped level there.
     if (source === "set" || source === undefined) {
-      (setManagedLevel ?? pi.setThinkingLevel.bind(pi))(scoped.thinkingLevel);
+      (setManagedLevel ?? pi.setThinkingLevel.bind(pi))(
+        scoped.thinkingLevel,
+        model,
+      );
     }
     return;
   }
@@ -387,6 +437,7 @@ function applyStoredLevel(
   // type only models the non-off ladder.
   (setManagedLevel ?? pi.setThinkingLevel.bind(pi))(
     (level ?? inheritedLevel) as ThinkingLevel,
+    model,
   );
   if (notify && pi.getThinkingLevel() !== before) {
     ctx.ui.notify(`Thinking: ${before} → ${pi.getThinkingLevel()}`, "info");
@@ -591,76 +642,72 @@ export default function modelThinking(
     }
     return inheritedLevel;
   }
-  // Counter-based managed-event suppression. Pi emits
-  // thinking_level_select without awaiting it (void emit) inside
-  // setThinkingLevel, so the handler may not run until a later microtask.
-  // Increment the counter before the call; the event handler decrements
-  // whenever it eventually runs. If no event fires (clamped to the same
-  // value), decrement here. Unlike a level-matching queue, a counter is
-  // immune to clamping (the event level may differ from the requested
-  // level) and never leaves stale entries.
-  let managedSetCount = 0;
-  const setManagedLevel = (level: ThinkingLevel): void => {
+  // Pi emits thinking_level_select without awaiting it. Match a managed
+  // event by its actual before/after pair, not a counter: an unrelated user
+  // change is allowed to overtake a delayed managed event.
+  const managedTransitions: {
+    previousLevel: ThinkingLevel;
+    level: ThinkingLevel;
+  }[] = [];
+  const setManagedLevel = (level: ThinkingLevel, model: Model): void => {
     const before = pi.getThinkingLevel();
-    if (before === level) return;
-    managedSetCount++;
+    // Unit rows intentionally contain only provider/id. Real Pi models always
+    // have `reasoning`; use the requested level for those small test doubles.
+    const effective =
+      model.reasoning === undefined
+        ? level
+        : (clampThinkingLevel(model, level) as ThinkingLevel);
+    if (before === effective) return;
+    managedTransitions.push({ previousLevel: before, level: effective });
     pi.setThinkingLevel(level);
-    const effective = pi.getThinkingLevel();
-    if (effective === before) managedSetCount--;
   };
 
-  // Model-switch suppression. Pi calls setThinkingLevel (re-clamp / scoped
-  // level) inside setModel/cycleModel and emits thinking_level_select
-  // without awaiting it, then emits model_select. Two cases must be
-  // suppressed so Pi's internal re-clamp is never saved as the user's
-  // global default:
-  //   1. The internal event arrives before model_select (the common case).
-  //      It schedules a deferred save that model_select cancels.
-  //   2. Another extension's thinking_level_select handler awaits, so our
-  //      handler runs after model_select — possibly long after. A timer
-  //      cannot bound this window: too short and the delayed internal event
-  //      leaks through and is saved (Finding 3); too long and a legitimate
-  //      pi.setThinkingLevel issued right after `await pi.setModel` is
-  //      suppressed (Finding 4 — Pi's bundled preset uses exactly that
-  //      sequence). Instead, after each switch settles we record the level
-  //      pi landed at. A later thinking_level_select that still matches
-  //      that level is the internal re-clamp; one whose level no longer
-  //      matches pi.getThinkingLevel() is a stale internal emit whose state
-  //      has since moved on. Both are dropped. Anything else is genuine
-  //      user/extension intent and saved.
+  // Unit tests use a deliberately partial ExtensionContext and therefore
+  // cannot inspect Pi's session branch. Keep the old expected-level fallback
+  // only for that test-only situation; production uses the durable
+  // model-change/thinking-change ordering in isInternalModelSwitchLevel().
   let switchExpectedLevel: ThinkingLevel | undefined;
+  let pendingFallbackSave:
+    | {
+        level: ThinkingLevel;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    | undefined;
 
-  // Deferred save: a genuine user thinking-level change (keybinding,
-  // settings) is saved as the global default on the next macrotask. The
-  // switchExpectedLevel check and cancelPendingInheritedSave() together
-  // suppress saves from Pi-internal level changes during model switches.
-  let pendingSave: {
-    level: ThinkingLevel;
-    timer: ReturnType<typeof setTimeout>;
-  } | null = null;
-
-  function scheduleInheritedSave(level: ThinkingLevel): void {
-    if (pendingSave) clearTimeout(pendingSave.timer);
-    pendingSave = {
+  function scheduleFallbackSave(level: ThinkingLevel): void {
+    if (pendingFallbackSave) clearTimeout(pendingFallbackSave.timer);
+    pendingFallbackSave = {
       level,
       timer: setTimeout(() => {
-        inheritedLevel = pendingSave!.level;
-        writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
-        pendingSave = null;
+        const next = pendingFallbackSave!.level;
+        pendingFallbackSave = undefined;
+        try {
+          writeJsonFileAtomic(inheritedLevelPath, next);
+          inheritedLevel = next;
+        } catch (error) {
+          console.error(
+            `[model-thinking] failed to save inherited thinking level to ${inheritedLevelPath}:`,
+            error,
+          );
+        }
       }, 0),
     };
   }
 
-  function cancelPendingInheritedSave(): void {
-    if (pendingSave) {
-      clearTimeout(pendingSave.timer);
-      pendingSave = null;
-    }
+  function cancelFallbackSave(): void {
+    if (!pendingFallbackSave) return;
+    clearTimeout(pendingFallbackSave.timer);
+    pendingFallbackSave = undefined;
   }
 
-  pi.on("thinking_level_select", (event) => {
-    if (managedSetCount > 0) {
-      managedSetCount--;
+  pi.on("thinking_level_select", (event, ctx) => {
+    const managedIndex = managedTransitions.findIndex(
+      (transition) =>
+        transition.level === event.level &&
+        transition.previousLevel === event.previousLevel,
+    );
+    if (managedIndex !== -1) {
+      managedTransitions.splice(managedIndex, 1);
       return;
     }
     const current = pi.getThinkingLevel();
@@ -671,15 +718,30 @@ export default function modelThinking(
       // so the event's level no longer matches reality. Drop it.
       return;
     }
-    if (switchExpectedLevel !== undefined && event.level === switchExpectedLevel) {
+    const internal = isInternalModelSwitchLevel(event, ctx);
+    if (internal) return;
+    if (
+      internal === undefined &&
+      switchExpectedLevel !== undefined &&
+      event.level === switchExpectedLevel
+    ) {
       // The internal re-clamp landed exactly where the switch settled.
       switchExpectedLevel = undefined;
       return;
     }
     // Genuine user/extension intent (keybinding change, or an extension's
-    // pi.setThinkingLevel issued after `await pi.setModel`). Save it.
+    // pi.setThinkingLevel issued after await pi.setModel). Production writes
+    // immediately: the model-switch event has already been identified above,
+    // so a timer would only introduce a race and let I/O errors escape Pi's
+    // handler. The timer branch exists only for the partial unit-test context,
+    // which lacks Pi's session branch and keeps legacy tests focused there.
     switchExpectedLevel = undefined;
-    scheduleInheritedSave(event.level);
+    if (internal === undefined) {
+      scheduleFallbackSave(event.level);
+      return;
+    }
+    inheritedLevel = event.level;
+    writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
   });
 
   pi.registerCommand("levels", {
@@ -743,7 +805,7 @@ export default function modelThinking(
   });
 
   pi.on("model_select", (event, ctx) => {
-    cancelPendingInheritedSave();
+    cancelFallbackSave();
     // A restored session owns its historical thinking level.
     if (event.source === "restore") {
       switchExpectedLevel = pi.getThinkingLevel();
@@ -766,7 +828,7 @@ export default function modelThinking(
   });
 
   pi.on("session_start", (event, ctx) => {
-    cancelPendingInheritedSave();
+    cancelFallbackSave();
     // Pi restores these sessions' model and thinking level from the session.
     // Reload preserves the current session, so applying the stored level
     // there would clobber a manual change.

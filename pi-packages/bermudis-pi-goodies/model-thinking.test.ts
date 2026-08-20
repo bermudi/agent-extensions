@@ -1073,11 +1073,16 @@ describe("model-thinking hooks", () => {
       levelsPath: path,
       inheritedLevelPath: inheritedPath,
     });
+    const limitedModel = {
+      ...model("zai", "glm-5.3"),
+      reasoning: true,
+      thinkingLevelMap: { high: null },
+    } as Model;
 
     await pi.emit(
       "model_select",
-      { model: model("zai", "glm-5.3"), source: "set" },
-      context(model("zai", "glm-5.3")),
+      { model: limitedModel, source: "set" },
+      context(limitedModel),
     );
     await flushTimers();
 
