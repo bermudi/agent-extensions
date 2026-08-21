@@ -1537,9 +1537,14 @@ describe("model-thinking hooks", () => {
       await pi.emit(
         "session_start",
         { reason: "startup" },
-        context(model("zai", "glm-5.3"), [], [], [
-          { type: "message", id: "x" }, // resumed session
-        ]),
+        context(
+          model("zai", "glm-5.3"),
+          [],
+          [],
+          [
+            { type: "message", id: "x" }, // resumed session
+          ],
+        ),
       );
     });
 
@@ -1554,18 +1559,18 @@ describe("model-thinking hooks", () => {
     modelThinking(pi.api, { levelsPath: path });
     pi.level = "medium"; // restored from the session
 
-    await withArgv(
-      ["pi", "start", "--model", "zai/glm-5.3:high"],
-      async () => {
-        await pi.emit(
-          "session_start",
-          { reason: "startup" },
-          context(model("zai", "glm-5.3"), [], [], [
-            { type: "message", id: "x" },
-          ]),
-        );
-      },
-    );
+    await withArgv(["pi", "start", "--model", "zai/glm-5.3:high"], async () => {
+      await pi.emit(
+        "session_start",
+        { reason: "startup" },
+        context(
+          model("zai", "glm-5.3"),
+          [],
+          [],
+          [{ type: "message", id: "x" }],
+        ),
+      );
+    });
 
     // explicitCliThinking() catches --model X:high → the restored level is
     // kept, the stored level does not apply.
@@ -1591,9 +1596,7 @@ describe("model-thinking hooks", () => {
     await pi.emit(
       "session_start",
       { reason: "startup" },
-      context(model("zai", "glm-5.3"), [], [], [
-        { type: "message", id: "x" },
-      ]),
+      context(model("zai", "glm-5.3"), [], [], [{ type: "message", id: "x" }]),
     );
     expect(pi.level).toBe("medium");
 

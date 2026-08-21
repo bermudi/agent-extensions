@@ -379,20 +379,33 @@ function hasConversationEntries(
   return sessionManager.getEntries().some((entry) => entry.type === "message");
 }
 
+type ThinkingEntry = Extract<SessionEntry, { type: "thinking_level_change" }>;
+
+interface BranchThinkingTransition {
+  entry: ThinkingEntry;
+  index: number;
+  previousLevel: ThinkingLevel | undefined;
+}
+
 /**
- * Pi appends a model-change entry before its internal re-clamp's thinking
- * entry. That durable ordering identifies a switch-owned level change before
- * its asynchronous extension event reaches us, even if another extension
- * delays model_select long enough for a timer to fire.
+ * Reconstruct thinking transitions from the durable branch. Extension
+ * thinking events have no ID, so their payload alone cannot tell us whether a
+ * delayed event belongs to Pi's model-switch re-clamp or to a later user
+ * change. The branch does have IDs and parent ordering, which is enough:
  *
- * `undefined` is solely for the deliberately minimal unit-test context; real
- * Pi has getBranch(). It lets those unit tests retain their fallback coverage
- * while integration tests exercise this production path.
+ * - Pi's re-clamp and this extension's model-specific apply are marked as
+ *   ignored entries.
+ * - A user event is stale when a later, non-ignored thinking entry already
+ *   exists, even if its handler arrived first.
+ *
+ * `undefined` is solely for the deliberately minimal unit-test context.
  */
-function isInternalModelSwitchLevel(
+function classifyBranchThinkingEvent(
   event: { level: ThinkingLevel; previousLevel: ThinkingLevel },
   ctx: ExtensionContext,
-): boolean | undefined {
+  ignoredThinkingEntryIds: ReadonlySet<string>,
+  knownModelChangeIds: ReadonlySet<string>,
+): "internal" | "stale" | "user" | undefined {
   const sessionManager = (
     ctx as unknown as {
       sessionManager?: { getBranch?: () => SessionEntry[] };
@@ -401,25 +414,102 @@ function isInternalModelSwitchLevel(
   if (!sessionManager?.getBranch) return undefined;
 
   const branch = sessionManager.getBranch();
-  const thinking = branch.at(-1);
-  const modelChange = branch.at(-2);
-  const model = ctx.model;
-  if (
-    !model ||
-    thinking?.type !== "thinking_level_change" ||
-    modelChange?.type !== "model_change" ||
-    thinking.thinkingLevel !== event.level ||
-    modelChange.provider !== model.provider ||
-    modelChange.modelId !== model.id
-  ) {
-    return false;
+  const transitions: BranchThinkingTransition[] = [];
+  let previousLevel: ThinkingLevel | undefined;
+  branch.forEach((entry, index) => {
+    if (entry.type !== "thinking_level_change") return;
+    transitions.push({ entry, index, previousLevel });
+    previousLevel = entry.thinkingLevel as ThinkingLevel;
+  });
+
+  const candidates = transitions.filter(
+    (transition) =>
+      transition.previousLevel === event.previousLevel &&
+      transition.entry.thinkingLevel === event.level,
+  );
+  const candidate = candidates.at(-1);
+  if (!candidate) {
+    const latest = transitions.at(-1);
+    if (!latest) return undefined;
+    return ignoredThinkingEntryIds.has(latest.entry.id) ? "internal" : "user";
   }
 
-  // The event has no selection source, but only Pi's switch path can append
-  // a thinking change directly under its just-appended model change. A real
-  // change made after the switch is parented by that internal thinking entry;
-  // if Pi's re-clamp was a no-op, it emits no event to mistake for user intent.
-  return true;
+  // A later user transition means this event is stale. Delayed events from
+  // Pi's re-clamp are handled the same way: their durable entry is ignored,
+  // while a later user entry wins.
+  if (
+    transitions.some(
+      (transition) =>
+        transition.index > candidate.index &&
+        !ignoredThinkingEntryIds.has(transition.entry.id),
+    )
+  ) {
+    return "stale";
+  }
+  if (ignoredThinkingEntryIds.has(candidate.entry.id)) return "internal";
+
+  // Before model_select runs, the just-appended direct child is Pi's own
+  // re-clamp. This closes the small synchronous window before its entry can
+  // be recorded in knownModelChangeIds.
+  const parent = branch.find((entry) => entry.id === candidate.entry.parentId);
+  if (parent?.type === "model_change" && !knownModelChangeIds.has(parent.id)) {
+    return "internal";
+  }
+  return "user";
+}
+
+function branchEntries(
+  ctx: ExtensionContext,
+): { getBranch?: () => SessionEntry[] } | undefined {
+  return (
+    ctx as unknown as {
+      sessionManager?: { getBranch?: () => SessionEntry[] };
+    }
+  ).sessionManager;
+}
+
+function markModelSwitchEntries(
+  ctx: ExtensionContext,
+  model: Pick<Model, "provider" | "id">,
+  knownModelChangeIds: Set<string>,
+  ignoredThinkingEntryIds: Set<string>,
+): string[] {
+  const branch = branchEntries(ctx)?.getBranch?.();
+  if (!branch) return [];
+  const modelChange = [...branch]
+    .reverse()
+    .find(
+      (entry) =>
+        entry.type === "model_change" &&
+        entry.provider === model.provider &&
+        entry.modelId === model.id,
+    );
+  if (!modelChange || modelChange.type !== "model_change") return [];
+
+  knownModelChangeIds.add(modelChange.id);
+  for (const entry of branch) {
+    if (
+      entry.type === "thinking_level_change" &&
+      entry.parentId === modelChange.id
+    ) {
+      ignoredThinkingEntryIds.add(entry.id);
+    }
+  }
+  return branch.map((entry) => entry.id);
+}
+
+function markNewThinkingEntries(
+  ctx: ExtensionContext,
+  beforeIds: ReadonlySet<string>,
+  ignoredThinkingEntryIds: Set<string>,
+): void {
+  const branch = branchEntries(ctx)?.getBranch?.();
+  if (!branch) return;
+  for (const entry of branch) {
+    if (entry.type === "thinking_level_change" && !beforeIds.has(entry.id)) {
+      ignoredThinkingEntryIds.add(entry.id);
+    }
+  }
 }
 
 function applyStoredLevel(
@@ -679,6 +769,8 @@ export default function modelThinking(
     previousLevel: ThinkingLevel;
     level: ThinkingLevel;
   }[] = [];
+  const ignoredThinkingEntryIds = new Set<string>();
+  const knownModelChangeIds = new Set<string>();
   const setManagedLevel = (level: ThinkingLevel, model: Model): void => {
     const before = pi.getThinkingLevel();
     // Unit rows intentionally contain only provider/id. Real Pi models always
@@ -695,7 +787,7 @@ export default function modelThinking(
   // Unit tests use a deliberately partial ExtensionContext and therefore
   // cannot inspect Pi's session branch. Keep the old expected-level fallback
   // only for that test-only situation; production uses the durable
-  // model-change/thinking-change ordering in isInternalModelSwitchLevel().
+  // model-change/thinking-change ordering in classifyBranchThinkingEvent().
   let switchExpectedLevel: ThinkingLevel | undefined;
   // The level Pi's re-clamp set inside setModel, captured before
   // applyStoredLevel overwrites it. Used to distinguish stale re-clamp
@@ -703,7 +795,7 @@ export default function modelThinking(
   let switchReclampLevel: ThinkingLevel | undefined;
   // Whether the current switch's re-clamp was a no-op (Pi's setThinkingLevel
   // inside setModel didn't change the level, so no thinking_level_select
-  // event was emitted for it). When true, isInternalModelSwitchLevel true
+  // event was emitted for it). When true, branch classification
   // results are false positives — a subsequent user thinking change matches
   // the same branch pattern (thinking_level_change at -1, model_change at
   // -2) because no re-clamp thinking_level_change was appended between them.
@@ -757,14 +849,35 @@ export default function modelThinking(
       managedTransitions.splice(managedIndex, 1);
       return;
     }
+    const branchClassification = classifyBranchThinkingEvent(
+      event,
+      ctx,
+      ignoredThinkingEntryIds,
+      knownModelChangeIds,
+    );
+    if (
+      branchClassification === "internal" ||
+      branchClassification === "stale"
+    ) {
+      return;
+    }
+    if (branchClassification === "user") {
+      // Pi dispatches these events without awaiting earlier handlers. The
+      // branch tells us whether a newer user transition already superseded
+      // this event, so an older callback cannot overwrite the newer default.
+      inheritedLevel = event.level;
+      writeJsonFileAtomic(inheritedLevelPath, inheritedLevel);
+      lastSettledLevel = event.level;
+      return;
+    }
     // Production uses the durable session-branch ordering to identify
     // Pi's internal re-clamp. Check it before the stale-event check below
-    // because isInternalModelSwitchLevel can distinguish a re-clamp from a
+    // because branch classification can distinguish a re-clamp from a
     // genuine user change even when both have event.level !== current (the
     // re-clamp's thinking_level_change is parented by the just-appended
     // model_change; a user change is not). The stale check below is a
     // fallback for the test-only path that lacks getBranch.
-    const internal = isInternalModelSwitchLevel(event, ctx);
+    const internal = undefined;
     // Consume switchReclampWasNoOp for this event so it doesn't leak across
     // switches. switchReclampLevel is NOT cleared here — it's only cleared
     // when a stale re-clamp event matches it (below). This allows a
@@ -799,7 +912,7 @@ export default function modelThinking(
       //   2. A genuine user/extension change (e.g. setThinkingLevel("high")
       //      followed immediately by setModel(...)) that was overtaken by
       //      the model switch's applyStoredLevel (Finding 3).
-      // In production, isInternalModelSwitchLevel already returned false
+      // In production, branch classification already returned false
       // (or a false positive was caught above), ruling out case 1 when the
       // branch is intact — so this is case 2, and we fall through to save
       // it. In the test-only path (internal === undefined), use
@@ -896,6 +1009,11 @@ export default function modelThinking(
       // Read again after the dialog closes.  This preserves edits another
       // session made while this one was open; only rows changed here win.
       await mergeAndWriteStoredLevels(values, result, rows, levelsPath);
+      const beforeApplyIds = new Set(
+        branchEntries(ctx)
+          ?.getBranch?.()
+          .map((entry) => entry.id) ?? [],
+      );
       applyStoredLevel(
         pi,
         ctx,
@@ -905,6 +1023,7 @@ export default function modelThinking(
         undefined,
         setManagedLevel,
       );
+      markNewThinkingEntries(ctx, beforeApplyIds, ignoredThinkingEntryIds);
       ctx.ui.notify("Saved thinking levels", "info");
     },
   });
@@ -920,6 +1039,14 @@ export default function modelThinking(
       lastSettledLevel = pi.getThinkingLevel();
       return;
     }
+    const beforeApplyIds = new Set(
+      markModelSwitchEntries(
+        ctx,
+        event.model,
+        knownModelChangeIds,
+        ignoredThinkingEntryIds,
+      ),
+    );
     // Capture the re-clamp level (Pi's setThinkingLevel inside setModel)
     // before applyStoredLevel overwrites it. A delayed thinking_level_select
     // matching this level is the stale re-clamp and is dropped; a non-match
@@ -928,11 +1055,10 @@ export default function modelThinking(
     // Detect whether the re-clamp was a no-op by comparing the post-re-clamp
     // level with the pre-switch level (lastSettledLevel from the previous
     // handler). When the re-clamp is a no-op, no thinking_level_select event
-    // is emitted, and isInternalModelSwitchLevel can produce false positives
+    // is emitted, and branch classification can produce false positives
     // for subsequent user thinking changes (Finding 3).
     switchReclampWasNoOp =
-      lastSettledLevel !== undefined &&
-      switchReclampLevel === lastSettledLevel;
+      lastSettledLevel !== undefined && switchReclampLevel === lastSettledLevel;
     applyStoredLevel(
       pi,
       ctx,
@@ -944,6 +1070,7 @@ export default function modelThinking(
         : undefined,
       setManagedLevel,
     );
+    markNewThinkingEntries(ctx, beforeApplyIds, ignoredThinkingEntryIds);
     // Record the level the switch settled at so a delayed internal
     // thinking_level_select (case 2 above) is recognized and dropped.
     switchExpectedLevel = pi.getThinkingLevel();
@@ -1007,8 +1134,12 @@ export default function modelThinking(
     // not written as the global default (Finding 5).
     switchReclampLevel = pi.getThinkingLevel();
     switchReclampWasNoOp =
-      lastSettledLevel !== undefined &&
-      switchReclampLevel === lastSettledLevel;
+      lastSettledLevel !== undefined && switchReclampLevel === lastSettledLevel;
+    const beforeApplyIds = new Set(
+      branchEntries(ctx)
+        ?.getBranch?.()
+        .map((entry) => entry.id) ?? [],
+    );
     applyStoredLevel(
       pi,
       ctx,
@@ -1018,6 +1149,7 @@ export default function modelThinking(
       undefined,
       setManagedLevel,
     );
+    markNewThinkingEntries(ctx, beforeApplyIds, ignoredThinkingEntryIds);
     switchExpectedLevel = pi.getThinkingLevel();
     lastSettledLevel = pi.getThinkingLevel();
   });

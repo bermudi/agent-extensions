@@ -185,4 +185,51 @@ describe("model-thinking real Pi lifecycle", () => {
     expect(session.thinkingLevel).toBe("high");
     expect(JSON.parse(readFileSync(inheritedLevelPath, "utf8"))).toBe("high");
   });
+
+  test("does not save a delayed re-clamp after applying a different sidecar level", async () => {
+    const gpt52 = builtinModel("openai", "gpt-5.2");
+    const gpt5 = builtinModel("openai", "gpt-5");
+    const { inheritedLevelPath, session } = await createModelThinkingSession(
+      { "openai/gpt-5": "low" },
+      "xhigh",
+      (pi) => {
+        pi.on("thinking_level_select", async () => {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        });
+      },
+    );
+
+    await session.setModel(gpt52);
+    makeModelsAvailable(session, [gpt52, gpt5]);
+    session.setScopedModels([{ model: gpt52 }, { model: gpt5 }]);
+
+    await session.cycleModel();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(session.thinkingLevel).toBe("low");
+    expect(JSON.parse(readFileSync(inheritedLevelPath, "utf8"))).toBe("xhigh");
+  });
+
+  test("does not let a delayed older user level overwrite a newer one", async () => {
+    const gpt5 = builtinModel("openai", "gpt-5");
+    const { inheritedLevelPath, session } = await createModelThinkingSession(
+      {},
+      "low",
+      (pi) => {
+        pi.on("thinking_level_select", async (event) => {
+          if (event.level === "high") {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+        });
+      },
+    );
+
+    await session.setModel(gpt5);
+    session.setThinkingLevel("high");
+    session.setThinkingLevel("low");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(session.thinkingLevel).toBe("low");
+    expect(JSON.parse(readFileSync(inheritedLevelPath, "utf8"))).toBe("low");
+  });
 });
