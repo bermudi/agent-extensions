@@ -7,6 +7,7 @@ bun.lock
 *.bundle.ts
 .agents/
 .pi/extensions/
+.pi/council/
 
 # LLM context dumps
 .pi/llm-dump/
