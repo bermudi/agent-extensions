@@ -223,7 +223,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
 
       const actorNames = [
         ...config.members.map((_, index) => `Member ${index + 1}`),
-        "Secretary",
+        config.chair.mode === "model" ? "Chair" : "Secretary",
       ];
       const dashboard = new CouncilDashboard(ctx, actorNames);
       try {

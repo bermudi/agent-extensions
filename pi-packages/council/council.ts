@@ -213,9 +213,11 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
             thinking: options.config.chair.thinking,
           }
         : options.config.chair.secretary;
+    const facilitatorActor =
+      options.config.chair.mode === "model" ? "Chair" : "Secretary";
     const secretaryModel = modelFor(secretarySpec, options.registry);
     const secretary = new CouncilWorker({
-      actor: "Secretary",
+      actor: facilitatorActor,
       cwd: options.cwd,
       model: secretaryModel,
       thinking: thinkingFor(secretarySpec, secretaryModel),
@@ -225,7 +227,10 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
       signal: options.signal,
     });
     auxiliaries.push(secretary);
-    options.onUpdate({ actor: "Secretary", phase: "normalizing decisions" });
+    options.onUpdate({
+      actor: facilitatorActor,
+      phase: "normalizing decisions",
+    });
     const normalized = await secretary.runJson(
       "normalizing decisions",
       [
@@ -242,7 +247,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
         ),
     );
     await options.output.record("decisions", normalized, {
-      actor: "Secretary",
+      actor: facilitatorActor,
       phase: "normalizing decisions",
     });
     const ballots = await Promise.all(
@@ -301,7 +306,10 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
         actor: "User chair",
         phase: "chair",
       });
-      options.onUpdate({ actor: "Secretary", phase: "writing final design" });
+      options.onUpdate({
+        actor: facilitatorActor,
+        phase: "writing final design",
+      });
       final = await secretary.runJson(
         "writing final design",
         finalPrompt(
@@ -331,7 +339,10 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
         ...authoritative,
       ].join("\n");
     } else {
-      options.onUpdate({ actor: "Secretary", phase: "chair adjudication" });
+      options.onUpdate({
+        actor: facilitatorActor,
+        phase: "chair adjudication",
+      });
       final = await secretary.runJson(
         "chair adjudication",
         finalPrompt(
@@ -344,7 +355,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
       );
     }
     await options.output.record("final_design", final, {
-      actor: options.config.chair.mode === "user" ? "Secretary" : "Model chair",
+      actor: facilitatorActor,
       phase: "chair",
     });
     return final.value;
@@ -407,7 +418,7 @@ export function validateDecisionSet(
   proposalIds: string[],
 ): void {
   if (decisions.decisions.length === 0) {
-    throw new Error("Secretary produced no design decisions");
+    throw new Error("Council facilitator produced no design decisions");
   }
   const decisionIds = new Set<string>();
   const optionIds = new Set<string>();
