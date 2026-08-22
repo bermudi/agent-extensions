@@ -9,11 +9,23 @@ interface ModelIdentity {
 }
 
 /**
- * Extension modules are cached across Pi's session-runtime replacement, while
- * their factories and handlers are recreated. This small handoff therefore
- * survives /new without writing transient state to disk.
+ * Pi normally caches extension modules across a session-runtime replacement,
+ * but that cache can be invalidated by another resource loader or /reload.
+ * Keep the handoff on globalThis so a fresh import in the same Pi process
+ * cannot lose it. The state is still transient and never written to disk.
  */
-const pendingModels = new Map<string, ModelIdentity>();
+const pendingModelsKey = Symbol.for(
+  "bermudis-pi-goodies.keep-model-on-new.pending-models",
+);
+
+type GlobalWithPendingModels = typeof globalThis & {
+  [pendingModelsKey]?: Map<string, ModelIdentity>;
+};
+
+function getPendingModels(): Map<string, ModelIdentity> {
+  const globalState = globalThis as GlobalWithPendingModels;
+  return (globalState[pendingModelsKey] ??= new Map());
+}
 
 function handoffKey(
   sessionFile: string | undefined,
@@ -31,7 +43,7 @@ export default function keepModelOnNew(
   pi: ExtensionAPI,
   options: KeepModelOnNewOptions = {},
 ): void {
-  const handoffs = options.pendingModels ?? pendingModels;
+  const handoffs = options.pendingModels ?? getPendingModels();
 
   pi.on("session_before_switch", (event, ctx) => {
     if (event.reason !== "new" || !ctx.model) return;
@@ -64,7 +76,12 @@ export default function keepModelOnNew(
     }
 
     try {
-      await pi.setModel(model);
+      const restored = await pi.setModel(model);
+      if (!restored) {
+        const message = `Could not keep model after /new: ${previous.provider}/${previous.id} is not authenticated`;
+        console.warn(`[keep-model-on-new] ${message}`);
+        ctx.ui.notify(message, "warning");
+      }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       console.warn(

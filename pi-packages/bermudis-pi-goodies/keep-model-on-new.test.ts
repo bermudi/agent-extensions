@@ -10,6 +10,7 @@ type Handler = (event: never, ctx: ExtensionContext) => unknown;
 class PiHarness {
   readonly handlers = new Map<string, Handler>();
   readonly selected: { provider: string; id: string }[] = [];
+  setModelResult = true;
 
   readonly api = {
     on: (event: string, handler: Handler) => {
@@ -17,7 +18,7 @@ class PiHarness {
     },
     setModel: async (model: { provider: string; id: string }) => {
       this.selected.push(model);
-      return true;
+      return this.setModelResult;
     },
   } as unknown as ExtensionAPI;
 
@@ -108,5 +109,43 @@ describe("keep-model-on-new", () => {
     );
 
     expect(handoffs.size).toBe(0);
+  });
+
+  test("warns when Pi refuses to restore an unauthenticated model", async () => {
+    const handoffs = new Map([
+      [
+        "/sessions/old.jsonl",
+        { provider: "openai-codex", id: "gpt-5.6-terra" },
+      ],
+    ]);
+    const notifications: Array<{ message: string; level: string }> = [];
+    const pi = new PiHarness();
+    pi.setModelResult = false;
+    keepModelOnNew(pi.api, { pendingModels: handoffs });
+    const ctx = context(
+      { provider: "kilo", id: "tencent/hy3:free" },
+      "/sessions/new.jsonl",
+      [{ provider: "openai-codex", id: "gpt-5.6-terra" }],
+    );
+    ctx.ui.notify = (message, level) => {
+      notifications.push({ message, level });
+    };
+
+    await pi.emit(
+      "session_start",
+      { reason: "new", previousSessionFile: "/sessions/old.jsonl" },
+      ctx,
+    );
+
+    expect(pi.selected).toEqual([
+      { provider: "openai-codex", id: "gpt-5.6-terra" },
+    ]);
+    expect(notifications).toEqual([
+      {
+        message:
+          "Could not keep model after /new: openai-codex/gpt-5.6-terra is not authenticated",
+        level: "warning",
+      },
+    ]);
   });
 });
