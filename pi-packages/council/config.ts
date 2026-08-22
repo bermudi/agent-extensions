@@ -48,7 +48,7 @@ async function readJson(path: string): Promise<unknown | undefined> {
 export async function loadConfig(
   cwd: string,
   allowProjectConfig: boolean,
-): Promise<CouncilConfig> {
+): Promise<CouncilConfig | undefined> {
   const globalPath = join(getAgentDir(), "council.json");
   const projectPath = join(cwd, CONFIG_DIR_NAME, "council.json");
   const globalValue = await readJson(globalPath);
@@ -57,9 +57,7 @@ export async function loadConfig(
     : undefined;
 
   if (globalValue === undefined && projectValue === undefined) {
-    throw new Error(
-      `Council is not configured. Create ${globalPath} or ${projectPath}; see the council README.`,
-    );
+    return undefined;
   }
   const merged =
     typeof globalValue === "object" &&

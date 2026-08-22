@@ -10,7 +10,9 @@ They cannot run commands or modify the repository. The extension writes only to
 
 ## Configure
 
-Create `~/.pi/agent/council.json` or a trusted project's `.pi/council.json`:
+Without configuration, `/council` opens a picker for the member roster and
+chair. To save defaults, create `~/.pi/agent/council.json` or a trusted
+project's `.pi/council.json`:
 
 ```json
 {
@@ -75,4 +77,3 @@ cd pi-packages/council
 bun run typecheck
 bun run test
 ```
-

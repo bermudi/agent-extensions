@@ -3,8 +3,13 @@ import {
   sessionEntryToContextMessages,
   type ExtensionAPI,
   type ExtensionCommandContext,
+  type ScopedModel,
 } from "@earendil-works/pi-coding-agent";
-import { assertModelsAvailable, loadConfig } from "./config.ts";
+import {
+  assertModelsAvailable,
+  loadConfig,
+  type CouncilConfig,
+} from "./config.ts";
 import { runCouncil, type UserChair } from "./council.ts";
 import { CouncilOutput } from "./output.ts";
 import type { Ballot, DecisionSet } from "./types.ts";
@@ -85,6 +90,85 @@ function makeUserChair(ctx: ExtensionCommandContext): UserChair {
   };
 }
 
+function modelId(scoped: ScopedModel): string {
+  return `${scoped.model.provider}/${scoped.model.id}`;
+}
+
+async function pickConfig(
+  ctx: ExtensionCommandContext,
+): Promise<CouncilConfig> {
+  const available: ScopedModel[] =
+    ctx.scopedModels.length > 0
+      ? [...ctx.scopedModels]
+      : ctx.modelRegistry.getAvailable().map((model) => ({ model }));
+  if (available.length < 2) {
+    throw new Error("Council needs at least two available models");
+  }
+
+  const selected = new Set<string>();
+  while (true) {
+    const choices = available.map((entry) => {
+      const id = modelId(entry);
+      return `${selected.has(id) ? "[x]" : "[ ]"} ${id}`;
+    });
+    if (selected.size >= 2) {
+      choices.unshift(`Start with ${selected.size} members`);
+    }
+    choices.push("Cancel");
+    const choice = await ctx.ui.select(
+      "Council members — toggle at least two",
+      choices,
+    );
+    if (!choice || choice === "Cancel") {
+      throw new Error("Council setup canceled");
+    }
+    if (choice.startsWith("Start with ")) break;
+    const id = choice.slice(4);
+    if (selected.has(id)) selected.delete(id);
+    else selected.add(id);
+  }
+
+  const chairMode = await ctx.ui.select("Who chairs the council?", [
+    "A model",
+    "I will chair",
+  ]);
+  if (!chairMode) throw new Error("Council setup canceled");
+
+  const members = [...selected].map((id) => {
+    const scoped = available.find((entry) => modelId(entry) === id);
+    return {
+      model: id,
+      ...(scoped?.thinkingLevel ? { thinking: scoped.thinkingLevel } : {}),
+    };
+  });
+  if (chairMode === "I will chair") {
+    const secretaryId = await ctx.ui.select(
+      "Which model should act as secretary?",
+      [...selected],
+    );
+    if (!secretaryId) throw new Error("Council setup canceled");
+    return {
+      version: 1,
+      members,
+      chair: {
+        mode: "user",
+        secretary: { model: secretaryId },
+      },
+    };
+  }
+
+  const chairId = await ctx.ui.select(
+    "Which model should chair?",
+    available.map(modelId),
+  );
+  if (!chairId) throw new Error("Council setup canceled");
+  return {
+    version: 1,
+    members,
+    chair: { mode: "model", model: chairId },
+  };
+}
+
 export default function councilExtension(pi: ExtensionAPI): void {
   pi.registerCommand("council", {
     description:
@@ -96,7 +180,9 @@ export default function councilExtension(pi: ExtensionAPI): void {
       await ctx.waitForIdle();
 
       const focus = args.trim();
-      const config = await loadConfig(ctx.cwd, ctx.isProjectTrusted());
+      const config =
+        (await loadConfig(ctx.cwd, ctx.isProjectTrusted())) ??
+        (await pickConfig(ctx));
       assertModelsAvailable(config, ctx.modelRegistry);
       const conversation = snapshotConversation(ctx);
       const output = await CouncilOutput.create(
