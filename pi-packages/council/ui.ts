@@ -104,13 +104,20 @@ export class ModelMultiSelect implements Component {
     private readonly done: (result: string[] | null) => void,
     private readonly visibleRows = 12,
   ) {
-    this.rows = [...models, START, CANCEL];
+    const uniqueModels = [...new Set(models)];
+    if (uniqueModels.length < 2) {
+      throw new Error("Council needs at least two distinct models");
+    }
+    this.rows = [...uniqueModels, START, CANCEL];
   }
 
   render(width: number): string[] {
     const end = Math.min(this.rows.length, this.offset + this.visibleRows);
     const lines = [
-      "Council members — Enter/Space toggles; choose Start when ready",
+      truncateToWidth(
+        "Council members — Enter/Space toggles; choose Start when ready",
+        width,
+      ),
       "",
     ];
     for (let index = this.offset; index < end; index++) {

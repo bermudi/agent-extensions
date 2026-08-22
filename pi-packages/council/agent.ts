@@ -253,6 +253,7 @@ export class CouncilWorker {
     schema: ZodType<T>,
     validate?: (value: T) => void,
   ): Promise<{ value: T; raw: string }> {
+    this.options.signal?.throwIfAborted();
     this.phase = phase;
     const first = await this.prompt(prompt);
     try {
@@ -286,9 +287,11 @@ export class CouncilWorker {
   }
 
   private async prompt(prompt: string): Promise<string> {
+    this.options.signal?.throwIfAborted();
     const before = this.agent.state.messages.length;
     await this.agent.prompt(prompt);
     await this.agent.waitForIdle();
+    this.options.signal?.throwIfAborted();
     const messages = this.agent.state.messages.slice(before);
     const response = [...messages]
       .reverse()

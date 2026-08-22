@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  runCouncil,
   validateBallot,
   validateCritiques,
   validateDecisionSet,
@@ -63,6 +64,16 @@ function critique(proposal: string) {
 }
 
 describe("protocol validation", () => {
+  test("an already-canceled run stops before creating workers", async () => {
+    const abort = new AbortController();
+    abort.abort();
+    await expect(
+      runCouncil({
+        signal: abort.signal,
+      } as never),
+    ).rejects.toThrow();
+  });
+
   test("accepts a complete decision set and ballot", () => {
     expect(() =>
       validateDecisionSet(decisions, ["Proposal A", "Proposal B"]),

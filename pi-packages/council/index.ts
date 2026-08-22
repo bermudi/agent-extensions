@@ -31,7 +31,10 @@ export function snapshotConversation(ctx: ExtensionCommandContext): string {
   return messages.map(serializeMessage).join("\n\n");
 }
 
-function makeUserChair(ctx: ExtensionCommandContext): UserChair {
+function makeUserChair(
+  ctx: ExtensionCommandContext,
+  signal: AbortSignal,
+): UserChair {
   return {
     async decide(
       decisions: DecisionSet,
@@ -39,6 +42,7 @@ function makeUserChair(ctx: ExtensionCommandContext): UserChair {
     ): Promise<Record<string, string>> {
       const selections: Record<string, string> = {};
       for (const decision of decisions.decisions) {
+        signal.throwIfAborted();
         const counts = new Map<string, number>();
         for (const { ballot } of ballots) {
           const vote = ballot.decisions.find(
@@ -56,6 +60,7 @@ function makeUserChair(ctx: ExtensionCommandContext): UserChair {
             `${decision.id}: ${decision.question}`,
             [...choices, "Inspect vote reasoning"],
           );
+          signal.throwIfAborted();
           if (!answer) throw new Error("User canceled council chairing");
           if (answer !== "Inspect vote reasoning") {
             selected = answer;
@@ -81,6 +86,7 @@ function makeUserChair(ctx: ExtensionCommandContext): UserChair {
             ]),
           ].join("\n");
           await ctx.ui.editor(`Inspect ${decision.id}`, report);
+          signal.throwIfAborted();
         }
         const optionId = selected.slice(0, selected.indexOf(" "));
         selections[decision.id] = optionId;
@@ -97,12 +103,15 @@ function modelId(scoped: ScopedModel): string {
 async function pickConfig(
   ctx: ExtensionCommandContext,
 ): Promise<CouncilConfig> {
-  const available: ScopedModel[] =
+  const scoped: ScopedModel[] =
     ctx.scopedModels.length > 0
       ? [...ctx.scopedModels]
       : ctx.modelRegistry.getAvailable().map((model) => ({ model }));
+  const available = [
+    ...new Map(scoped.map((entry) => [modelId(entry), entry])).values(),
+  ];
   if (available.length < 2) {
-    throw new Error("Council needs at least two available models");
+    throw new Error("Council needs at least two distinct available models");
   }
 
   const picked = await pickCouncilMembers(ctx, available.map(modelId));
@@ -116,12 +125,19 @@ async function pickConfig(
   if (!chairMode) throw new Error("Council setup canceled");
 
   const members = [...selected].map((id) => {
-    const scoped = available.find((entry) => modelId(entry) === id);
+    const entry = available.find((candidate) => modelId(candidate) === id);
     return {
       model: id,
-      ...(scoped?.thinkingLevel ? { thinking: scoped.thinkingLevel } : {}),
+      ...(entry?.thinkingLevel ? { thinking: entry.thinkingLevel } : {}),
     };
   });
+  const modelSpecFor = (id: string) => {
+    const entry = available.find((candidate) => modelId(candidate) === id);
+    return {
+      model: id,
+      ...(entry?.thinkingLevel ? { thinking: entry.thinkingLevel } : {}),
+    };
+  };
   if (chairMode === "I will chair") {
     const secretaryId = await ctx.ui.select(
       "Which model should act as secretary?",
@@ -133,7 +149,7 @@ async function pickConfig(
       members,
       chair: {
         mode: "user",
-        secretary: { model: secretaryId },
+        secretary: modelSpecFor(secretaryId),
       },
     };
   }
@@ -146,7 +162,7 @@ async function pickConfig(
   return {
     version: 1,
     members,
-    chair: { mode: "model", model: chairId },
+    chair: { mode: "model", ...modelSpecFor(chairId) },
   };
 }
 
@@ -210,23 +226,26 @@ export default function councilExtension(pi: ExtensionAPI): void {
 
       const abort = new AbortController();
       activeAbort = abort;
-      const output = await CouncilOutput.create(
-        ctx.cwd,
-        focus || "current-problem",
-      );
-      await output.record("run_started", {
-        focus,
-        cwd: ctx.cwd,
-        conversation,
-        config,
-      });
-
-      const actorNames = [
-        ...config.members.map((_, index) => `Member ${index + 1}`),
-        config.chair.mode === "model" ? "Chair" : "Secretary",
-      ];
-      const dashboard = new CouncilDashboard(ctx, actorNames);
+      let output: CouncilOutput | undefined;
+      let dashboard: CouncilDashboard | undefined;
       try {
+        output = await CouncilOutput.create(
+          ctx.cwd,
+          focus || "current-problem",
+        );
+        await output.record("run_started", {
+          focus,
+          cwd: ctx.cwd,
+          conversation,
+          config,
+        });
+
+        const actorNames = [
+          ...config.members.map((_, index) => `Member ${index + 1}`),
+          config.chair.mode === "model" ? "Chair" : "Secretary",
+        ];
+        const activeDashboard = new CouncilDashboard(ctx, actorNames);
+        dashboard = activeDashboard;
         const finalDesign = await runCouncil({
           cwd: ctx.cwd,
           conversation,
@@ -235,10 +254,12 @@ export default function councilExtension(pi: ExtensionAPI): void {
           registry: ctx.modelRegistry,
           output,
           userChair:
-            config.chair.mode === "user" ? makeUserChair(ctx) : undefined,
+            config.chair.mode === "user"
+              ? makeUserChair(ctx, abort.signal)
+              : undefined,
           signal: abort.signal,
           onUpdate: (update) => {
-            dashboard.update(update.actor, {
+            activeDashboard.update(update.actor, {
               phase: update.tool
                 ? `${update.phase} · ${update.tool}`
                 : update.phase,
@@ -256,17 +277,24 @@ export default function councilExtension(pi: ExtensionAPI): void {
         });
         ctx.ui.notify(`Council design: ${output.designPath}`, "info");
       } catch (error) {
-        await output.record("run_failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+        if (output) {
+          await output.record("run_failed", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         ctx.ui.notify(
-          `Council failed: ${error instanceof Error ? error.message : String(error)}. Log: ${output.logPath}`,
+          [
+            `Council failed: ${error instanceof Error ? error.message : String(error)}.`,
+            output ? `Log: ${output.logPath}` : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
           "error",
         );
         throw error;
       } finally {
         if (activeAbort === abort) activeAbort = undefined;
-        dashboard.close();
+        dashboard?.close();
       }
     },
   });

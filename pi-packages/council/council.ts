@@ -99,6 +99,7 @@ function citedEvidence(evidence: EvidenceStore, values: unknown[]): unknown[] {
 }
 
 export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
+  options.signal?.throwIfAborted();
   const evidence = new EvidenceStore(options.cwd, (record) =>
     options.output.record("evidence", record, {
       actor: record.actor,
@@ -138,6 +139,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
         return result.value;
       }),
     );
+    options.signal?.throwIfAborted();
     const labeledInitial = initial.map((proposal, index) => ({
       id: label(index),
       proposal,
@@ -170,6 +172,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
         return result.value;
       }),
     );
+    options.signal?.throwIfAborted();
 
     const revisions = await Promise.all(
       workers.map(async (worker, index) => {
@@ -201,6 +204,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
         return result.value;
       }),
     );
+    options.signal?.throwIfAborted();
     const labeledRevisions = revisions.map((proposal, index) => ({
       id: label(index),
       proposal,
@@ -213,6 +217,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
             thinking: options.config.chair.thinking,
           }
         : options.config.chair.secretary;
+    options.signal?.throwIfAborted();
     const facilitatorActor =
       options.config.chair.mode === "model" ? "Chair" : "Secretary";
     const secretaryModel = modelFor(secretarySpec, options.registry);
@@ -246,10 +251,12 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
           labeledRevisions.map((proposal) => proposal.id),
         ),
     );
+    options.signal?.throwIfAborted();
     await options.output.record("decisions", normalized, {
       actor: facilitatorActor,
       phase: "normalizing decisions",
     });
+    options.signal?.throwIfAborted();
     const ballots = await Promise.all(
       workers.map(async (worker, index) => {
         const actor = `Member ${index + 1}`;
@@ -281,6 +288,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
         return { voter: actor, ballot: result.value };
       }),
     );
+    options.signal?.throwIfAborted();
 
     let final: { value: FinalDesign; raw: string };
     if (options.config.chair.mode === "user") {
@@ -291,6 +299,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
         normalized.value,
         ballots,
       );
+      options.signal?.throwIfAborted();
       for (const decision of normalized.value.decisions) {
         const selected = selections[decision.id];
         if (
@@ -322,6 +331,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
         ),
         finalDesignSchema,
       );
+      options.signal?.throwIfAborted();
       const authoritative = normalized.value.decisions.map((decision) => {
         const selected = selections[decision.id];
         const option = decision.options.find(
@@ -353,11 +363,13 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
         ),
         finalDesignSchema,
       );
+      options.signal?.throwIfAborted();
     }
     await options.output.record("final_design", final, {
       actor: facilitatorActor,
       phase: "chair",
     });
+    options.signal?.throwIfAborted();
     return final.value;
   } finally {
     for (const worker of [...workers, ...auxiliaries]) worker.dispose();
