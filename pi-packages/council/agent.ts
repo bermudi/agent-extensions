@@ -34,6 +34,7 @@ interface WorkerOptions {
   registry: ModelRegistry;
   evidence: EvidenceStore;
   onUpdate: (update: AgentUpdate) => void;
+  signal?: AbortSignal;
 }
 
 function textFromMessage(message: AgentMessage | undefined): string {
@@ -174,6 +175,7 @@ export class CouncilWorker {
   private readonly agent: Agent;
   private phase = "starting";
   private readonly unsubscribe: () => void;
+  private readonly detachAbort: () => void;
 
   constructor(private readonly options: WorkerOptions) {
     const tools = [
@@ -236,6 +238,13 @@ export class CouncilWorker {
         });
       }
     });
+    const abort = () => this.agent.abort();
+    if (options.signal) {
+      if (options.signal.aborted) abort();
+      else options.signal.addEventListener("abort", abort);
+    }
+    this.detachAbort = () =>
+      options.signal?.removeEventListener("abort", abort);
   }
 
   async runJson<T>(
@@ -271,6 +280,7 @@ export class CouncilWorker {
   }
 
   dispose(): void {
+    this.detachAbort();
     this.unsubscribe();
     this.agent.abort();
   }

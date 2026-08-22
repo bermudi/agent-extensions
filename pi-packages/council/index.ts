@@ -13,7 +13,7 @@ import {
 import { runCouncil, type UserChair } from "./council.ts";
 import { CouncilOutput } from "./output.ts";
 import type { Ballot, DecisionSet } from "./types.ts";
-import { CouncilDashboard } from "./ui.ts";
+import { CouncilDashboard, pickCouncilMembers } from "./ui.ts";
 
 function serializeMessage(message: AgentMessage): string {
   const content =
@@ -105,28 +105,9 @@ async function pickConfig(
     throw new Error("Council needs at least two available models");
   }
 
-  const selected = new Set<string>();
-  while (true) {
-    const choices = available.map((entry) => {
-      const id = modelId(entry);
-      return `${selected.has(id) ? "[x]" : "[ ]"} ${id}`;
-    });
-    if (selected.size >= 2) {
-      choices.unshift(`Start with ${selected.size} members`);
-    }
-    choices.push("Cancel");
-    const choice = await ctx.ui.select(
-      "Council members — toggle at least two",
-      choices,
-    );
-    if (!choice || choice === "Cancel") {
-      throw new Error("Council setup canceled");
-    }
-    if (choice.startsWith("Start with ")) break;
-    const id = choice.slice(4);
-    if (selected.has(id)) selected.delete(id);
-    else selected.add(id);
-  }
+  const picked = await pickCouncilMembers(ctx, available.map(modelId));
+  if (!picked) throw new Error("Council setup canceled");
+  const selected = new Set(picked);
 
   const chairMode = await ctx.ui.select("Who chairs the council?", [
     "A model",
@@ -170,6 +151,32 @@ async function pickConfig(
 }
 
 export default function councilExtension(pi: ExtensionAPI): void {
+  let activeAbort: AbortController | undefined;
+
+  pi.registerShortcut("ctrl+shift+x", {
+    description: "Cancel the active design council",
+    handler: async (ctx) => {
+      if (!activeAbort) {
+        ctx.ui.notify("No design council is running", "info");
+        return;
+      }
+      activeAbort.abort();
+      ctx.ui.notify("Canceling design council…", "warning");
+    },
+  });
+
+  pi.registerCommand("council-cancel", {
+    description: "Cancel the active design council",
+    handler: async (_args, ctx) => {
+      if (!activeAbort) {
+        ctx.ui.notify("No design council is running", "info");
+        return;
+      }
+      activeAbort.abort();
+      ctx.ui.notify("Canceling design council…", "warning");
+    },
+  });
+
   pi.registerCommand("council", {
     description:
       "Run a read-only, multi-model design council over the current conversation",
@@ -180,11 +187,29 @@ export default function councilExtension(pi: ExtensionAPI): void {
       await ctx.waitForIdle();
 
       const focus = args.trim();
+      const conversation = snapshotConversation(ctx);
+      if (!focus && !conversation.trim()) {
+        throw new Error(
+          "There is no problem to design. Discuss a task first, or run /council <design brief>.",
+        );
+      }
+      if (activeAbort) {
+        throw new Error("A design council is already running");
+      }
       const config =
         (await loadConfig(ctx.cwd, ctx.isProjectTrusted())) ??
         (await pickConfig(ctx));
       assertModelsAvailable(config, ctx.modelRegistry);
-      const conversation = snapshotConversation(ctx);
+      const confirmed = await ctx.ui.confirm(
+        "Start design council?",
+        `${config.members.length} models will inspect the repository and deliberate. This can be expensive.\n\nProblem: ${
+          focus || conversation.slice(0, 500)
+        }`,
+      );
+      if (!confirmed) return;
+
+      const abort = new AbortController();
+      activeAbort = abort;
       const output = await CouncilOutput.create(
         ctx.cwd,
         focus || "current-problem",
@@ -211,6 +236,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
           output,
           userChair:
             config.chair.mode === "user" ? makeUserChair(ctx) : undefined,
+          signal: abort.signal,
           onUpdate: (update) => {
             dashboard.update(update.actor, {
               phase: update.tool
@@ -239,6 +265,7 @@ export default function councilExtension(pi: ExtensionAPI): void {
         );
         throw error;
       } finally {
+        if (activeAbort === abort) activeAbort = undefined;
         dashboard.close();
       }
     },

@@ -35,6 +35,7 @@ interface RunOptions {
   output: CouncilOutput;
   userChair?: UserChair;
   onUpdate: (update: AgentUpdate) => void;
+  signal?: AbortSignal;
 }
 
 function label(index: number): string {
@@ -115,6 +116,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
       registry: options.registry,
       evidence,
       onUpdate: options.onUpdate,
+      signal: options.signal,
     });
   });
   const auxiliaries: CouncilWorker[] = [];
@@ -220,6 +222,7 @@ export async function runCouncil(options: RunOptions): Promise<FinalDesign> {
       registry: options.registry,
       evidence,
       onUpdate: options.onUpdate,
+      signal: options.signal,
     });
     auxiliaries.push(secretary);
     options.onUpdate({ actor: "Secretary", phase: "normalizing decisions" });
