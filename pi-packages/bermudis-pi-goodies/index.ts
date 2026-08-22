@@ -8,6 +8,7 @@
  *   - name-with-ai     /name-with-ai     generate a session name via the model
  *   - zed              /z                open Zed on cwd
  *   - prefer-tools     hook              block legacy tools (use trash/rg/fd/uv)
+ *   - keep-model       hook              preserve the active model across /new
  *   - model-thinking   hook              manage per-model thinking levels in an extension-owned sidecar
  *   - kilo             provider          access Kilo Gateway models
  *   - provider-balance footer            show Kilo credits or Codex quota in the footer
@@ -17,6 +18,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import copyTrajectory from "./copy-trajectory.ts";
 import copyWithModel from "./copy-with-model.ts";
 import kilo from "./kilo.ts";
+import keepModelOnNew from "./keep-model-on-new.ts";
 import modelThinking from "./model-thinking.ts";
 import providerBalance from "./provider-balance.ts";
 import tps from "./tps.ts";
@@ -30,6 +32,9 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   nameWithAi(pi);
   zed(pi);
   preferTools(pi);
+  // Register this before model-thinking so /new restores the model first and
+  // model-thinking then sees and configures the final active model.
+  keepModelOnNew(pi);
   modelThinking(pi);
   providerBalance(pi);
   kilo(pi);

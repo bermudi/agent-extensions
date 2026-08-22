@@ -1,7 +1,7 @@
 # bermudis-pi-goodies
 
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
-extensions. One entry point, nine independent features.
+extensions. One entry point, ten independent features.
 
 | Feature            | Command / hook                | What it does                                                                                                                                    |
 | ------------------ | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -10,6 +10,7 @@ extensions. One entry point, nine independent features.
 | `name-with-ai`     | `/name-with-ai [name]`        | Generate a short session name from the first user message (or set one manually).                                                                |
 | `zed`              | `/z`                          | Open Zed editor on the current working directory.                                                                                               |
 | `prefer-tools`     | hook (no command)             | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`.                                    |
+| `keep-model-on-new` | hook (no command)            | Keep the active model when `/new` starts a fresh session instead of reverting to pi's saved default model.                                    |
 | `model-thinking`   | hook + `/levels`              | Per-model thinking levels stored in an extension sidecar (pi's /scoped-models rewrites `enabledModels` bare, wiping `:level` suffixes); `/levels` edits them, hooks apply them whenever a model becomes active. |
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
 | `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
@@ -49,8 +50,8 @@ model's level through the ladder it actually supports plus `inherit`
 applies to the active model immediately, Esc cancels.
 
 Hooks apply the stored level whenever a model becomes active: full-picker
-selection, Ctrl+P cycling, startup, and `/new` (which pi starts on the
-saved default model). A native scoped level for the session — via
+selection, Ctrl+P cycling, startup, and `/new` (where this package carries
+the previous session's active model forward). A native scoped level for the session — via
 `--models "x:high"` or a hand-suffixed enabledModels entry — always wins;
 the sidecar only fills in where pi itself has no level. Explicit
 `--thinking` or `--model ...:<level>` still
