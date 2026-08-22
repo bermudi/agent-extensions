@@ -1,0 +1,29 @@
+{
+  "name": "council",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "prettier": "3.9.6",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.2",
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "typebox": "1.3.11",
+    "zod": "4.4.3"
+  },
+  "description": "Read-only multi-model design council for Pi",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "format": "prettier --write \"*.ts\""
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

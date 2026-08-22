@@ -2,6 +2,7 @@ node_modules/
 bun.lock
 !pi-packages/critique/bun.lock
 !pi-packages/bermudis-pi-goodies/bun.lock
+!pi-packages/council/bun.lock
 *.bundle.mjs
 *.bundle.ts
 .agents/
