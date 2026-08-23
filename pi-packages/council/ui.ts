@@ -99,7 +99,7 @@ export class ModelMultiSelect implements Component {
   private readonly rows: MultiSelectRow[];
 
   constructor(
-    private readonly models: string[],
+    models: string[],
     private readonly onChange: () => void,
     private readonly done: (result: string[] | null) => void,
     private readonly visibleRows = 12,

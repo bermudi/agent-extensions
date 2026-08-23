@@ -61,7 +61,8 @@ function makeUserChair(
             [...choices, "Inspect vote reasoning"],
           );
           signal.throwIfAborted();
-          if (!answer) throw new Error("User canceled council chairing");
+          if (!answer)
+            throw new CouncilCanceled("User canceled council chairing");
           if (answer !== "Inspect vote reasoning") {
             selected = answer;
             break;
@@ -100,6 +101,33 @@ function modelId(scoped: ScopedModel): string {
   return `${scoped.model.provider}/${scoped.model.id}`;
 }
 
+/** Distinguishes an intentional user cancellation from a real failure. */
+class CouncilCanceled extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CouncilCanceled";
+  }
+}
+
+/** Records a terminal event without letting a logging failure mask the
+ *  outcome that triggered it. Returns a human-readable note when the
+ *  event could not be persisted. */
+async function recordOutcome(
+  output: CouncilOutput | undefined,
+  type: string,
+  data: unknown,
+): Promise<string> {
+  if (!output) return "";
+  try {
+    await output.record(type, data);
+    return "";
+  } catch (logError) {
+    const message =
+      logError instanceof Error ? logError.message : String(logError);
+    return ` (failed to record ${type} in ${output.logPath}: ${message})`;
+  }
+}
+
 async function pickConfig(
   ctx: ExtensionCommandContext,
 ): Promise<CouncilConfig> {
@@ -115,14 +143,14 @@ async function pickConfig(
   }
 
   const picked = await pickCouncilMembers(ctx, available.map(modelId));
-  if (!picked) throw new Error("Council setup canceled");
+  if (!picked) throw new CouncilCanceled("Council setup canceled");
   const selected = new Set(picked);
 
   const chairMode = await ctx.ui.select("Who chairs the council?", [
     "A model",
     "I will chair",
   ]);
-  if (!chairMode) throw new Error("Council setup canceled");
+  if (!chairMode) throw new CouncilCanceled("Council setup canceled");
 
   const members = [...selected].map((id) => {
     const entry = available.find((candidate) => modelId(candidate) === id);
@@ -143,7 +171,7 @@ async function pickConfig(
       "Which model should act as secretary?",
       [...selected],
     );
-    if (!secretaryId) throw new Error("Council setup canceled");
+    if (!secretaryId) throw new CouncilCanceled("Council setup canceled");
     return {
       version: 1,
       members,
@@ -158,7 +186,7 @@ async function pickConfig(
     "Which model should chair?",
     available.map(modelId),
   );
-  if (!chairId) throw new Error("Council setup canceled");
+  if (!chairId) throw new CouncilCanceled("Council setup canceled");
   return {
     version: 1,
     members,
@@ -212,23 +240,26 @@ export default function councilExtension(pi: ExtensionAPI): void {
       if (activeAbort) {
         throw new Error("A design council is already running");
       }
-      const config =
-        (await loadConfig(ctx.cwd, ctx.isProjectTrusted())) ??
-        (await pickConfig(ctx));
-      assertModelsAvailable(config, ctx.modelRegistry);
-      const confirmed = await ctx.ui.confirm(
-        "Start design council?",
-        `${config.members.length} models will inspect the repository and deliberate. This can be expensive.\n\nProblem: ${
-          focus || conversation.slice(0, 500)
-        }`,
-      );
-      if (!confirmed) return;
-
+      // Reserve the run slot before any awaited setup step so a second
+      // concurrent invocation cannot slip past the guard above.
       const abort = new AbortController();
       activeAbort = abort;
       let output: CouncilOutput | undefined;
       let dashboard: CouncilDashboard | undefined;
       try {
+        const config =
+          (await loadConfig(ctx.cwd, ctx.isProjectTrusted())) ??
+          (await pickConfig(ctx));
+        assertModelsAvailable(config, ctx.modelRegistry);
+        abort.signal.throwIfAborted();
+        const confirmed = await ctx.ui.confirm(
+          "Start design council?",
+          `${config.members.length} models will inspect the repository and deliberate. This can be expensive.\n\nProblem: ${
+            focus || conversation.slice(0, 500)
+          }`,
+        );
+        if (!confirmed || abort.signal.aborted) return;
+
         output = await CouncilOutput.create(
           ctx.cwd,
           focus || "current-problem",
@@ -277,15 +308,29 @@ export default function councilExtension(pi: ExtensionAPI): void {
         });
         ctx.ui.notify(`Council design: ${output.designPath}`, "info");
       } catch (error) {
-        if (output) {
-          await output.record("run_failed", {
-            error: error instanceof Error ? error.message : String(error),
-          });
+        if (error instanceof CouncilCanceled || abort.signal.aborted) {
+          // Intentional cancellation (shortcut, declined prompt), not a
+          // system failure. Record it distinctly and report it as such.
+          const logNote = await recordOutcome(output, "run_canceled", {});
+          ctx.ui.notify(
+            `Design council canceled${logNote}`,
+            logNote ? "warning" : "info",
+          );
+          return;
         }
+        const description =
+          error instanceof Error ? error.message : String(error);
+        // Log the failure defensively: if logging itself rejects (e.g. the
+        // same filesystem problem that failed the run), keep the original
+        // error as the primary outcome and surface the logging error too.
+        const logNote = await recordOutcome(output, "run_failed", {
+          error: description,
+        });
         ctx.ui.notify(
           [
-            `Council failed: ${error instanceof Error ? error.message : String(error)}.`,
+            `Council failed: ${description}.`,
             output ? `Log: ${output.logPath}` : "",
+            logNote,
           ]
             .filter(Boolean)
             .join(" "),
