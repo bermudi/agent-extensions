@@ -91,6 +91,8 @@ type Entry = {
   };
   isError?: boolean;
   hasImage?: boolean;
+  /** Content array of the last result seen; detects real mutations vs re-renders. */
+  contentRef?: unknown;
 };
 
 const BURST_WINDOW_MS = 1500;
@@ -178,10 +180,14 @@ function revalidateBurstsAround(changedId: string) {
   if (!changed) return;
   // Grouping is decided purely by adjacency, so a result arriving can only
   // affect the runs touching the changed entry (its image flag may split a
-  // burst; pending/error flags change the leader's box). Rerender those runs —
+  // burst; pending/error flags surface on the leader). Rerender those runs —
   // bounded, unlike scanning the whole history per result.
+  //
+  // The changed row itself is NOT invalidated here: pi is already re-rendering
+  // it (we are inside its render slot), and invalidating it would synchronously
+  // re-enter this code path via updateDisplay -> renderResult -> invalidate.
   const idx = changed.index;
-  const ranges: Array<[number, number]> = [[idx, idx]];
+  const ranges: Array<[number, number]> = [];
   if (idx > 0) ranges.push(runAround(idx - 1));
   if (idx + 1 < entries.length) ranges.push(runAround(idx + 1));
   const seen = new Set<number>();
@@ -193,6 +199,23 @@ function revalidateBurstsAround(changedId: string) {
       if (fn) fn();
     }
   }
+}
+
+/**
+ * Record a tool result. pi calls renderResult on EVERY rerender of a row
+ * (expand toggles, neighbor invalidations, resizes), not only when a result
+ * arrives — its wrapper object is fresh each time but the content array ref is
+ * stable. Only a genuinely new result mutates state and triggers revalidation;
+ * treating plain re-renders as mutations caused infinite render churn
+ * (invalidate -> updateDisplay -> renderResult -> invalidate -> ...).
+ */
+function recordResult(entry: Entry | undefined, result: any, ctx: any) {
+  if (!entry || entry.contentRef === result?.content) return;
+  entry.contentRef = result?.content;
+  entry.result = result;
+  entry.isError = !!ctx.isError || !!result.isError;
+  entry.hasImage = hasImageContent(result);
+  if (!replaying) revalidateBurstsAround(entry.toolCallId);
 }
 
 function bgFor(
@@ -328,7 +351,10 @@ export default function cleanTui(pi: ExtensionAPI): void {
         : !!entry.isError;
 
       if (isGrouped && !isLeader) {
-        // follower hidden — but if it later becomes an image, revalidation will make it visible
+        // Refresh the leader's header/count. Single hop: a leader's renderCall
+        // never invalidates anything, so this cannot loop.
+        const lead = invalidateById.get(burst.entries[0].toolCallId);
+        if (lead) lead();
         return new Container();
       }
 
@@ -380,15 +406,8 @@ export default function cleanTui(pi: ExtensionAPI): void {
       }
       return makeBox(theme, pending, isError, line);
     },
-    renderResult(result: any, { expanded }: any, theme: any, ctx: any) {
-      const entry = entryById.get(ctx.toolCallId);
-      if (entry) {
-        entry.result = result;
-        entry.isError = !!ctx.isError || !!result.isError;
-        entry.hasImage = hasImageContent(result);
-      }
-      // Revalidate to split image bursts or update grouped details
-      revalidateBurstsAround(ctx.toolCallId);
+    renderResult(result: any, _opts: any, _theme: any, ctx: any) {
+      recordResult(entryById.get(ctx.toolCallId), result, ctx);
       // All visual work is done in renderCall (unified box); keep result slot empty
       // Images are rendered by Pi's ToolExecutionComponent image layer even when we return empty here
       return new Container();
@@ -423,7 +442,13 @@ export default function cleanTui(pi: ExtensionAPI): void {
         ? burst.entries.some((e) => e.isError)
         : !!entry.isError;
 
-      if (isGrouped && !isLeader) return new Container();
+      if (isGrouped && !isLeader) {
+        // Refresh the leader's header/count. Single hop: a leader's renderCall
+        // never invalidates anything, so this cannot loop.
+        const lead = invalidateById.get(burst.entries[0].toolCallId);
+        if (lead) lead();
+        return new Container();
+      }
 
       if (isGrouped && isLeader) {
         const count = burst.entries.length;
@@ -469,12 +494,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
       return makeBox(theme, pending, isError, line);
     },
     renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      const entry = entryById.get(ctx.toolCallId);
-      if (entry) {
-        entry.result = result;
-        entry.isError = !!ctx.isError || !!result.isError;
-      }
-      revalidateBurstsAround(ctx.toolCallId);
+      recordResult(entryById.get(ctx.toolCallId), result, ctx);
       return new Container();
     },
   });
@@ -506,7 +526,13 @@ export default function cleanTui(pi: ExtensionAPI): void {
       const isError = isGrouped
         ? burst.entries.some((e) => e.isError)
         : !!entry.isError;
-      if (isGrouped && !isLeader) return new Container();
+      if (isGrouped && !isLeader) {
+        // Refresh the leader's header/count. Single hop: a leader's renderCall
+        // never invalidates anything, so this cannot loop.
+        const lead = invalidateById.get(burst.entries[0].toolCallId);
+        if (lead) lead();
+        return new Container();
+      }
       if (isGrouped && isLeader) {
         let header = `${theme.fg("toolTitle", theme.bold("write"))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
         header += `\n${burst.entries.map((e) => formatWriteBullet(e, theme)).join("\n")}`;
@@ -536,12 +562,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
       return makeBox(theme, pending, isError, line);
     },
     renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      const entry = entryById.get(ctx.toolCallId);
-      if (entry) {
-        entry.result = result;
-        entry.isError = !!ctx.isError || !!result.isError;
-      }
-      revalidateBurstsAround(ctx.toolCallId);
+      recordResult(entryById.get(ctx.toolCallId), result, ctx);
       return new Container();
     },
   });
@@ -573,7 +594,13 @@ export default function cleanTui(pi: ExtensionAPI): void {
       const isError = isGrouped
         ? burst.entries.some((e) => e.isError)
         : !!entry.isError;
-      if (isGrouped && !isLeader) return new Container();
+      if (isGrouped && !isLeader) {
+        // Refresh the leader's header/count. Single hop: a leader's renderCall
+        // never invalidates anything, so this cannot loop.
+        const lead = invalidateById.get(burst.entries[0].toolCallId);
+        if (lead) lead();
+        return new Container();
+      }
       if (isGrouped && isLeader) {
         let header = `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
         header += `\n${burst.entries.map((e) => formatEditBullet(e, theme)).join("\n")}`;
@@ -598,12 +625,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
       return makeBox(theme, pending, isError, line);
     },
     renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      const entry = entryById.get(ctx.toolCallId);
-      if (entry) {
-        entry.result = result;
-        entry.isError = !!ctx.isError || !!result.isError;
-      }
-      revalidateBurstsAround(ctx.toolCallId);
+      recordResult(entryById.get(ctx.toolCallId), result, ctx);
       return new Container();
     },
   });
@@ -635,7 +657,13 @@ export default function cleanTui(pi: ExtensionAPI): void {
       const isError = isGrouped
         ? burst.entries.some((e) => e.isError)
         : !!entry.isError;
-      if (isGrouped && !isLeader) return new Container();
+      if (isGrouped && !isLeader) {
+        // Refresh the leader's header/count. Single hop: a leader's renderCall
+        // never invalidates anything, so this cannot loop.
+        const lead = invalidateById.get(burst.entries[0].toolCallId);
+        if (lead) lead();
+        return new Container();
+      }
       if (isGrouped && isLeader) {
         let header = `${theme.fg("toolTitle", theme.bold("find"))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
         header += `\n${burst.entries.map((e) => formatFindBullet(e, theme)).join("\n")}`;
@@ -670,12 +698,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
       return makeBox(theme, pending, isError, line);
     },
     renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      const entry = entryById.get(ctx.toolCallId);
-      if (entry) {
-        entry.result = result;
-        entry.isError = !!ctx.isError || !!result.isError;
-      }
-      revalidateBurstsAround(ctx.toolCallId);
+      recordResult(entryById.get(ctx.toolCallId), result, ctx);
       return new Container();
     },
   });
@@ -707,7 +730,13 @@ export default function cleanTui(pi: ExtensionAPI): void {
       const isError = isGrouped
         ? burst.entries.some((e) => e.isError)
         : !!entry.isError;
-      if (isGrouped && !isLeader) return new Container();
+      if (isGrouped && !isLeader) {
+        // Refresh the leader's header/count. Single hop: a leader's renderCall
+        // never invalidates anything, so this cannot loop.
+        const lead = invalidateById.get(burst.entries[0].toolCallId);
+        if (lead) lead();
+        return new Container();
+      }
       if (isGrouped && isLeader) {
         let header = `${theme.fg("toolTitle", theme.bold("grep"))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
         header += `\n${burst.entries.map((e) => formatGrepBullet(e, theme)).join("\n")}`;
@@ -743,12 +772,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
       return makeBox(theme, pending, isError, line);
     },
     renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      const entry = entryById.get(ctx.toolCallId);
-      if (entry) {
-        entry.result = result;
-        entry.isError = !!ctx.isError || !!result.isError;
-      }
-      revalidateBurstsAround(ctx.toolCallId);
+      recordResult(entryById.get(ctx.toolCallId), result, ctx);
       return new Container();
     },
   });
@@ -780,7 +804,13 @@ export default function cleanTui(pi: ExtensionAPI): void {
       const isError = isGrouped
         ? burst.entries.some((e) => e.isError)
         : !!entry.isError;
-      if (isGrouped && !isLeader) return new Container();
+      if (isGrouped && !isLeader) {
+        // Refresh the leader's header/count. Single hop: a leader's renderCall
+        // never invalidates anything, so this cannot loop.
+        const lead = invalidateById.get(burst.entries[0].toolCallId);
+        if (lead) lead();
+        return new Container();
+      }
       if (isGrouped && isLeader) {
         let header = `${theme.fg("toolTitle", theme.bold("ls"))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
         header += `\n${burst.entries.map((e) => formatLsBullet(e, theme)).join("\n")}`;
@@ -815,12 +845,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
       return makeBox(theme, pending, isError, line);
     },
     renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      const entry = entryById.get(ctx.toolCallId);
-      if (entry) {
-        entry.result = result;
-        entry.isError = !!ctx.isError || !!result.isError;
-      }
-      revalidateBurstsAround(ctx.toolCallId);
+      recordResult(entryById.get(ctx.toolCallId), result, ctx);
       return new Container();
     },
   });

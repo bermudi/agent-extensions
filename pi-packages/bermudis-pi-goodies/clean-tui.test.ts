@@ -112,3 +112,65 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(r2)).not.toContain("×2");
   });
 });
+
+describe("clean-tui render reentrancy", () => {
+  // Mimics pi's ToolExecutionComponent: ctx.invalidate() synchronously
+  // re-runs updateDisplay(), which calls renderCall always and renderResult
+  // when a result is present. Regression guard for infinite render churn.
+  class FakeRow {
+    args: any;
+    result: any;
+    updates = 0;
+    constructor(
+      public def: ToolDef,
+      public id: string,
+    ) {}
+    ctx() {
+      return {
+        toolCallId: this.id,
+        expanded: false,
+        isError: !!this.result?.isError,
+        invalidate: () => this.update(),
+      };
+    }
+    update() {
+      if (++this.updates > 10_000)
+        throw new Error("render churn did not settle");
+      try {
+        this.def.renderCall(this.args, theme, this.ctx());
+      } catch {
+        /* pi falls back to default rendering on renderer errors */
+      }
+      if (this.result) {
+        try {
+          this.def.renderResult(
+            { content: this.result.content },
+            { expanded: false },
+            theme,
+            this.ctx(),
+          );
+        } catch {
+          /* ditto */
+        }
+      }
+    }
+  }
+
+  test("invalidation between rows settles instead of looping forever", () => {
+    const { emit, tools } = loadExtension();
+    emit("session_start", { reason: "startup" });
+    emit("turn_start", {});
+    const read = tools.get("read")!;
+    const rows = ["a", "b", "c"].map((id) => new FakeRow(read, id));
+    for (const r of rows) {
+      r.args = { path: `/tmp/${r.id}.ts` };
+      r.update();
+    }
+    for (const r of rows) {
+      r.result = { content: [{ type: "text", text: "ok" }] };
+      r.update();
+    }
+    const total = rows.reduce((n, r) => n + r.updates, 0);
+    expect(total).toBeLessThan(100);
+  });
+});
