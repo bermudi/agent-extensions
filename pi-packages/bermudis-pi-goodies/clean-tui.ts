@@ -83,6 +83,8 @@ type Entry = {
   args: any;
   timestamp: number;
   turnId: number;
+  /** Position in `entries`; stable because entries are append-only. */
+  index: number;
   result?: {
     content: Array<{ type: string; text?: string; data?: string }>;
     details?: any;
@@ -93,6 +95,12 @@ type Entry = {
 
 const BURST_WINDOW_MS = 1500;
 let turnId = 0;
+// True while pi is replaying persisted history (startup with -c/--continue,
+// /resume, /fork). During replay there are no turn_start events and wall-clock
+// timestamps are meaningless (every upsert lands within the burst window), so
+// each replayed entry gets a unique replayTurnId to force solo rendering.
+let replaying = true;
+let replayTurnId = -1;
 const entries: Entry[] = [];
 const entryById = new Map<string, Entry>();
 const invalidateById = new Map<string, () => void>();
@@ -105,7 +113,14 @@ function upsertEntry(
 ): Entry {
   let e = entryById.get(toolCallId);
   if (!e) {
-    e = { toolCallId, toolName, args, timestamp: Date.now(), turnId };
+    e = {
+      toolCallId,
+      toolName,
+      args,
+      timestamp: Date.now(),
+      turnId: replaying ? replayTurnId-- : turnId,
+      index: entries.length,
+    };
     entries.push(e);
     entryById.set(toolCallId, e);
   } else {
@@ -128,8 +143,9 @@ function shouldGroup(a: Entry, b: Entry): boolean {
 function getBurstForId(
   toolCallId: string,
 ): { entries: Entry[]; index: number } | null {
-  const idx = entries.findIndex((e) => e.toolCallId === toolCallId);
-  if (idx === -1) return null;
+  const entry = entryById.get(toolCallId);
+  if (!entry) return null;
+  const idx = entry.index;
   let start = idx;
   while (start > 0 && shouldGroup(entries[start - 1], entries[start])) start--;
   let end = idx;
@@ -143,30 +159,40 @@ function getBurstForId(
   return { entries: slice, index: idx - start };
 }
 
+// Maximal groupable run containing entries[i] (pairwise adjacency, same as
+// getBurstForId).
+function runAround(i: number): [number, number] {
+  let start = i;
+  while (start > 0 && shouldGroup(entries[start - 1], entries[start])) start--;
+  let end = i;
+  while (
+    end + 1 < entries.length &&
+    shouldGroup(entries[end], entries[end + 1])
+  )
+    end++;
+  return [start, end];
+}
+
 function revalidateBurstsAround(changedId: string) {
-  // Find all bursts that could be affected (within window)
   const changed = entryById.get(changedId);
   if (!changed) return;
-  // Collect leaders of bursts that include or neighbor the changed entry
-  const toInvalidate = new Set<string>();
-  for (const e of entries) {
-    const b = getBurstForId(e.toolCallId);
-    if (!b) continue;
-    if (
-      b.entries.some((x) => x.toolCallId === changedId) ||
-      Math.abs(e.timestamp - changed.timestamp) < BURST_WINDOW_MS * 2
-    ) {
-      const leader = b.entries[0];
-      if (leader) toInvalidate.add(leader.toolCallId);
+  // Grouping is decided purely by adjacency, so a result arriving can only
+  // affect the runs touching the changed entry (its image flag may split a
+  // burst; pending/error flags change the leader's box). Rerender those runs —
+  // bounded, unlike scanning the whole history per result.
+  const idx = changed.index;
+  const ranges: Array<[number, number]> = [[idx, idx]];
+  if (idx > 0) ranges.push(runAround(idx - 1));
+  if (idx + 1 < entries.length) ranges.push(runAround(idx + 1));
+  const seen = new Set<number>();
+  for (const [s, e] of ranges) {
+    for (let i = s; i <= e; i++) {
+      if (seen.has(i)) continue;
+      seen.add(i);
+      const fn = invalidateById.get(entries[i].toolCallId);
+      if (fn) fn();
     }
   }
-  for (const lid of toInvalidate) {
-    const fn = invalidateById.get(lid);
-    if (fn) fn();
-  }
-  // Also invalidate the changed follower itself if it's hidden (so it can become visible after split)
-  const selfFn = invalidateById.get(changedId);
-  if (selfFn) selfFn();
 }
 
 function bgFor(
@@ -262,9 +288,12 @@ export default function cleanTui(pi: ExtensionAPI): void {
 
   pi.on("turn_start", () => {
     turnId++;
+    // First live turn after startup/resume: tool calls from here on may group.
+    replaying = false;
   });
   pi.on("session_start", () => {
     turnId++;
+    replaying = true;
     entries.length = 0;
     entryById.clear();
     invalidateById.clear();
