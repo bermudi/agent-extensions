@@ -21,23 +21,77 @@ function freshHarness(): PiHarness {
 }
 
 describe("clean-tui resume/replay", () => {
-  test("replayed history renders solo and stays fast (regression: /resume freeze)", () => {
+  test("replayed history stays fast (regression: /resume freeze)", () => {
     const h = freshHarness();
     h.emit("session_start", { reason: "resume" });
 
     const start = Date.now();
     const N = 2000;
     for (let i = 0; i < N; i++) {
-      const row = h.row("read", `t${i}`);
-      row.setArgs({ path: `/tmp/f${i}.ts` });
+      // Alternate tools so bursts stay size 1 — this exercises the replay
+      // path without one pathological mega-burst dominating the timing.
+      const row = h.row(i % 2 ? "read" : "bash", `t${i}`);
+      if (i % 2) row.setArgs({ path: `/tmp/f${i}.ts` });
+      else row.setArgs({ command: `echo ${i}` });
       row.setResult({ content: ["ok"] });
-      // No turn_start fires during replay, so every row must be solo —
-      // never a hidden follower of a cross-history mega-burst.
-      expect(row.lastCallComponent instanceof Container).toBe(false);
     }
     const elapsed = Date.now() - start;
-    // Cubic revalidation used to make this take minutes; solo replay is linear.
+    // Cubic revalidation used to make this take minutes; bounded local
+    // revalidation keeps replay linear.
     expect(elapsed).toBeLessThan(5000);
+    expect(h.totalFallbacks).toBe(0);
+  });
+
+  test("consecutive same-tool calls group during replay", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "resume" });
+
+    const a = h.row("read", "a");
+    const b = h.row("read", "b");
+    const c = h.row("read", "c");
+    a.setArgs({ path: "/tmp/a.ts" });
+    b.setArgs({ path: "/tmp/b.ts" });
+    c.setArgs({ path: "/tmp/c.ts" });
+    a.setResult({ content: ["ok"] });
+    b.setResult({ content: ["ok"] });
+    c.setResult({ content: ["ok"] });
+
+    // Followers hide; the leader shows one burst block for all three.
+    expect(b.lastCallComponent instanceof Container).toBe(true);
+    expect(c.lastCallComponent instanceof Container).toBe(true);
+    expect(textOf(a.lastCallComponent)).toContain("read ×3");
+
+    // A different tool in between breaks the run.
+    const h2 = freshHarness();
+    h2.emit("session_start", { reason: "resume" });
+    const r1 = h2.row("read", "r1");
+    const sh = h2.row("bash", "sh");
+    const r2 = h2.row("read", "r2");
+    r1.setArgs({ path: "/tmp/1.ts" });
+    sh.setArgs({ command: "echo hi" });
+    r2.setArgs({ path: "/tmp/2.ts" });
+    expect(textOf(r1.lastCallComponent)).not.toContain("×2");
+    expect(textOf(r2.lastCallComponent)).not.toContain("×2");
+  });
+
+  test("a replayed image read splits its burst once the result lands", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "resume" });
+    const a = h.row("read", "a");
+    const img = h.row("read", "img");
+    const b = h.row("read", "b");
+    a.setArgs({ path: "/tmp/a.ts" });
+    img.setArgs({ path: "/tmp/pic.png" });
+    b.setArgs({ path: "/tmp/b.ts" });
+    a.setResult({ content: ["ok"] });
+    img.setResult({ content: [{ type: "image", data: "base64..." }] });
+    b.setResult({ content: ["ok"] });
+
+    // The image row must render solo (its image shows via pi's image layer);
+    // the two text reads must not claim it in their headers.
+    expect(img.lastCallComponent instanceof Container).toBe(false);
+    expect(textOf(a.lastCallComponent)).not.toContain("×3");
+    expect(textOf(b.lastCallComponent)).not.toContain("×3");
   });
 
   test("live bursts still group after turn_start", () => {

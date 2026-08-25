@@ -99,8 +99,9 @@ const BURST_WINDOW_MS = 1500;
 let turnId = 0;
 // True while pi is replaying persisted history (startup with -c/--continue,
 // /resume, /fork). During replay there are no turn_start events and wall-clock
-// timestamps are meaningless (every upsert lands within the burst window), so
-// each replayed entry gets a unique replayTurnId to force solo rendering.
+// timestamps are meaningless (every upsert lands "now"), so replayed entries
+// get negative turnIds: they group by adjacency + same tool instead of the
+// live same-turn + time-window rule (see shouldGroup).
 let replaying = true;
 let replayTurnId = -1;
 const entries: Entry[] = [];
@@ -133,12 +134,20 @@ function upsertEntry(
 }
 
 function shouldGroup(a: Entry, b: Entry): boolean {
-  if (a.turnId !== b.turnId) return false;
+  // Replay entries (negative turnId) have no meaningful turn or wall-clock
+  // timing — every replayed call lands "now". Group them purely by
+  // adjacency + same tool: consecutive same-tool calls in the replay stream
+  // were consecutive in the original transcript. Live entries keep the
+  // same-turn + time-window semantics.
+  const aReplay = a.turnId < 0;
+  const bReplay = b.turnId < 0;
+  if (aReplay !== bReplay) return false;
+  if (!aReplay) {
+    if (a.turnId !== b.turnId) return false;
+    if (Math.abs(b.timestamp - a.timestamp) > BURST_WINDOW_MS) return false;
+  }
   if (a.toolName !== b.toolName) return false;
   if (a.hasImage || b.hasImage) return false;
-  if (Math.abs(b.timestamp - a.timestamp) > BURST_WINDOW_MS) return false;
-  // Also don't group if either is an image path hint (e.g. .png) before result known?
-  // We keep pending image reads grouped optimistically; they'll split once hasImage is known.
   return true;
 }
 
@@ -215,7 +224,7 @@ function recordResult(entry: Entry | undefined, result: any, ctx: any) {
   entry.result = result;
   entry.isError = !!ctx.isError || !!result.isError;
   entry.hasImage = hasImageContent(result);
-  if (!replaying) revalidateBurstsAround(entry.toolCallId);
+  revalidateBurstsAround(entry.toolCallId);
 }
 
 // ── AI summary for massive bash commands (qwen3.7-flash via 1min proxy) ──
@@ -307,7 +316,7 @@ function makeBox(
   isError: boolean,
   text: string,
 ): Box {
-  const box = new Box(1, 1, bgFor(pending, isError, theme));
+  const box = new Box(1, 0, bgFor(pending, isError, theme));
   box.addChild(new Text(text, 0, 0));
   return box;
 }
