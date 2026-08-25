@@ -22,7 +22,9 @@ import {
   createWriteTool,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text } from "@earendil-works/pi-tui";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 type BuiltInTools = {
   read: ReturnType<typeof createReadTool>;
@@ -232,6 +234,23 @@ const SUMMARY_THRESHOLD_LINES = 3;
 const summaryCache = new Map<string, string>();
 const pendingSummaries = new Set<string>();
 let summaryEnabled = true;
+// Same convention as the other keys in ~/.pi/agent/ (read by models.json
+// "!cat" entries): one file per key, 0600. Env var wins when set.
+let summaryKeyFile = join(homedir(), ".pi", "agent", "ONEMIN_API_KEY");
+
+export function __setSummaryKeyFileForTesting(path: string): void {
+  summaryKeyFile = path;
+}
+
+function summaryApiKey(): string | undefined {
+  const fromEnv = process.env.ONEMIN_API_KEY?.trim();
+  if (fromEnv) return fromEnv;
+  try {
+    return readFileSync(summaryKeyFile, "utf-8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function __setSummaryEnabled(v: boolean): void {
   summaryEnabled = v;
@@ -250,8 +269,11 @@ function isSummarizable(cmd: string): boolean {
 }
 
 async function fetchSummary(cmd: string): Promise<string> {
-  const apiKey = process.env.ONEMINAI_API_KEY?.trim();
-  if (!apiKey) throw new Error("ONEMINAI_API_KEY not set in pi's environment");
+  const apiKey = summaryApiKey();
+  if (!apiKey)
+    throw new Error(
+      "ONEMIN_API_KEY not in environment or ~/.pi/agent/ONEMIN_API_KEY",
+    );
   const prompt =
     "Summarize this shell command in 5-8 words, plain English, no quotes, no formatting. " +
     'Examples: "cat >> file << \'EOF\' with 20 lines of log" -> "Appends reboot log to migration file". ' +

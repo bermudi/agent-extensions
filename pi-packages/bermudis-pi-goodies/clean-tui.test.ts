@@ -3,8 +3,11 @@ import { Box, Container } from "@earendil-works/pi-tui";
 import cleanTui, {
   __clearSummaryCache,
   __setSummaryEnabled,
+  __setSummaryKeyFileForTesting,
 } from "./clean-tui";
 import { PiHarness } from "pi-harness";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 function textOf(component: unknown): string {
   // Box children are Text components holding a raw `text` string
@@ -178,8 +181,8 @@ describe("clean-tui AI summary", () => {
 
   test("long command triggers AI summary and swaps display", async () => {
     const origFetch = globalThis.fetch;
-    const origKey = process.env.ONEMINAI_API_KEY;
-    process.env.ONEMINAI_API_KEY = "test-key";
+    const origKey = process.env.ONEMIN_API_KEY;
+    process.env.ONEMIN_API_KEY = "test-key";
     let seenAuth: string | undefined;
     globalThis.fetch = async (_url: any, init: any) => {
       seenAuth = init?.headers?.Authorization;
@@ -211,8 +214,8 @@ describe("clean-tui AI summary", () => {
       expect(seenAuth).toBe("Bearer test-key");
     } finally {
       globalThis.fetch = origFetch;
-      if (origKey === undefined) delete process.env.ONEMINAI_API_KEY;
-      else process.env.ONEMINAI_API_KEY = origKey;
+      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
+      else process.env.ONEMIN_API_KEY = origKey;
       __setSummaryEnabled(false);
       __clearSummaryCache();
     }
@@ -220,9 +223,9 @@ describe("clean-tui AI summary", () => {
 
   test("missing API key logs once and keeps the heuristic hint", async () => {
     const origFetch = globalThis.fetch;
-    const origKey = process.env.ONEMINAI_API_KEY;
+    const origKey = process.env.ONEMIN_API_KEY;
     const origErr = console.error;
-    delete process.env.ONEMINAI_API_KEY;
+    delete process.env.ONEMIN_API_KEY;
     let fetchCalled = 0;
     globalThis.fetch = async () => {
       fetchCalled++;
@@ -230,6 +233,8 @@ describe("clean-tui AI summary", () => {
     };
     const logged: string[] = [];
     console.error = (...args: any[]) => logged.push(args.join(" "));
+    // Point at a file that does not exist so the real key file is not read.
+    __setSummaryKeyFileForTesting("/nonexistent/ONEMIN_API_KEY");
     try {
       __clearSummaryCache();
       __setSummaryEnabled(true);
@@ -242,11 +247,14 @@ describe("clean-tui AI summary", () => {
       await new Promise((r) => setTimeout(r, 20));
       expect(fetchCalled).toBe(0); // no request without a key
       expect(textOf(row.lastCallComponent)).toContain("(+3 lines)"); // hint stays
-      expect(logged.some((l) => l.includes("ONEMINAI_API_KEY"))).toBe(true);
+      expect(logged.some((l) => l.includes("ONEMIN_API_KEY"))).toBe(true);
     } finally {
       globalThis.fetch = origFetch;
       console.error = origErr;
-      if (origKey !== undefined) process.env.ONEMINAI_API_KEY = origKey;
+      if (origKey !== undefined) process.env.ONEMIN_API_KEY = origKey;
+      __setSummaryKeyFileForTesting(
+        join(homedir(), ".pi", "agent", "ONEMIN_API_KEY"),
+      );
       __setSummaryEnabled(false);
       __clearSummaryCache();
     }
