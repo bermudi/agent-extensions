@@ -9,17 +9,24 @@
  *   - zed              /z                open Zed on cwd
  *   - prefer-tools     hook              block legacy tools (use trash/rg/fd/uv)
  *   - keep-model       hook              preserve the active model across /new
- *   - model-thinking   hook              manage per-model thinking levels in an extension-owned sidecar
+ *   - clean-tui        tool overrides    collapse built-in tool output; keep a one-line call header, hide results/diffs until expanded
  *   - kilo             provider          access Kilo Gateway models
  *   - provider-balance footer            show Kilo credits or Codex quota in the footer
  *   - tps              hook              notify tokens/sec and usage at each agent turn end
+ *
+ * Per-model thinking levels were previously provided here by a `model-thinking`
+ * module with a `/levels` command and an extension-owned sidecar. Pi 0.84.3
+ * added native per-model thinking-level overrides (settings.json
+ * `modelThinkingLevels`, edited via `/settings` → "Default thinking level per
+ * model") and made in-session model/thinking changes ephemeral by default, so
+ * that module is retired.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import copyTrajectory from "./copy-trajectory.ts";
 import copyWithModel from "./copy-with-model.ts";
 import kilo from "./kilo.ts";
 import keepModelOnNew from "./keep-model-on-new.ts";
-import modelThinking from "./model-thinking.ts";
+import cleanTui from "./clean-tui.ts";
 import providerBalance from "./provider-balance.ts";
 import tps from "./tps.ts";
 import nameWithAi from "./name-with-ai.ts";
@@ -32,10 +39,8 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   nameWithAi(pi);
   zed(pi);
   preferTools(pi);
-  // Register this before model-thinking so /new restores the model first and
-  // model-thinking then sees and configures the final active model.
   keepModelOnNew(pi);
-  modelThinking(pi);
+  cleanTui(pi);
   providerBalance(pi);
   kilo(pi);
   tps(pi);

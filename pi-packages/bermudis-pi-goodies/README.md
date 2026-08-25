@@ -11,7 +11,7 @@ extensions. One entry point, ten independent features.
 | `zed`              | `/z`                          | Open Zed editor on the current working directory.                                                                                               |
 | `prefer-tools`     | hook (no command)             | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`.                                    |
 | `keep-model-on-new` | hook (no command)            | Keep the active model when `/new` starts a fresh session instead of reverting to pi's saved default model.                                    |
-| `model-thinking`   | hook + `/levels`              | Per-model thinking levels stored in an extension sidecar (pi's /scoped-models rewrites `enabledModels` bare, wiping `:level` suffixes); `/levels` edits them, hooks apply them whenever a model becomes active. |
+| `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: keeps a one-line call header, hides results/diffs until you expand a row with ctrl+e or click. |
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
 | `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 | `tps`              | hook (no command)             | Notify tokens/sec and in/out/cache token usage at the end of each agent turn.                                                                   |
@@ -21,50 +21,33 @@ extensions. One entry point, ten independent features.
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.6.1
+pi install npm:bermudis-pi-goodies@0.7.0
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
 feature is independent — disabling one is a one-line edit in `index.ts`.
 Kilo's provider and its balance footer are bundled here.
 
-## Model selection and thinking
+## Per-model thinking levels (retired in favor of Pi 0.84.3)
 
-Pi's native scoped-models config would put per-model thinking levels in
-`enabledModels` entries like `"zai/glm-5.3:high"`, but the `/scoped-models`
-screen (which maintains that list) rewrites it with bare model ids on every
-save, destroying any `:level` suffix. So this package stores levels in its
-own sidecar file:
+This package previously shipped a `model-thinking` module with a `/levels`
+command and an extension-owned sidecar at
+`~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json`. It existed
+because Pi's `/scoped-models` screen rewrote `enabledModels` with bare model
+ids (wiping any `:level` suffix) and because every `setThinkingLevel()` call
+persisted as the global default.
 
-```
-~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json
-```
+Pi [0.84.3](https://github.com/earendil-works/pi/releases/tag/v0.84.3) fixed
+both: in-session model and thinking changes are now ephemeral by default
+(persist only via `/settings` or Ctrl+S, [#5263](https://github.com/earendil-works/pi/issues/5263)),
+and Pi added a native per-model thinking-level override keyed by
+`provider/modelId`, stored in `settings.json` `modelThinkingLevels` and
+edited via `/settings` → "Default thinking level per model". That is exactly
+what `model-thinking` provided, so the module is retired.
 
-The split of ownership is clean: `/scoped-models` owns which models are
-enabled and their Ctrl+P cycle order; `/levels` owns the per-model thinking
-level and can never be wiped by the other screen.
-
-Use `/levels` to edit: ↑↓ moves between scoped models, ←→ cycles each
-model's level through the ladder it actually supports plus `inherit`
-(which leaves pi's global default in charge), Enter saves atomically and
-applies to the active model immediately, Esc cancels.
-
-Hooks apply the stored level whenever a model becomes active: full-picker
-selection, Ctrl+P cycling, startup, and `/new` (where this package carries
-the previous session's active model forward). A native scoped level for the session — via
-`--models "x:high"` or a hand-suffixed enabledModels entry — always wins;
-the sidecar only fills in where pi itself has no level. Explicit
-`--thinking` or `--model ...:<level>` still
-wins for that launched session — a model whose registered id genuinely ends
-in `:<level>` is indistinguishable from that shorthand without the registry,
-so it opts out of its stored level for that startup; switch or cycle to
-re-apply. Resumed and forked sessions keep the level restored by pi.
-
-One gap is inherent to Pi: it emits no `model_select` when you pick the
-model that is already active, so re-selecting it in the full picker leaves
-a manual thinking level in place — switch models (or cycle) to snap back.
-Saving the `/scoped-models` screen in pi 0.84.2 writes bare model ids, which
-is now harmless: bare ids are exactly what this design expects.
+If you had levels in the old sidecar
+(`~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json`), re-enter them
+via `/settings` → "Default thinking level per model".
 
 ## Provider and balance details
 
