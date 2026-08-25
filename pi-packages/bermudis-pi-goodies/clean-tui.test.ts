@@ -94,10 +94,32 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(b.lastCallComponent)).not.toContain("×3");
   });
 
-  test("live bursts still group after turn_start", () => {
+  test("sequential calls across model round-trips still group (turn_start per round)", () => {
+    // Regression: pi fires turn_start per model round-trip, not per user
+    // message. An agent run with 3 sequential reads fires turn_start 3 times;
+    // grouping keyed on turn boundaries never grouped anything live.
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
-    h.emit("turn_start");
+    h.emit("agent_start");
+
+    const rows = ["a", "b", "c"].map((id) => {
+      h.emit("turn_start"); // each tool call is its own model round-trip
+      const row = h.row("read", id);
+      row.setArgs({ path: `/tmp/${id}.ts` });
+      row.setResult({ content: ["ok"] });
+      h.emit("turn_end");
+      return row;
+    });
+
+    expect(rows[1].lastCallComponent instanceof Container).toBe(true);
+    expect(rows[2].lastCallComponent instanceof Container).toBe(true);
+    expect(textOf(rows[0].lastCallComponent)).toContain("read ×3");
+  });
+
+  test("live bursts group within one agent run", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
 
     const a = h.row("read", "a");
     const b = h.row("read", "b");
@@ -117,8 +139,8 @@ describe("clean-tui resume/replay", () => {
     c.setArgs({ command: "echo hi" });
     expect(textOf(c.lastCallComponent)).not.toContain("×2");
 
-    // A new turn starts a fresh burst.
-    h.emit("turn_start");
+    // A new agent run starts a fresh burst.
+    h.emit("agent_start");
     const d = h.row("read", "d");
     d.setArgs({ path: "/tmp/c.ts" });
     expect(textOf(d.lastCallComponent)).not.toContain("×2");
@@ -132,7 +154,7 @@ describe("clean-tui render reentrancy", () => {
   test("invalidation between burst rows settles instead of looping forever", () => {
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
-    h.emit("turn_start");
+    h.emit("agent_start");
 
     const rows = ["a", "b", "c"].map((id) => {
       const row = h.row("read", id);
@@ -156,22 +178,27 @@ describe("clean-tui AI summary", () => {
 
   test("long command triggers AI summary and swaps display", async () => {
     const origFetch = globalThis.fetch;
-    globalThis.fetch = async () =>
-      ({
+    const origKey = process.env.ONEMINAI_API_KEY;
+    process.env.ONEMINAI_API_KEY = "test-key";
+    let seenAuth: string | undefined;
+    globalThis.fetch = async (_url: any, init: any) => {
+      seenAuth = init?.headers?.Authorization;
+      return {
         ok: true,
         json: async () => ({
           choices: [
             { message: { content: "Appends reboot log to migration file" } },
           ],
         }),
-      }) as any;
+      } as any;
+    };
     try {
       __clearSummaryCache();
       __setSummaryEnabled(true);
       const h = new PiHarness();
       cleanTui(h.api);
       h.emit("session_start", { reason: "startup" });
-      h.emit("turn_start");
+      h.emit("agent_start");
       const row = h.row("bash", "ai");
       row.setArgs({ command: heredoc });
       // initially shows heuristic
@@ -181,8 +208,45 @@ describe("clean-tui AI summary", () => {
       expect(textOf(row.lastCallComponent)).toContain(
         "Appends reboot log to migration file",
       );
+      expect(seenAuth).toBe("Bearer test-key");
     } finally {
       globalThis.fetch = origFetch;
+      if (origKey === undefined) delete process.env.ONEMINAI_API_KEY;
+      else process.env.ONEMINAI_API_KEY = origKey;
+      __setSummaryEnabled(false);
+      __clearSummaryCache();
+    }
+  });
+
+  test("missing API key logs once and keeps the heuristic hint", async () => {
+    const origFetch = globalThis.fetch;
+    const origKey = process.env.ONEMINAI_API_KEY;
+    const origErr = console.error;
+    delete process.env.ONEMINAI_API_KEY;
+    let fetchCalled = 0;
+    globalThis.fetch = async () => {
+      fetchCalled++;
+      throw new Error("should not be called without a key");
+    };
+    const logged: string[] = [];
+    console.error = (...args: any[]) => logged.push(args.join(" "));
+    try {
+      __clearSummaryCache();
+      __setSummaryEnabled(true);
+      const h = new PiHarness();
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const row = h.row("bash", "nokey");
+      row.setArgs({ command: heredoc });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(fetchCalled).toBe(0); // no request without a key
+      expect(textOf(row.lastCallComponent)).toContain("(+3 lines)"); // hint stays
+      expect(logged.some((l) => l.includes("ONEMINAI_API_KEY"))).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+      console.error = origErr;
+      if (origKey !== undefined) process.env.ONEMINAI_API_KEY = origKey;
       __setSummaryEnabled(false);
       __clearSummaryCache();
     }
@@ -201,7 +265,7 @@ describe("clean-tui massive commands", () => {
   test("multi-line heredoc collapses to first line + hint when collapsed", () => {
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
-    h.emit("turn_start");
+    h.emit("agent_start");
     const row = h.row("bash", "big");
     row.setArgs({ command: heredoc });
     row.setResult({ content: ["(no output)"] });
@@ -217,7 +281,7 @@ describe("clean-tui massive commands", () => {
   test("expanding reveals the full command and output", () => {
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
-    h.emit("turn_start");
+    h.emit("agent_start");
     const row = h.row("bash", "big");
     row.setArgs({ command: heredoc });
     row.setResult({ content: [{ type: "text", text: "done" }] });
@@ -230,7 +294,7 @@ describe("clean-tui massive commands", () => {
   test("burst bullets stay single-line for multi-line commands", () => {
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
-    h.emit("turn_start");
+    h.emit("agent_start");
     const a = h.row("bash", "a");
     const b = h.row("bash", "b");
     a.setArgs({ command: heredoc });

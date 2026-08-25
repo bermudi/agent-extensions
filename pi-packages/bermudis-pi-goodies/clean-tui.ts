@@ -81,7 +81,7 @@ type Entry = {
   toolCallId: string;
   toolName: string;
   args: any;
-  timestamp: number;
+  /** Agent-run boundary: bumped on agent_start; negative while replaying. */
   turnId: number;
   /** Position in `entries`; stable because entries are append-only. */
   index: number;
@@ -95,13 +95,12 @@ type Entry = {
   contentRef?: unknown;
 };
 
-const BURST_WINDOW_MS = 1500;
 let turnId = 0;
 // True while pi is replaying persisted history (startup with -c/--continue,
-// /resume, /fork). During replay there are no turn_start events and wall-clock
+// /resume, /fork). During replay no agent events fire and wall-clock
 // timestamps are meaningless (every upsert lands "now"), so replayed entries
 // get negative turnIds: they group by adjacency + same tool instead of the
-// live same-turn + time-window rule (see shouldGroup).
+// live same-run rule (see shouldGroup).
 let replaying = true;
 let replayTurnId = -1;
 const entries: Entry[] = [];
@@ -120,7 +119,6 @@ function upsertEntry(
       toolCallId,
       toolName,
       args,
-      timestamp: Date.now(),
       turnId: replaying ? replayTurnId-- : turnId,
       index: entries.length,
     };
@@ -134,18 +132,17 @@ function upsertEntry(
 }
 
 function shouldGroup(a: Entry, b: Entry): boolean {
-  // Replay entries (negative turnId) have no meaningful turn or wall-clock
-  // timing — every replayed call lands "now". Group them purely by
-  // adjacency + same tool: consecutive same-tool calls in the replay stream
-  // were consecutive in the original transcript. Live entries keep the
-  // same-turn + time-window semantics.
+  // Grouping is by adjacency + same tool within one agent run. pi fires
+  // turn_start per model round-trip (every tool-call cycle), so turn boundaries
+  // are useless here; agent_start marks a real run. A time window is also
+  // useless: model latency between sequential calls routinely exceeds seconds.
+  // Replay entries (negative turnId) have no run boundaries at all, so they
+  // group purely by adjacency + same tool — consecutive same-tool calls in
+  // the replay stream were consecutive in the original transcript.
   const aReplay = a.turnId < 0;
   const bReplay = b.turnId < 0;
   if (aReplay !== bReplay) return false;
-  if (!aReplay) {
-    if (a.turnId !== b.turnId) return false;
-    if (Math.abs(b.timestamp - a.timestamp) > BURST_WINDOW_MS) return false;
-  }
+  if (!aReplay && a.turnId !== b.turnId) return false;
   if (a.toolName !== b.toolName) return false;
   if (a.hasImage || b.hasImage) return false;
   return true;
@@ -242,6 +239,7 @@ export function __setSummaryEnabled(v: boolean): void {
 export function __clearSummaryCache(): void {
   summaryCache.clear();
   pendingSummaries.clear();
+  summaryFailuresLogged.clear();
 }
 
 function isSummarizable(cmd: string): boolean {
@@ -252,13 +250,18 @@ function isSummarizable(cmd: string): boolean {
 }
 
 async function fetchSummary(cmd: string): Promise<string> {
+  const apiKey = process.env.ONEMINAI_API_KEY?.trim();
+  if (!apiKey) throw new Error("ONEMINAI_API_KEY not set in pi's environment");
   const prompt =
     "Summarize this shell command in 5-8 words, plain English, no quotes, no formatting. " +
     'Examples: "cat >> file << \'EOF\' with 20 lines of log" -> "Appends reboot log to migration file". ' +
     `Command:\n${cmd.slice(0, 2000)}`;
   const res = await fetch(SUMMARY_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
     body: JSON.stringify({
       model: SUMMARY_MODEL,
       messages: [{ role: "user", content: prompt }],
@@ -266,7 +269,7 @@ async function fetchSummary(cmd: string): Promise<string> {
       max_tokens: 30,
     }),
   });
-  if (!res.ok) throw new Error(`summary failed ${res.status}`);
+  if (!res.ok) throw new Error(`summary request failed: HTTP ${res.status}`);
   const json: any = await res.json();
   const content = json.choices?.[0]?.message?.content?.trim();
   if (!content) throw new Error("empty summary");
@@ -274,6 +277,20 @@ async function fetchSummary(cmd: string): Promise<string> {
     .replace(/^["']|["']$/g, "")
     .trim()
     .slice(0, 80);
+}
+
+// Summaries are best-effort polish over the heuristic hint, but failures must
+// not be silent: log once per distinct cause so a broken proxy/key is
+// debuggable instead of a black box.
+const summaryFailuresLogged = new Set<string>();
+function logSummaryFailure(cmd: string, err: unknown) {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (summaryFailuresLogged.has(msg)) return;
+  summaryFailuresLogged.add(msg);
+  console.error(
+    `[clean-tui] command summary failed (${msg}); keeping heuristic hint. ` +
+      `Command starts: ${JSON.stringify(cmd.slice(0, 60))}`,
+  );
 }
 
 function requestSummary(cmd: string): void {
@@ -297,7 +314,10 @@ function requestSummary(cmd: string): void {
         }
       }
     })
-    .catch(() => pendingSummaries.delete(cmd));
+    .catch((err) => {
+      pendingSummaries.delete(cmd);
+      logSummaryFailure(cmd, err);
+    });
 }
 
 function bgFor(
@@ -426,9 +446,12 @@ function formatLsBullet(entry: Entry, theme: any): string {
 export default function cleanTui(pi: ExtensionAPI): void {
   const schemaTools = getBuiltInTools(process.cwd());
 
-  pi.on("turn_start", () => {
+  // agent_start = one agent run (one user message). pi's turn_start fires per
+  // model round-trip, which would give every sequential tool call its own
+  // boundary and kill grouping — so runs, not turns, are the burst boundary.
+  pi.on("agent_start", () => {
     turnId++;
-    // First live turn after startup/resume: tool calls from here on may group.
+    // First live run after startup/resume: tool calls from here on may group.
     replaying = false;
   });
   pi.on("session_start", () => {
