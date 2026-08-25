@@ -10,6 +10,7 @@
  *   - prefer-tools     hook              block legacy tools (use trash/rg/fd/uv)
  *   - keep-model       hook              preserve the active model across /new
  *   - clean-tui        tool overrides    collapse built-in tool output; keep a one-line call header, hide results/diffs until expanded
+ *   - review           /review, /end-review  code review workflow (uncommitted, branch, commit, PR, folder)
  *   - kilo             provider          access Kilo Gateway models
  *   - provider-balance footer            show Kilo credits or Codex quota in the footer
  *   - tps              hook              notify tokens/sec and usage at each agent turn end
@@ -27,6 +28,7 @@ import copyWithModel from "./copy-with-model.ts";
 import kilo from "./kilo.ts";
 import keepModelOnNew from "./keep-model-on-new.ts";
 import cleanTui from "./clean-tui.ts";
+import review from "./review.ts";
 import providerBalance from "./provider-balance.ts";
 import tps from "./tps.ts";
 import nameWithAi from "./name-with-ai.ts";
@@ -41,6 +43,7 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   preferTools(pi);
   keepModelOnNew(pi);
   cleanTui(pi);
+  review(pi);
   providerBalance(pi);
   kilo(pi);
   tps(pi);

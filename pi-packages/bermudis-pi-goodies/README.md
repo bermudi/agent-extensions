@@ -1,7 +1,7 @@
 # bermudis-pi-goodies
 
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
-extensions. One entry point, ten independent features.
+extensions. One entry point, eleven independent features.
 
 | Feature            | Command / hook                | What it does                                                                                                                                    |
 | ------------------ | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -12,6 +12,7 @@ extensions. One entry point, ten independent features.
 | `prefer-tools`     | hook (no command)             | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`.                                    |
 | `keep-model-on-new` | hook (no command)            | Keep the active model when `/new` starts a fresh session instead of reverting to pi's saved default model.                                    |
 | `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: keeps a one-line call header, hides results/diffs until you expand a row with ctrl+e or click. |
+| `review`           | `/review`, `/end-review`      | Code review workflow: review uncommitted changes, a branch, a commit, a GitHub PR, or folders. Prioritized findings with actionable follow-ups. |
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
 | `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 | `tps`              | hook (no command)             | Notify tokens/sec and in/out/cache token usage at the end of each agent turn.                                                                   |
