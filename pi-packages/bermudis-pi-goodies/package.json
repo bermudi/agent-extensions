@@ -31,5 +31,8 @@
   },
   "patchedDependencies": {
     "@marcfargas/pi-test-harness@0.6.1": "patches/@marcfargas%2Fpi-test-harness@0.6.1.patch"
+  },
+  "dependencies": {
+    "pi-harness": "file:../pi-harness"
   }
 }

@@ -1,0 +1,19 @@
+{
+  "name": "pi-harness",
+  "private": true,
+  "type": "module",
+  "description": "Test harness for pi TUI extensions — faithful ToolExecutionComponent render semantics (repaints, reentrant invalidation, swallowed fallbacks)",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "format": "prettier --write \"*.ts\""
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.4",
+    "prettier": "^3.8.4",
+    "typescript": "^5.9.3"
+  }
+}
