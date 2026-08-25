@@ -22,7 +22,7 @@ extensions. One entry point, eleven independent features.
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.9.0
+pi install npm:bermudis-pi-goodies@0.9.1
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
