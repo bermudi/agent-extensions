@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { Box, Container } from "@earendil-works/pi-tui";
-import cleanTui from "./clean-tui";
+import cleanTui, {
+  __clearSummaryCache,
+  __setSummaryEnabled,
+} from "./clean-tui";
 import { PiHarness } from "pi-harness";
 
 function textOf(component: unknown): string {
@@ -10,6 +13,8 @@ function textOf(component: unknown): string {
 }
 
 function freshHarness(): PiHarness {
+  __clearSummaryCache();
+  __setSummaryEnabled(false);
   const h = new PiHarness();
   cleanTui(h.api);
   return h;
@@ -84,5 +89,103 @@ describe("clean-tui render reentrancy", () => {
 
     expect(h.totalFallbacks).toBe(0); // no swallowed renderer errors
     expect(h.totalUpdates).toBeLessThan(100);
+  });
+});
+
+describe("clean-tui AI summary", () => {
+  const heredoc = [
+    "cat >> \"PsVita/Archive/MIGRATION-LOG.md\" << 'EOF'",
+    "### First reboot verification — PASS",
+    "detail",
+    "EOF",
+  ].join("\n");
+
+  test("long command triggers AI summary and swaps display", async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      ({
+        ok: true,
+        json: async () => ({
+          choices: [
+            { message: { content: "Appends reboot log to migration file" } },
+          ],
+        }),
+      }) as any;
+    try {
+      __clearSummaryCache();
+      __setSummaryEnabled(true);
+      const h = new PiHarness();
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("turn_start");
+      const row = h.row("bash", "ai");
+      row.setArgs({ command: heredoc });
+      // initially shows heuristic
+      expect(textOf(row.lastCallComponent)).toContain("(+3 lines)");
+      // wait for async summary to arrive and invalidate
+      await new Promise((r) => setTimeout(r, 20));
+      expect(textOf(row.lastCallComponent)).toContain(
+        "Appends reboot log to migration file",
+      );
+    } finally {
+      globalThis.fetch = origFetch;
+      __setSummaryEnabled(false);
+      __clearSummaryCache();
+    }
+  });
+});
+
+describe("clean-tui massive commands", () => {
+  const heredoc = [
+    "cat >> \"PsVita/Archive/MIGRATION-LOG.md\" << 'EOF'",
+    "### First reboot verification — PASS",
+    "Fresh log proves things worked",
+    ...Array.from({ length: 20 }, (_, i) => `detail line ${i}`),
+    "EOF",
+  ].join("\n");
+
+  test("multi-line heredoc collapses to first line + hint when collapsed", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("turn_start");
+    const row = h.row("bash", "big");
+    row.setArgs({ command: heredoc });
+    row.setResult({ content: ["(no output)"] });
+    const text = textOf(row.lastCallComponent);
+    expect(text).toContain(
+      "cat >> \"PsVita/Archive/MIGRATION-LOG.md\" << 'EOF'",
+    );
+    expect(text).toContain("(+23 lines)");
+    expect(text).not.toContain("detail line 5"); // body hidden
+    expect(text.split("\n")).toHaveLength(1); // exactly one display line
+  });
+
+  test("expanding reveals the full command and output", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("turn_start");
+    const row = h.row("bash", "big");
+    row.setArgs({ command: heredoc });
+    row.setResult({ content: [{ type: "text", text: "done" }] });
+    row.setExpanded(true);
+    const text = textOf(row.lastCallComponent);
+    expect(text).toContain("detail line 19"); // full command visible
+    expect(text).toContain("done"); // output still shown
+  });
+
+  test("burst bullets stay single-line for multi-line commands", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("turn_start");
+    const a = h.row("bash", "a");
+    const b = h.row("bash", "b");
+    a.setArgs({ command: heredoc });
+    b.setArgs({ command: "echo hi" });
+    a.setResult({ content: ["ok"] });
+    b.setResult({ content: ["ok"] });
+    const text = textOf(a.lastCallComponent);
+    expect(text).toContain("bash ×2");
+    expect(text).toContain("(+23 lines)");
+    expect(text).not.toContain("detail line 5");
   });
 });

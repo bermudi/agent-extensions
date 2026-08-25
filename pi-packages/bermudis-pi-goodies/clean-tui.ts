@@ -218,6 +218,79 @@ function recordResult(entry: Entry | undefined, result: any, ctx: any) {
   if (!replaying) revalidateBurstsAround(entry.toolCallId);
 }
 
+// ── AI summary for massive bash commands (qwen3.7-flash via 1min proxy) ──
+const SUMMARY_MODEL = "qwen3.7-flash";
+const SUMMARY_URL = "https://1min-proxy.bermudi.deno.net/v1/chat/completions";
+const SUMMARY_THRESHOLD_CHARS = 120;
+const SUMMARY_THRESHOLD_LINES = 3;
+const summaryCache = new Map<string, string>();
+const pendingSummaries = new Set<string>();
+let summaryEnabled = true;
+
+export function __setSummaryEnabled(v: boolean): void {
+  summaryEnabled = v;
+}
+export function __clearSummaryCache(): void {
+  summaryCache.clear();
+  pendingSummaries.clear();
+}
+
+function isSummarizable(cmd: string): boolean {
+  return (
+    cmd.length > SUMMARY_THRESHOLD_CHARS ||
+    cmd.split("\n").length > SUMMARY_THRESHOLD_LINES
+  );
+}
+
+async function fetchSummary(cmd: string): Promise<string> {
+  const prompt =
+    "Summarize this shell command in 5-8 words, plain English, no quotes, no formatting. " +
+    'Examples: "cat >> file << \'EOF\' with 20 lines of log" -> "Appends reboot log to migration file". ' +
+    `Command:\n${cmd.slice(0, 2000)}`;
+  const res = await fetch(SUMMARY_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: SUMMARY_MODEL,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+      max_tokens: 30,
+    }),
+  });
+  if (!res.ok) throw new Error(`summary failed ${res.status}`);
+  const json: any = await res.json();
+  const content = json.choices?.[0]?.message?.content?.trim();
+  if (!content) throw new Error("empty summary");
+  return content
+    .replace(/^["']|["']$/g, "")
+    .trim()
+    .slice(0, 80);
+}
+
+function requestSummary(cmd: string): void {
+  if (
+    !summaryEnabled ||
+    replaying ||
+    !isSummarizable(cmd) ||
+    summaryCache.has(cmd) ||
+    pendingSummaries.has(cmd)
+  )
+    return;
+  pendingSummaries.add(cmd);
+  fetchSummary(cmd)
+    .then((summary) => {
+      summaryCache.set(cmd, summary);
+      pendingSummaries.delete(cmd);
+      for (const e of entries) {
+        if (e.args?.command === cmd) {
+          const fn = invalidateById.get(e.toolCallId);
+          if (fn) fn();
+        }
+      }
+    })
+    .catch(() => pendingSummaries.delete(cmd));
+}
+
 function bgFor(
   pending: boolean,
   isError: boolean,
@@ -264,16 +337,51 @@ function formatReadBullet(entry: Entry, theme: any): string {
   return line;
 }
 
+/**
+ * Command display: first line only, hard-capped, plus a muted "(+N lines)"
+ * hint for heredocs/multi-line commands. Full command stays available via
+ * expand — a 30-line heredoc must not cost 30 rows of transcript.
+ */
+function formatBashCommand(cmd: string, theme: any, cap: number): string {
+  const nl = cmd.indexOf("\n");
+  let head = nl === -1 ? cmd : cmd.slice(0, nl);
+  if (head.length > cap) head = head.slice(0, cap - 1) + "…";
+  let out = theme.fg("accent", head);
+  if (nl !== -1) {
+    const extra = cmd.split("\n").length - 1;
+    out += theme.fg("muted", ` (+${extra} line${extra === 1 ? "" : "s"})`);
+  }
+  return out;
+}
+
 function formatBashHeader(args: any, theme: any): string {
   const cmd = args.command || "...";
-  const truncated = cmd.length > 60 ? cmd.slice(0, 57) + "..." : cmd;
-  return theme.fg("accent", truncated);
+  if (isSummarizable(cmd) && summaryCache.has(cmd)) {
+    const summary = summaryCache.get(cmd)!;
+    let out = theme.fg("accent", summary);
+    const nl = cmd.indexOf("\n");
+    if (nl !== -1) {
+      const extra = cmd.split("\n").length - 1;
+      out += theme.fg("muted", ` (+${extra} lines)`);
+    }
+    return out;
+  }
+  return formatBashCommand(cmd, theme, 120);
 }
 
 function formatBashBullet(entry: Entry, theme: any): string {
   const cmd = entry.args.command || "...";
-  const truncated = cmd.length > 60 ? cmd.slice(0, 57) + "..." : cmd;
-  return `  ${theme.fg("muted", "•")} ${theme.fg("accent", truncated)}`;
+  if (isSummarizable(cmd) && summaryCache.has(cmd)) {
+    const summary = summaryCache.get(cmd)!;
+    let out = `  ${theme.fg("muted", "•")} ${theme.fg("accent", summary)}`;
+    const nl = cmd.indexOf("\n");
+    if (nl !== -1) {
+      const extra = cmd.split("\n").length - 1;
+      out += theme.fg("muted", ` (+${extra} lines)`);
+    }
+    return out;
+  }
+  return `  ${theme.fg("muted", "•")} ${formatBashCommand(cmd, theme, 60)}`;
 }
 
 function formatWriteBullet(entry: Entry, theme: any): string {
@@ -320,6 +428,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
     entries.length = 0;
     entryById.clear();
     invalidateById.clear();
+    pendingSummaries.clear();
   });
 
   // ── read ──────────────────────────────────────────────────────
@@ -430,6 +539,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
       );
     },
     renderCall(args, theme, ctx: any) {
+      if (args.command) requestSummary(args.command);
       const entry = upsertEntry(ctx.toolCallId, "bash", args, ctx.invalidate);
       const burst = getBurstForId(ctx.toolCallId);
       const isGrouped = burst && burst.entries.length > 1;
@@ -459,7 +569,10 @@ export default function cleanTui(pi: ExtensionAPI): void {
           for (const e of burst.entries) {
             if (!e.result) {
               details.push(
-                theme.fg("warning", `— $ ${e.args.command}: pending`),
+                theme.fg(
+                  "warning",
+                  `— $ ${formatBashCommand(e.args.command || "...", theme, 40)}: pending`,
+                ),
               );
               continue;
             }
@@ -471,7 +584,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
               .map((l) => theme.fg("toolOutput", l))
               .join("\n");
             details.push(
-              `\n${theme.fg("muted", `— $ ${e.args.command.slice(0, 40)}`)}:\n${preview}`,
+              `\n${theme.fg("muted", `— $ ${formatBashCommand(e.args.command || "...", theme, 40)}`)}:\n${preview}`,
             );
           }
           if (details.length) header += `\n${details.join("\n")}`;
@@ -482,7 +595,11 @@ export default function cleanTui(pi: ExtensionAPI): void {
       const suffix = args.timeout
         ? theme.fg("muted", ` (timeout ${args.timeout}s)`)
         : "";
-      let line = `${theme.fg("toolTitle", theme.bold(`$ ${args.command || "..."}`))}${suffix}`;
+      let line = `${theme.fg("toolTitle", theme.bold("$"))} ${formatBashHeader(args, theme)}${suffix}`;
+      if (ctx.expanded && args.command && args.command.includes("\n")) {
+        // Header only showed the first line — reveal the full command.
+        line += `\n${theme.fg("toolOutput", args.command)}`;
+      }
       if (ctx.expanded && entry.result) {
         const txt = resultText(entry.result as any)?.trim();
         if (txt)

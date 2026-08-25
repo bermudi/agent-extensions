@@ -34,17 +34,22 @@ import tps from "./tps.ts";
 import nameWithAi from "./name-with-ai.ts";
 import zed from "./zed.ts";
 import preferTools from "./prefer-tools.ts";
+import goodies, { isEnabled } from "./goodies.ts";
 
 export default function bermudisPiGoodies(pi: ExtensionAPI): void {
-  copyWithModel(pi);
-  copyTrajectory(pi);
-  nameWithAi(pi);
-  zed(pi);
-  preferTools(pi);
-  keepModelOnNew(pi);
-  cleanTui(pi);
-  review(pi);
-  providerBalance(pi);
-  kilo(pi);
-  tps(pi);
+  // Always register the toggle command first so you can recover even if
+  // another feature is broken.
+  goodies(pi);
+
+  if (isEnabled("copy-with-model")) copyWithModel(pi);
+  if (isEnabled("copy-trajectory")) copyTrajectory(pi);
+  if (isEnabled("name-with-ai")) nameWithAi(pi);
+  if (isEnabled("zed")) zed(pi);
+  if (isEnabled("prefer-tools")) preferTools(pi);
+  if (isEnabled("keep-model")) keepModelOnNew(pi);
+  if (isEnabled("clean-tui")) cleanTui(pi);
+  if (isEnabled("review")) review(pi);
+  if (isEnabled("provider-balance")) providerBalance(pi);
+  if (isEnabled("kilo")) kilo(pi);
+  if (isEnabled("tps")) tps(pi);
 }

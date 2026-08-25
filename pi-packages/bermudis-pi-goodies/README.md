@@ -16,6 +16,7 @@ extensions. One entry point, eleven independent features.
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
 | `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 | `tps`              | hook (no command)             | Notify tokens/sec and in/out/cache token usage at the end of each agent turn.                                                                   |
+| `goodies`          | `/goodies`                    | Toggle individual features on/off without losing the rest. State persists to `~/.pi/agent/goodies.json`.                                        |
 
 ## Install
 
@@ -26,7 +27,9 @@ pi install npm:bermudis-pi-goodies@0.9.1
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
-feature is independent — disabling one is a one-line edit in `index.ts`.
+feature is independent — use `/goodies disable <name>` to turn one off
+without losing the rest (e.g. `/goodies disable clean-tui` keeps kilo and
+the balance footer). State persists to `~/.pi/agent/goodies.json`.
 Kilo's provider and its balance footer are bundled here.
 
 ## Per-model thinking levels (retired in favor of Pi 0.84.3)
