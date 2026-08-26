@@ -105,18 +105,21 @@ export default function goodies(pi: ExtensionAPI): void {
     description: "Toggle bermudis-pi-goodies features on/off",
     getArgumentCompletions: (prefix) => {
       const subcommands = ["list", "enable", "disable", "summary-model"];
-      const parts = prefix.trim().split(/\s+/);
-      if (parts.length <= 1) {
-        return subcommands
-          .filter((s) => s.startsWith(parts[0] || ""))
-          .map((s) => ({ value: s, label: s }));
+      const verbMatch = prefix.match(/^(\S+)\s+(.*)$/);
+      if (verbMatch) {
+        const verb = verbMatch[1];
+        const featurePrefix = verbMatch[2].trim();
+        if (["enable", "disable"].includes(verb)) {
+          return FEATURES.filter((f) => f.startsWith(featurePrefix)).map(
+            (f) => ({ value: `${verb} ${f}`, label: f }),
+          );
+        }
+        return null;
       }
-      if (parts.length === 2 && ["enable", "disable"].includes(parts[0])) {
-        return FEATURES.filter((f) => f.startsWith(parts[1] || "")).map(
-          (f) => ({ value: f, label: f }),
-        );
-      }
-      return null;
+      const firstWord = prefix.trim();
+      return subcommands
+        .filter((s) => s.startsWith(firstWord))
+        .map((s) => ({ value: s, label: s }));
     },
     handler: async (args, ctx) => {
       const parts = args.trim().split(/\s+/).filter(Boolean);
