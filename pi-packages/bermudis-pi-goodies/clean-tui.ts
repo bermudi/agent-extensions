@@ -274,6 +274,8 @@ export function __clearSummaryCache(): void {
   summaryCache.clear();
   pendingSummaries.clear();
   summaryFailuresLogged.clear();
+  summaryFailStreak = 0;
+  summaryBlockedUntil = 0;
 }
 
 function isSummarizable(cmd: string): boolean {
@@ -303,7 +305,24 @@ async function fetchSummary(cmd: string): Promise<string> {
       max_tokens: 30,
     }),
   });
-  if (!res.ok) throw new Error(`summary request failed: HTTP ${res.status}`);
+  if (!res.ok) {
+    const error = new Error(
+      `summary request failed: HTTP ${res.status}`,
+    ) as Error & {
+      retryAfterMs?: number;
+    };
+    // Retry-After: seconds (HTTP-date form falls through Number() to Date.parse).
+    const header = res.headers?.get?.("retry-after") ?? "";
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds > 0)
+      error.retryAfterMs = seconds * 1000;
+    else {
+      const date = Date.parse(header);
+      if (Number.isFinite(date))
+        error.retryAfterMs = Math.max(0, date - Date.now());
+    }
+    throw error;
+  }
   const json: any = await res.json();
   const content = json.choices?.[0]?.message?.content?.trim();
   if (!content) throw new Error("empty summary");
@@ -318,14 +337,53 @@ async function fetchSummary(cmd: string): Promise<string> {
 // not be silent: log once per distinct cause so a broken proxy/key is
 // debuggable instead of a black box.
 const summaryFailuresLogged = new Set<string>();
-function logSummaryFailure(cmd: string, err: unknown) {
+function logSummaryFailure(cmd: string, err: unknown, pauseMs?: number) {
   const msg = err instanceof Error ? err.message : String(err);
-  if (summaryFailuresLogged.has(msg)) return;
-  summaryFailuresLogged.add(msg);
+  const pause = pauseMs
+    ? `; pausing summaries ${Math.round(pauseMs / 1000)}s`
+    : "";
+  const key = `${msg}${pause}`;
+  if (summaryFailuresLogged.has(key)) return;
+  summaryFailuresLogged.add(key);
   console.error(
-    `[clean-tui] command summary failed (${msg}); keeping heuristic hint. ` +
+    `[clean-tui] command summary failed (${msg})${pause}; keeping heuristic hint. ` +
       `Command starts: ${JSON.stringify(cmd.slice(0, 60))}`,
   );
+}
+
+// Failure backoff: requestSummary runs on every bash renderCall, so after a
+// rate-limit (429) each re-render would immediately re-fire the request and
+// keep the limiter hot forever. A failure pauses ALL summary requests for a
+// doubling cooldown (capped); an explicit Retry-After header wins over the
+// computed delay; the next success resets the streak.
+const SUMMARY_BACKOFF_BASE_MS = 30_000;
+const SUMMARY_BACKOFF_CAP_MS = 15 * 60_000;
+let summaryBackoffBaseMs = SUMMARY_BACKOFF_BASE_MS;
+let summaryBackoffCapMs = SUMMARY_BACKOFF_CAP_MS;
+let summaryFailStreak = 0;
+let summaryBlockedUntil = 0;
+
+export function __setSummaryBackoffForTesting(
+  baseMs: number,
+  capMs: number,
+): void {
+  summaryBackoffBaseMs = baseMs;
+  summaryBackoffCapMs = capMs;
+}
+
+function noteSummaryFailure(err: unknown): number {
+  summaryFailStreak++;
+  const backoff = Math.min(
+    summaryBackoffBaseMs * 2 ** (summaryFailStreak - 1),
+    summaryBackoffCapMs,
+  );
+  const retryAfter = (err as { retryAfterMs?: unknown }).retryAfterMs;
+  const delay = Math.min(
+    summaryBackoffCapMs,
+    Math.max(backoff, typeof retryAfter === "number" ? retryAfter : 0),
+  );
+  summaryBlockedUntil = Date.now() + delay;
+  return delay;
 }
 
 function requestSummary(cmd: string): void {
@@ -334,12 +392,15 @@ function requestSummary(cmd: string): void {
     replaying ||
     !isSummarizable(cmd) ||
     summaryCache.has(cmd) ||
-    pendingSummaries.has(cmd)
+    pendingSummaries.has(cmd) ||
+    Date.now() < summaryBlockedUntil
   )
     return;
   pendingSummaries.add(cmd);
   fetchSummary(cmd)
     .then((summary) => {
+      summaryFailStreak = 0;
+      summaryBlockedUntil = 0;
       summaryCache.set(cmd, summary);
       pendingSummaries.delete(cmd);
       for (const e of entries) {
@@ -351,7 +412,8 @@ function requestSummary(cmd: string): void {
     })
     .catch((err) => {
       pendingSummaries.delete(cmd);
-      logSummaryFailure(cmd, err);
+      const pauseMs = noteSummaryFailure(err);
+      logSummaryFailure(cmd, err, pauseMs);
     });
 }
 

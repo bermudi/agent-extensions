@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Box, Container } from "@earendil-works/pi-tui";
 import cleanTui, {
   __clearSummaryCache,
+  __setSummaryBackoffForTesting,
   __setSummaryEnabled,
   __setSummaryKeyFileForTesting,
 } from "./clean-tui";
@@ -398,6 +399,193 @@ describe("clean-tui AI summary", () => {
       __setConfigPathForTesting(
         join(homedir(), ".pi", "agent", "goodies.json"),
       );
+    }
+  });
+
+  test("429 engages a backoff instead of retrying on every render", async () => {
+    // Regression: a failed summary was neither cached nor penalized, so every
+    // bash re-render re-fired the request — a single 429 turned into a
+    // render-driven retry storm that kept the rate limiter hot all session.
+    const origFetch = globalThis.fetch;
+    const origKey = process.env.ONEMIN_API_KEY;
+    const origErr = console.error;
+    process.env.ONEMIN_API_KEY = "test-key";
+    __setSummaryBackoffForTesting(100, 60_000);
+    let calls = 0;
+    let succeed = false;
+    globalThis.fetch = async () => {
+      calls++;
+      if (!succeed)
+        return { ok: false, status: 429, headers: { get: () => null } } as any;
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [
+            { message: { content: "Lists agent settings and extensions" } },
+          ],
+        }),
+      } as any;
+    };
+    console.error = () => {}; // expected failure log stays out of test output
+    try {
+      __clearSummaryCache();
+      __setSummaryEnabled(true);
+      const h = new PiHarness();
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const cmd = "echo " + "x".repeat(90);
+      const row = h.row("bash", "rl");
+      row.setArgs({ command: cmd });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toBe(1);
+      // Re-renders during the backoff window must not re-fire the request.
+      row.setResult({ content: ["ok"] });
+      row.setArgs({ command: cmd });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toBe(1);
+      expect(textOf(row.lastCallComponent)).not.toContain(
+        "Lists agent settings and extensions",
+      );
+      // After the cooldown the next render retries and recovers.
+      succeed = true;
+      await new Promise((r) => setTimeout(r, 120));
+      row.setArgs({ command: cmd });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toBe(2);
+      expect(textOf(row.lastCallComponent)).toContain(
+        "Lists agent settings and extensions",
+      );
+      // Cached: further renders don't refetch.
+      row.setArgs({ command: cmd });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toBe(2);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
+      else process.env.ONEMIN_API_KEY = origKey;
+      __setSummaryEnabled(false);
+      __clearSummaryCache();
+      __setSummaryBackoffForTesting(30_000, 15 * 60_000);
+      console.error = origErr;
+    }
+  });
+
+  test("a success resets the failure streak", async () => {
+    // Without a reset, one old 429 would double every future cooldown forever.
+    const origFetch = globalThis.fetch;
+    const origKey = process.env.ONEMIN_API_KEY;
+    const origErr = console.error;
+    process.env.ONEMIN_API_KEY = "test-key";
+    __setSummaryBackoffForTesting(100, 60_000);
+    let calls = 0;
+    let fail = true;
+    globalThis.fetch = async () => {
+      calls++;
+      if (fail)
+        return { ok: false, status: 429, headers: { get: () => null } } as any;
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: `summary ${calls}` } }],
+        }),
+      } as any;
+    };
+    console.error = () => {};
+    try {
+      __clearSummaryCache();
+      __setSummaryEnabled(true);
+      const h = new PiHarness();
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const cmdA = "echo " + "a".repeat(90);
+      const cmdB = "echo " + "b".repeat(90);
+      const rowA = h.row("bash", "a");
+      rowA.setArgs({ command: cmdA });
+      await new Promise((r) => setTimeout(r, 10)); // failure 1 → paused 100ms
+      fail = false;
+      await new Promise((r) => setTimeout(r, 120));
+      rowA.setArgs({ command: cmdA }); // retry succeeds → streak reset
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toBe(2);
+      // A fresh failure now waits the BASE cooldown (100ms), not 2×base.
+      fail = true;
+      const rowB = h.row("bash", "b");
+      rowB.setArgs({ command: cmdB });
+      await new Promise((r) => setTimeout(r, 10)); // failure 2
+      fail = false;
+      await new Promise((r) => setTimeout(r, 120));
+      rowB.setArgs({ command: cmdB }); // retry succeeds only if streak was reset
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toBe(4);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
+      else process.env.ONEMIN_API_KEY = origKey;
+      __setSummaryEnabled(false);
+      __clearSummaryCache();
+      __setSummaryBackoffForTesting(30_000, 15 * 60_000);
+      console.error = origErr;
+    }
+  });
+
+  test("an explicit Retry-After header extends the pause", async () => {
+    const origFetch = globalThis.fetch;
+    const origKey = process.env.ONEMIN_API_KEY;
+    const origErr = console.error;
+    process.env.ONEMIN_API_KEY = "test-key";
+    __setSummaryBackoffForTesting(20, 60_000);
+    let calls = 0;
+    let succeed = false;
+    globalThis.fetch = async () => {
+      calls++;
+      if (!succeed)
+        return {
+          ok: false,
+          status: 429,
+          headers: {
+            get: (name: string) => (name === "retry-after" ? "1" : null),
+          },
+        } as any;
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "Recovers after retry-after" } }],
+        }),
+      } as any;
+    };
+    console.error = () => {};
+    try {
+      __clearSummaryCache();
+      __setSummaryEnabled(true);
+      const h = new PiHarness();
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const cmd = "echo " + "y".repeat(90);
+      const row = h.row("bash", "ra");
+      row.setArgs({ command: cmd });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toBe(1);
+      // Tiny base backoff (20ms) has long passed, but Retry-After: 1 holds.
+      await new Promise((r) => setTimeout(r, 150));
+      row.setArgs({ command: cmd });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toBe(1);
+      succeed = true;
+      await new Promise((r) => setTimeout(r, 950));
+      row.setArgs({ command: cmd });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toBe(2);
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
+      else process.env.ONEMIN_API_KEY = origKey;
+      __setSummaryEnabled(false);
+      __clearSummaryCache();
+      __setSummaryBackoffForTesting(30_000, 15 * 60_000);
+      console.error = origErr;
     }
   });
 
