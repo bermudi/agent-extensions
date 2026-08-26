@@ -217,6 +217,13 @@ export class CouncilWorker {
           apiKey: auth.apiKey,
           headers: auth.headers ?? undefined,
           env: auth.env,
+          // Council creates Agent directly (not via AgentSession), so the
+          // provider-retry settings that AgentSession injects are absent.
+          // Without maxRetries, retryProviderRequest inside the provider
+          // defaults to 0 — a single 429 kills the entire multi-minute run.
+          // 65s cap gives margin over Tencent's typical 60s Retry-After.
+          maxRetries: streamOptions?.maxRetries ?? 3,
+          maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? 65_000,
         });
       },
     });
