@@ -28,10 +28,14 @@ import {
   createWriteTool,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text } from "@earendil-works/pi-tui";
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { getSummaryModel } from "./goodies.ts";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { SimpleStreamOptions } from "@earendil-works/pi-ai";
+import {
+  findSummaryModel,
+  getSummaryModel,
+  type SummaryModelRegistry,
+} from "./goodies.ts";
 
 type BuiltInTools = {
   read: ReturnType<typeof createReadTool>;
@@ -233,39 +237,46 @@ function recordResult(entry: Entry | undefined, result: any, ctx: any) {
   revalidateBurstsAround(entry.toolCallId);
 }
 
-// ── AI summary for massive bash commands (via 1min proxy) ──
-// The model is configurable via `/goodies summary-model <model>` (persisted to
-// ~/.pi/agent/goodies.json); it defaults to a fast, cheap model. Any model
-// served by the 1min proxy works.
-const DEFAULT_SUMMARY_MODEL = "grok-4-fast-non-reasoning";
-function summaryModel(): string {
-  return getSummaryModel() || DEFAULT_SUMMARY_MODEL;
+// ── AI command summaries (via the user's own provider stack) ────
+//
+// Long bash commands earn a short "what this does" header. The model is
+// whatever `/goodies summary-model <provider/model>` points at, resolved
+// against pi's own model registry — same providers, same auth (env keys,
+// models.json entries, OAuth token refresh) as the rest of the session.
+// There are deliberately no hardcoded endpoints or key files here, and an
+// unset summary-model means the feature is off entirely.
+interface SummaryBackend {
+  summarize(cmd: string, signal: AbortSignal): Promise<string>;
 }
-const SUMMARY_URL = "https://1min-proxy.bermudi.deno.net/v1/chat/completions";
+
 // Hard floor: commands at or under 80 chars are cheap to read as-is, so no
 // summary no matter how many lines. Above that, any command qualifies —
 // single-line pipelines benefit at least as much as heredocs.
 const SUMMARY_THRESHOLD_CHARS = 80;
+// Five-to-eight words fit in 30 completion tokens; thinking stays off so
+// reasoning models don't burn the budget before writing any visible text.
+const SUMMARY_MAX_TOKENS = 30;
+const SUMMARY_PROMPT =
+  "Summarize this shell command in 5-8 words, plain English, no quotes, no formatting. " +
+  'Examples: "cat >> file << \'EOF\' with 20 lines of log" -> "Appends reboot log to migration file". ' +
+  "Command:\n";
+
+// pi-ai's ThinkingLevel TS union lags its runtime: "off" is the first entry of
+// EXTENDED_THINKING_LEVELS, non-reasoning models clamp their supported levels
+// to ["off"], and every API adapter maps a clamped "off" to "send no reasoning
+// parameter". Requesting any visible level would let thinking share — on
+// several APIs outright consume — the tiny max_tokens budget before any text
+// appears, which reads downstream as an empty response.
+const SUMMARY_REASONING = "off" as unknown as NonNullable<
+  SimpleStreamOptions["reasoning"]
+>;
+
 const summaryCache = new Map<string, string>();
 const pendingSummaries = new Set<string>();
+// A burst of distinct long commands can fan out N simultaneous renders; keep
+// concurrent provider requests bounded so we don't hammer the rate limiter.
+const SUMMARY_MAX_INFLIGHT = 2;
 let summaryEnabled = true;
-// Same convention as the other keys in ~/.pi/agent/ (read by models.json
-// "!cat" entries): one file per key, 0600. Env var wins when set.
-let summaryKeyFile = join(homedir(), ".pi", "agent", "ONEMIN_API_KEY");
-
-export function __setSummaryKeyFileForTesting(path: string): void {
-  summaryKeyFile = path;
-}
-
-function summaryApiKey(): string | undefined {
-  const fromEnv = process.env.ONEMIN_API_KEY?.trim();
-  if (fromEnv) return fromEnv;
-  try {
-    return readFileSync(summaryKeyFile, "utf-8").trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 export function __setSummaryEnabled(v: boolean): void {
   summaryEnabled = v;
@@ -282,60 +293,112 @@ function isSummarizable(cmd: string): boolean {
   return cmd.length > SUMMARY_THRESHOLD_CHARS;
 }
 
-async function fetchSummary(cmd: string): Promise<string> {
-  const apiKey = summaryApiKey();
-  if (!apiKey)
-    throw new Error(
-      "ONEMIN_API_KEY not in environment or ~/.pi/agent/ONEMIN_API_KEY",
-    );
-  const prompt =
-    "Summarize this shell command in 5-8 words, plain English, no quotes, no formatting. " +
-    'Examples: "cat >> file << \'EOF\' with 20 lines of log" -> "Appends reboot log to migration file". ' +
-    `Command:\n${cmd.slice(0, 2000)}`;
-  const res = await fetch(SUMMARY_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: summaryModel(),
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.2,
-      max_tokens: 30,
-    }),
-  });
-  if (!res.ok) {
-    const error = new Error(
-      `summary request failed: HTTP ${res.status}`,
-    ) as Error & {
-      retryAfterMs?: number;
-    };
-    // Retry-After: seconds (HTTP-date form falls through Number() to Date.parse).
-    const header = res.headers?.get?.("retry-after") ?? "";
-    const seconds = Number(header);
-    if (Number.isFinite(seconds) && seconds > 0)
-      error.retryAfterMs = seconds * 1000;
-    else {
-      const date = Date.parse(header);
-      if (Number.isFinite(date))
-        error.retryAfterMs = Math.max(0, date - Date.now());
-    }
-    throw error;
-  }
-  const json: any = await res.json();
-  const content = json.choices?.[0]?.message?.content?.trim();
-  if (!content) throw new Error("empty summary");
-  return content
+function normalizeSummary(text: string): string {
+  return text
     .replace(/^["']|["']$/g, "")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, SUMMARY_THRESHOLD_CHARS);
 }
 
+// Normalization happens here — in the consumer — rather than inside a
+// transport, so every SummaryBackend feeds the display pipeline identically.
+
+// Render context provably has no model registry (ToolRenderContext), but event
+// handler contexts do. session_start seeds the stash; agent_start re-reads it
+// because pi can rebuild the model runtime between sessions in one process.
+let summaryModelRegistry: SummaryModelRegistry | undefined;
+// Render-side work outlives turns, so ctx.signal (undefined outside turns, and
+// wrong even inside them) is unusable here. Each session gets a fresh
+// controller; switching sessions aborts every in-flight summary request.
+let summarySessionAbort = new AbortController();
+let summaryBackendOverride: SummaryBackend | undefined;
+
+/** Swap the LLM transport seam for testing (undefined restores the default). */
+export function __setSummaryBackendForTesting(backend?: SummaryBackend): void {
+  summaryBackendOverride = backend;
+}
+
+/** Seed the registry stash directly in tests (normally done by events). */
+export function __setSummaryModelRegistryForTesting(
+  registry?: SummaryModelRegistry,
+): void {
+  summaryModelRegistry = registry;
+}
+
+async function summarizeViaProvider(
+  cmd: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const configured = getSummaryModel();
+  if (!configured) throw new Error("no summary model configured");
+  const registry = summaryModelRegistry;
+  if (!registry)
+    throw new Error("model registry not captured yet this session");
+  const found = findSummaryModel(registry, configured);
+  if (!found)
+    throw new Error(`summary model "${configured}" not found in registry`);
+  const label = `${found.provider}/${found.id}`;
+  // getApiKeyAndHeaders resolves env keys, models.json auth, and refreshes
+  // OAuth tokens — the one thing a raw endpoint could never do. Safe to call
+  // fire-and-forget (pi-codex makes OAuth-refreshing calls the same way).
+  const auth = await registry.getApiKeyAndHeaders(found);
+  if (!auth.ok) throw new Error(`${auth.error} (${label})`);
+  const headers =
+    auth.headers && Object.keys(auth.headers).length > 0
+      ? auth.headers
+      : undefined;
+  if (!auth.apiKey && !headers)
+    throw new Error(`no API key or headers configured (${label})`);
+  const response = await completeSimple(
+    found,
+    {
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: SUMMARY_PROMPT + cmd.slice(0, 2000) },
+          ],
+          timestamp: Date.now(),
+        },
+      ],
+    },
+    {
+      apiKey: auth.apiKey,
+      headers,
+      maxTokens: SUMMARY_MAX_TOKENS,
+      reasoning: SUMMARY_REASONING,
+      signal,
+    },
+  );
+  // pi-ai encodes request failures in the returned message rather than
+  // throwing; convert so the shared failure/backoff path sees them.
+  if (response.stopReason === "aborted") {
+    const err = new Error("summary request aborted");
+    err.name = "AbortError";
+    throw err;
+  }
+  if (response.stopReason === "error")
+    throw new Error(`${response.errorMessage ?? "request failed"} (${label})`);
+  const text = response.content
+    .filter((c): c is { type: "text"; text: string } => c.type === "text")
+    .map((c) => c.text)
+    .join("\n");
+  if (!text.trim())
+    throw new Error(
+      `empty summary — is ${label} a thinking model that cannot disable thinking?`,
+    );
+  return text; // normalized by the consumer, not here
+}
+
+function activeBackend(): SummaryBackend {
+  return summaryBackendOverride ?? { summarize: summarizeViaProvider };
+}
+
 // Summaries are best-effort polish over the heuristic hint, but failures must
-// not be silent: log once per distinct cause so a broken proxy/key is
-// debuggable instead of a black box.
+// not be silent: log once per distinct cause so a broken provider/key/model
+// choice is debuggable instead of a black box. The backend messages embed the
+// model label so three plausible providers don't mean guessing which failed.
 const summaryFailuresLogged = new Set<string>();
 function logSummaryFailure(cmd: string, err: unknown, pauseMs?: number) {
   const msg = err instanceof Error ? err.message : String(err);
@@ -387,34 +450,52 @@ function noteSummaryFailure(err: unknown): number {
 }
 
 function requestSummary(cmd: string): void {
+  // Guard order matters: renderCall fires on every rerender, so all guards
+  // here are cheap sync checks, and anything that can differ across rerenders
+  // of the same command must not mutate state (mutating in a render path once
+  // caused infinite invalidate loops).
   if (
     !summaryEnabled ||
     replaying ||
     !isSummarizable(cmd) ||
+    !getSummaryModel() || // unset = feature off: no resolution, no network.
     summaryCache.has(cmd) ||
     pendingSummaries.has(cmd) ||
-    Date.now() < summaryBlockedUntil
+    Date.now() < summaryBlockedUntil ||
+    pendingSummaries.size >= SUMMARY_MAX_INFLIGHT
   )
     return;
   pendingSummaries.add(cmd);
-  fetchSummary(cmd)
-    .then((summary) => {
+  const signal = summarySessionAbort.signal;
+  activeBackend()
+    .summarize(cmd, signal)
+    .then((raw) => {
+      pendingSummaries.delete(cmd);
+      // Providers can deliver after the user already switched sessions;
+      // such results must stay inert in the fresh session.
+      if (signal.aborted) return;
       summaryFailStreak = 0;
       summaryBlockedUntil = 0;
-      summaryCache.set(cmd, summary);
-      pendingSummaries.delete(cmd);
-      for (const e of entries) {
-        if (e.args?.command === cmd) {
-          const fn = invalidateById.get(e.toolCallId);
-          if (fn) fn();
-        }
-      }
+      summaryCache.set(cmd, normalizeSummary(raw));
+      invalidateRowsForCommand(cmd);
     })
     .catch((err) => {
       pendingSummaries.delete(cmd);
+      // Switching sessions aborts in-flight summaries deliberately: that is
+      // not a provider failure — neither penalize nor log it.
+      if (signal.aborted || (err as Error)?.name === "AbortError") return;
       const pauseMs = noteSummaryFailure(err);
       logSummaryFailure(cmd, err, pauseMs);
     });
+}
+
+function invalidateRowsForCommand(cmd: string): void {
+  for (const e of entries) {
+    if (e.args?.command === cmd) {
+      const fn = invalidateById.get(e.toolCallId);
+      if (fn) fn();
+    }
+  }
 }
 
 function bgFor(
@@ -551,9 +632,18 @@ function formatLsBullet(entry: Entry, theme: any): string {
 export default function cleanTui(pi: ExtensionAPI): void {
   const schemaTools = getBuiltInTools(process.cwd());
 
-  pi.on("agent_start", (_event, _ctx) => {
+  pi.on("agent_start", (_event, ctx) => {
     // First live run after startup/resume: tool calls from here on may group.
     replaying = false;
+    // The model runtime may be rebuilt between sessions within one process;
+    // re-read the registry so summary resolution stays current.
+    if (
+      (ctx as { modelRegistry?: SummaryModelRegistry } | undefined)
+        ?.modelRegistry
+    ) {
+      summaryModelRegistry = (ctx as { modelRegistry?: SummaryModelRegistry })
+        .modelRegistry;
+    }
   });
   // Assistant messages are the burst boundary (see shouldGroup). message_start
   // — not message_end — because pi creates a message's tool components while
@@ -568,6 +658,14 @@ export default function cleanTui(pi: ExtensionAPI): void {
     entryById.clear();
     invalidateById.clear();
     pendingSummaries.clear();
+    // Capture the registry slice render context lacks, and cut off any
+    // summaries still in flight from the previous session.
+    const modelRegistry = (
+      ctx as { modelRegistry?: SummaryModelRegistry } | undefined
+    )?.modelRegistry;
+    if (modelRegistry) summaryModelRegistry = modelRegistry;
+    summarySessionAbort.abort();
+    summarySessionAbort = new AbortController();
     // Replayed history fires no events: rebuild segment boundaries from the
     // branch by giving every assistant message's tool calls one segment,
     // mirroring the live rule. Calls not present in the branch (defensive)

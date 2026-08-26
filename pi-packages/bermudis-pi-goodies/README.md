@@ -11,12 +11,12 @@ extensions. One entry point, eleven independent features.
 | `zed`              | `/z`                          | Open Zed editor on the current working directory.                                                                                               |
 | `prefer-tools`     | hook (no command)             | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`.                                    |
 | `keep-model-on-new` | hook (no command)            | Keep the active model when `/new` starts a fresh session instead of reverting to pi's saved default model.                                    |
-| `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: same-tool calls within one assistant message share one block (e.g. `read ×2`), assistant messages always break the block, images stay visible without expanding, expand a row with ctrl+o to see results/diffs. Long bash commands get an AI-generated summary (configurable via `/goodies summary-model`). |
+| `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: same-tool calls within one assistant message share one block (e.g. `read ×2`), assistant messages always break the block, images stay visible without expanding, expand a row with ctrl+o to see results/diffs. Long bash commands get an AI-generated summary once you pick a model with `/goodies summary-model <provider/model>` (see "Smart summaries" below). |
 | `review`           | `/review`, `/end-review`      | Code review workflow: review uncommitted changes, a branch, a commit, a GitHub PR, or folders. Prioritized findings with actionable follow-ups. |
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
 | `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 | `tps`              | hook (no command)             | Notify tokens/sec and in/out/cache token usage at the end of each agent turn.                                                                   |
-| `goodies`          | `/goodies`                    | Toggle individual features on/off without losing the rest. Also supports `/goodies summary-model [model]` to configure the AI summarization model. State persists to `~/.pi/agent/goodies.json`. |
+| `goodies`          | `/goodies`                    | Toggle individual features on/off without losing the rest. Also supports `/goodies summary-model [provider/model]` to pick the model used for AI bash-command summaries. State persists to `~/.pi/agent/goodies.json`. |
 
 ## Install
 
@@ -31,6 +31,41 @@ feature is independent — use `/goodies disable <name>` to turn one off
 without losing the rest (e.g. `/goodies disable clean-tui` keeps kilo and
 the balance footer). State persists to `~/.pi/agent/goodies.json`.
 Kilo's provider and its balance footer are bundled here.
+
+## Smart summaries for long bash commands
+
+clean-tui can replace long bash command lines with a short plain-English
+summary (`cat >> log << 'EOF' ...` → `Appends reboot log to migration
+file`). The feature is **off by default**: it must not cost anything, share
+your session model's rate limits, or send data anywhere until you ask for
+it.
+
+To enable it, point it at any model your Pi installation already serves:
+
+```text
+/goodies summary-model kilo/xai/grok-4-fast   # or any provider/model you have
+```
+
+The command validates the model against your registry and suggests close
+matches on typos. Summaries ride your existing auth completely — API keys
+from the environment or `models.json`, OAuth token refresh included — there
+are no extra endpoints or keys to configure. `/goodies list` shows whether
+summaries are on or off, and `/goodies summary-model off` disables them
+again.
+
+Two practical notes:
+
+- **Pick a fast non-thinking model.** Summaries get a tiny response budget;
+  models that insist on thinking first spend that budget invisibly and fail,
+  which pauses summaries via backoff. A quick chat-class model works best.
+- **Privacy:** qualifying commands (longer than 80 characters) are sent —
+  first ~2000 characters — to whichever provider hosts the model you chose.
+  That is the same trust decision as running an agent session against that
+  provider, made explicit here because it happens outside normal turns.
+
+Failures degrade gracefully: the raw command stays visible as a heuristic
+hint, each distinct failure is logged once (naming the model), and repeated
+failures back off exponentially instead of hammering the provider.
 
 ## Per-model thinking levels (retired in favor of Pi 0.84.3)
 

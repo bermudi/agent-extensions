@@ -5,8 +5,12 @@ import {
   listFeatures,
   getSummaryModel,
   setSummaryModel,
+  findSummaryModel,
+  suggestSummaryModels,
   __setConfigPathForTesting,
+  type SummaryModelRegistry,
 } from "./goodies";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { readFileSync, unlinkSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,5 +67,57 @@ describe("goodies feature toggles", () => {
     expect(
       JSON.parse(readFileSync(CONFIG_PATH, "utf-8"))["summary-model"],
     ).toBeUndefined();
+  });
+});
+
+describe("summary-model registry resolution", () => {
+  function model(provider: string, id: string): Model<Api> {
+    return {
+      id,
+      name: id,
+      api: "openai-completions",
+      provider,
+      baseUrl: `https://${provider}.test/v1`,
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 8000,
+      maxTokens: 100,
+    };
+  }
+
+  const catalog = [model("kilo", "xai/grok-4-fast"), model("zai", "glm-5.3")];
+  const registry: SummaryModelRegistry = {
+    find: (provider, id) =>
+      catalog.find((m) => m.provider === provider && m.id === id),
+    getAvailable: () => catalog,
+  };
+
+  test("exact provider/id lookup wins", () => {
+    const found = findSummaryModel(registry, "kilo/xai/grok-4-fast");
+    expect(found?.provider).toBe("kilo");
+    expect(found?.id).toBe("xai/grok-4-fast");
+  });
+
+  test("legacy bare-id values fall back to an id search", () => {
+    // Pre-rework configs stored ids without a provider prefix; those must
+    // keep resolving instead of dying silently.
+    const found = findSummaryModel(registry, "glm-5.3");
+    expect(found?.provider).toBe("zai");
+    expect(found?.id).toBe("glm-5.3");
+  });
+
+  test("unknown models resolve to nothing", () => {
+    expect(findSummaryModel(registry, "nope/missing")).toBeUndefined();
+    expect(findSummaryModel(registry, "missing")).toBeUndefined();
+  });
+
+  test("suggestions match any query term against provider and id", () => {
+    const s1 = suggestSummaryModels(registry, "kilo/nothing-here");
+    expect(s1).toContain("kilo/xai/grok-4-fast");
+    expect(s1).not.toContain("zai/glm-5.3");
+    const s2 = suggestSummaryModels(registry, "glm");
+    expect(s2).toEqual(["zai/glm-5.3"]);
+    expect(suggestSummaryModels(registry, "")).toEqual([]);
   });
 });

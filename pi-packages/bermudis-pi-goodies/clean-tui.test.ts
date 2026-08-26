@@ -1,10 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, afterEach } from "bun:test";
 import { Box, Container } from "@earendil-works/pi-tui";
+import type { Model } from "@earendil-works/pi-ai";
 import cleanTui, {
   __clearSummaryCache,
   __setSummaryBackoffForTesting,
+  __setSummaryBackendForTesting,
   __setSummaryEnabled,
-  __setSummaryKeyFileForTesting,
+  __setSummaryModelRegistryForTesting,
 } from "./clean-tui";
 import { PiHarness } from "pi-harness";
 import { homedir } from "node:os";
@@ -252,91 +254,97 @@ describe("clean-tui AI summary", () => {
     "EOF",
   ].join("\n");
 
-  test("long command triggers AI summary and swaps display", async () => {
-    const origFetch = globalThis.fetch;
-    const origKey = process.env.ONEMIN_API_KEY;
-    process.env.ONEMIN_API_KEY = "test-key";
-    let seenAuth: string | undefined;
-    globalThis.fetch = async (_url: any, init: any) => {
-      seenAuth = init?.headers?.Authorization;
-      return {
-        ok: true,
-        json: async () => ({
-          choices: [
-            { message: { content: "Appends reboot log to migration file" } },
-          ],
-        }),
-      } as any;
-    };
-    try {
-      __clearSummaryCache();
-      __setSummaryEnabled(true);
-      const h = new PiHarness();
-      cleanTui(h.api);
-      h.emit("session_start", { reason: "startup" });
-      h.emit("agent_start");
-      const row = h.row("bash", "ai");
-      row.setArgs({ command: heredoc });
-      // initially shows heuristic
-      expect(textOf(row.lastCallComponent)).toContain("(+3 lines)");
-      // wait for async summary to arrive and invalidate
-      await new Promise((r) => setTimeout(r, 20));
-      expect(textOf(row.lastCallComponent)).toContain(
-        "Appends reboot log to migration file",
+  const cleanupFns: Array<() => void> = [];
+  afterEach(() => {
+    while (cleanupFns.length) cleanupFns.pop()!();
+    __setSummaryBackendForTesting(undefined);
+    __setSummaryModelRegistryForTesting(undefined);
+  });
+
+  /** Swap in a scripted backend (in place of the provider call). */
+  function scriptedBackend(
+    impl: (cmd: string, signal: AbortSignal) => Promise<string> | string,
+  ): string[] {
+    const calls: string[] = [];
+    __setSummaryBackendForTesting({
+      summarize: async (cmd, signal) => {
+        calls.push(cmd);
+        return impl(cmd, signal);
+      },
+    });
+    return calls;
+  }
+
+  function captureConsoleError(): string[] {
+    const origErr = console.error;
+    const logged: string[] = [];
+    console.error = (...args: unknown[]) => logged.push(args.join(" "));
+    cleanupFns.push(() => {
+      console.error = origErr;
+    });
+    return logged;
+  }
+
+  /** Redirect goodies config to scratch storage; auto-restores. */
+  function useScratchConfig(): void {
+    const tmpDir = mkdtempSync(join(tmpdir(), "goodies-cfg-"));
+    __setConfigPathForTesting(join(tmpDir, "goodies.json"));
+    cleanupFns.push(() => {
+      setSummaryModel(undefined);
+      __setConfigPathForTesting(
+        join(homedir(), ".pi", "agent", "goodies.json"),
       );
-      // A summary replaces the heuristic hint entirely — no redundant
-      // "(+N lines)" next to a sentence that already describes the command.
-      expect(textOf(row.lastCallComponent)).not.toContain("(+3 lines)");
-      expect(seenAuth).toBe("Bearer test-key");
-    } finally {
-      globalThis.fetch = origFetch;
-      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
-      else process.env.ONEMIN_API_KEY = origKey;
-      __setSummaryEnabled(false);
-      __clearSummaryCache();
-    }
+    });
+  }
+
+  /** Feature-on baseline: scratch config with a placeholder model set. */
+  function enableSummariesForTest(): void {
+    useScratchConfig();
+    // Value is arbitrary — the scripted backend bypasses resolution.
+    setSummaryModel("test/model");
+    __clearSummaryCache();
+    __setSummaryEnabled(true);
+  }
+
+  test("long command triggers AI summary and swaps display", async () => {
+    scriptedBackend(() => "Appends reboot log to migration file");
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "ai");
+    row.setArgs({ command: heredoc });
+    // initially shows heuristic
+    expect(textOf(row.lastCallComponent)).toContain("(+3 lines)");
+    // wait for async summary to arrive and invalidate
+    await new Promise((r) => setTimeout(r, 20));
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Appends reboot log to migration file",
+    );
+    // A summary replaces the heuristic hint entirely — no redundant
+    // "(+N lines)" next to a sentence that already describes the command.
+    expect(textOf(row.lastCallComponent)).not.toContain("(+3 lines)");
   });
 
   test("summary is normalized to one line and capped at 80 chars", async () => {
-    const origFetch = globalThis.fetch;
-    const origKey = process.env.ONEMIN_API_KEY;
-    process.env.ONEMIN_API_KEY = "test-key";
-    globalThis.fetch = async () =>
-      ({
-        ok: true,
-        json: async () => ({
-          choices: [
-            {
-              message: {
-                content:
-                  '"Runs GLM model  with four   reasoning levels and shows token usage plus verbose error diagnostics"',
-              },
-            },
-          ],
-        }),
-      }) as any;
-    try {
-      __clearSummaryCache();
-      __setSummaryEnabled(true);
-      const h = new PiHarness();
-      cleanTui(h.api);
-      h.emit("session_start", { reason: "startup" });
-      h.emit("agent_start");
-      const row = h.row("bash", "norm");
-      row.setArgs({ command: heredoc });
-      await new Promise((r) => setTimeout(r, 20));
-      const text = textOf(row.lastCallComponent);
-      expect(text).toContain("Runs GLM model with four");
-      expect(text).not.toContain('"');
-      expect(text).not.toContain("  "); // collapsed whitespace
-      expect(text.length).toBeLessThanOrEqual(120); // 80-char summary cap
-    } finally {
-      globalThis.fetch = origFetch;
-      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
-      else process.env.ONEMIN_API_KEY = origKey;
-      __setSummaryEnabled(false);
-      __clearSummaryCache();
-    }
+    scriptedBackend(
+      () =>
+        '"Runs GLM model  with four   reasoning levels and shows token usage plus verbose error diagnostics"',
+    );
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "norm");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 20));
+    const text = textOf(row.lastCallComponent);
+    expect(text).toContain("Runs GLM model with four");
+    expect(text).not.toContain('"');
+    expect(text).not.toContain("  "); // collapsed whitespace
+    expect(text.length).toBeLessThanOrEqual(120); // 80-char summary cap
   });
 
   test("bash bullets keep up to 80 chars of the command", () => {
@@ -360,272 +368,386 @@ describe("clean-tui AI summary", () => {
     expect(text).toContain("b".repeat(75) + "…");
   });
 
-  test("summary model is configurable via goodies config", async () => {
+  test("unset summary-model means off: zero requests, zero noise", async () => {
+    // The feature costs nothing until the user picks a model — no network,
+    // no resolution work, and no error spam about a config they never made.
+    const calls = scriptedBackend(() => "should never run");
+    const logged = captureConsoleError();
+    // No setSummaryModel call here: exactly what fresh installs look like.
+    __clearSummaryCache();
+    __setSummaryEnabled(true);
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "off");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toHaveLength(0);
+    expect(logged).toHaveLength(0); // off is a state, not an error
+    expect(textOf(row.lastCallComponent)).toContain("(+3 lines)");
+  });
+
+  test("unknown summary-model fails once, quietly keeps the heuristic", async () => {
+    // A typo'd or removed model must degrade to heuristic hints with a single
+    // diagnostic — not a crash and not a render-driven failure storm.
+    __setSummaryModelRegistryForTesting({
+      find: () => undefined,
+      getAvailable: () => [],
+      async getApiKeyAndHeaders() {
+        throw new Error("must not reach auth for an unresolved model");
+      },
+    });
+    // Defensive belt: any accidental network attempt explodes loudly.
     const origFetch = globalThis.fetch;
-    const origKey = process.env.ONEMIN_API_KEY;
-    process.env.ONEMIN_API_KEY = "test-key";
-    // Redirect the goodies config to a temp file so we don't touch the real one.
-    const tmpDir = mkdtempSync(join(tmpdir(), "goodies-cfg-"));
-    __setConfigPathForTesting(join(tmpDir, "goodies.json"));
-    let seenModel: string | undefined;
-    globalThis.fetch = async (_url: any, init: any) => {
-      seenModel = JSON.parse(init?.body ?? "{}").model;
-      return {
-        ok: true,
-        json: async () => ({
-          choices: [{ message: { content: "some summary" } }],
-        }),
-      } as any;
-    };
-    try {
-      __clearSummaryCache();
-      __setSummaryEnabled(true);
-      setSummaryModel("openai/gpt-oss-20b");
-      const h = new PiHarness();
-      cleanTui(h.api);
-      h.emit("session_start", { reason: "startup" });
-      h.emit("agent_start");
-      const row = h.row("bash", "cfg");
-      row.setArgs({ command: heredoc });
-      await new Promise((r) => setTimeout(r, 20));
-      expect(seenModel).toBe("openai/gpt-oss-20b");
-    } finally {
+    globalThis.fetch = (async () => {
+      throw new Error("no network expected");
+    }) as typeof fetch;
+    cleanupFns.push(() => {
       globalThis.fetch = origFetch;
-      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
-      else process.env.ONEMIN_API_KEY = origKey;
-      setSummaryModel(undefined);
-      __setSummaryEnabled(false);
-      __clearSummaryCache();
-      __setConfigPathForTesting(
-        join(homedir(), ".pi", "agent", "goodies.json"),
-      );
-    }
+    });
+    useScratchConfig();
+    setSummaryModel("zai/no-such-model");
+    const logged = captureConsoleError();
+    __clearSummaryCache();
+    __setSummaryEnabled(true);
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "typo");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 20));
+    // More churn renders must not multiply diagnostics...
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(textOf(row.lastCallComponent)).toContain("(+3 lines)");
+    const failures = logged.filter((l) => l.includes("[clean-tui]"));
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("zai/no-such-model");
+  });
+
+  test("summaries ride the user's provider stack end-to-end (mocked wire)", async () => {
+    // The single wire-level test: legacy bare-id config resolves through a
+    // model registry, auth comes from getApiKeyAndHeaders, and the actual LLM
+    // call goes through pi-ai's completeSimple against a mocked transport.
+    const origFetch = globalThis.fetch;
+    let wireCount = 0;
+    let wire: { url: string; auth: string | null; body: any } | undefined;
+    globalThis.fetch = (async (url: any, init: any) => {
+      wireCount++;
+      wire = {
+        url: String(url),
+        auth: (init.headers as Headers)?.get?.("authorization") ?? null,
+        body: JSON.parse(init.body),
+      };
+      const sse = [
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant" } }] })}`,
+        `data: ${JSON.stringify({
+          choices: [
+            {
+              index: 0,
+              delta: { content: "Appends reboot log to migration file" },
+            },
+          ],
+        })}`,
+        `data: ${JSON.stringify({
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        })}`,
+        "data: [DONE]",
+      ].join("\n\n");
+      return new Response(sse + "\n\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+    cleanupFns.push(() => {
+      globalThis.fetch = origFetch;
+    });
+    const integrationModel: Model<"openai-completions"> = {
+      id: "grok-4-fast-non-reasoning",
+      name: "Grok Fast",
+      api: "openai-completions",
+      provider: "kilo",
+      baseUrl: "https://mock.local/v1",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 8000,
+      maxTokens: 100,
+    };
+    __setSummaryModelRegistryForTesting({
+      find: (provider, id) =>
+        provider === "kilo" && id === "grok-4-fast-non-reasoning"
+          ? integrationModel
+          : undefined,
+      getAvailable: () => [integrationModel],
+      async getApiKeyAndHeaders(model) {
+        expect(model.id).toBe("grok-4-fast-non-reasoning");
+        return { ok: true, apiKey: "test-key" };
+      },
+    });
+    useScratchConfig();
+    setSummaryModel("grok-4-fast-non-reasoning"); // legacy bare id — must fall back
+    __clearSummaryCache();
+    __setSummaryEnabled(true);
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "wire");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Appends reboot log to migration file",
+    );
+    expect(wire).toBeDefined();
+    expect(wire!.url).toBe("https://mock.local/v1/chat/completions");
+    expect(wire!.auth).toBe("Bearer test-key");
+    expect(wire!.body.model).toBe("grok-4-fast-non-reasoning"); // resolved id
+    expect(wire!.body.max_completion_tokens).toBe(30);
+    // reasoning: "off" — thinking would burn the tiny token budget silently.
+    expect(Object.keys(wire!.body)).not.toContain("reasoning_effort");
+    expect(wire!.body.messages[0].content[0].text).toContain(
+      "Summarize this shell command in 5-8 words",
+    );
+    expect(wire!.body.messages[0].content[0].text).toContain(
+      'cat >> "PsVita/Archive/MIGRATION-LOG.md"',
+    );
+    // Cached: further renders don't refetch.
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(wireCount).toBe(1);
   });
 
   test("429 engages a backoff instead of retrying on every render", async () => {
     // Regression: a failed summary was neither cached nor penalized, so every
     // bash re-render re-fired the request — a single 429 turned into a
     // render-driven retry storm that kept the rate limiter hot all session.
-    const origFetch = globalThis.fetch;
-    const origKey = process.env.ONEMIN_API_KEY;
-    const origErr = console.error;
-    process.env.ONEMIN_API_KEY = "test-key";
     __setSummaryBackoffForTesting(100, 60_000);
+    captureConsoleError();
     let calls = 0;
     let succeed = false;
-    globalThis.fetch = async () => {
+    const attempted = scriptedBackend(() => {
       calls++;
       if (!succeed)
-        return { ok: false, status: 429, headers: { get: () => null } } as any;
-      return {
-        ok: true,
-        json: async () => ({
-          choices: [
-            { message: { content: "Lists agent settings and extensions" } },
-          ],
-        }),
-      } as any;
-    };
-    console.error = () => {}; // expected failure log stays out of test output
-    try {
-      __clearSummaryCache();
-      __setSummaryEnabled(true);
-      const h = new PiHarness();
-      cleanTui(h.api);
-      h.emit("session_start", { reason: "startup" });
-      h.emit("agent_start");
-      const cmd = "echo " + "x".repeat(90);
-      const row = h.row("bash", "rl");
-      row.setArgs({ command: cmd });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(calls).toBe(1);
-      // Re-renders during the backoff window must not re-fire the request.
-      row.setResult({ content: ["ok"] });
-      row.setArgs({ command: cmd });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(calls).toBe(1);
-      expect(textOf(row.lastCallComponent)).not.toContain(
-        "Lists agent settings and extensions",
-      );
-      // After the cooldown the next render retries and recovers.
-      succeed = true;
-      await new Promise((r) => setTimeout(r, 120));
-      row.setArgs({ command: cmd });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(calls).toBe(2);
-      expect(textOf(row.lastCallComponent)).toContain(
-        "Lists agent settings and extensions",
-      );
-      // Cached: further renders don't refetch.
-      row.setArgs({ command: cmd });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(calls).toBe(2);
-    } finally {
-      globalThis.fetch = origFetch;
-      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
-      else process.env.ONEMIN_API_KEY = origKey;
-      __setSummaryEnabled(false);
-      __clearSummaryCache();
-      __setSummaryBackoffForTesting(30_000, 15 * 60_000);
-      console.error = origErr;
-    }
+        throw new Error("summary request failed: HTTP 429 (kilo/x)");
+      return "Lists agent settings and extensions";
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const cmd = "echo " + "x".repeat(90);
+    const row = h.row("bash", "rl");
+    row.setArgs({ command: cmd });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(1);
+    // Re-renders during the backoff window must not re-fire the request.
+    row.setResult({ content: ["ok"] });
+    row.setArgs({ command: cmd });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(1);
+    expect(attempted.filter((c) => c === cmd)).toHaveLength(1);
+    expect(textOf(row.lastCallComponent)).not.toContain(
+      "Lists agent settings and extensions",
+    );
+    // After the cooldown the next render retries and recovers.
+    succeed = true;
+    await new Promise((r) => setTimeout(r, 120));
+    row.setArgs({ command: cmd });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(2);
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Lists agent settings and extensions",
+    );
+    // Cached: further renders don't refetch.
+    row.setArgs({ command: cmd });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(2);
   });
 
   test("a success resets the failure streak", async () => {
     // Without a reset, one old 429 would double every future cooldown forever.
-    const origFetch = globalThis.fetch;
-    const origKey = process.env.ONEMIN_API_KEY;
-    const origErr = console.error;
-    process.env.ONEMIN_API_KEY = "test-key";
     __setSummaryBackoffForTesting(100, 60_000);
+    captureConsoleError();
     let calls = 0;
     let fail = true;
-    globalThis.fetch = async () => {
+    scriptedBackend(() => {
       calls++;
-      if (fail)
-        return { ok: false, status: 429, headers: { get: () => null } } as any;
-      return {
-        ok: true,
-        json: async () => ({
-          choices: [{ message: { content: `summary ${calls}` } }],
-        }),
-      } as any;
-    };
-    console.error = () => {};
-    try {
-      __clearSummaryCache();
-      __setSummaryEnabled(true);
-      const h = new PiHarness();
-      cleanTui(h.api);
-      h.emit("session_start", { reason: "startup" });
-      h.emit("agent_start");
-      const cmdA = "echo " + "a".repeat(90);
-      const cmdB = "echo " + "b".repeat(90);
-      const rowA = h.row("bash", "a");
-      rowA.setArgs({ command: cmdA });
-      await new Promise((r) => setTimeout(r, 10)); // failure 1 → paused 100ms
-      fail = false;
-      await new Promise((r) => setTimeout(r, 120));
-      rowA.setArgs({ command: cmdA }); // retry succeeds → streak reset
-      await new Promise((r) => setTimeout(r, 10));
-      expect(calls).toBe(2);
-      // A fresh failure now waits the BASE cooldown (100ms), not 2×base.
-      fail = true;
-      const rowB = h.row("bash", "b");
-      rowB.setArgs({ command: cmdB });
-      await new Promise((r) => setTimeout(r, 10)); // failure 2
-      fail = false;
-      await new Promise((r) => setTimeout(r, 120));
-      rowB.setArgs({ command: cmdB }); // retry succeeds only if streak was reset
-      await new Promise((r) => setTimeout(r, 10));
-      expect(calls).toBe(4);
-    } finally {
-      globalThis.fetch = origFetch;
-      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
-      else process.env.ONEMIN_API_KEY = origKey;
-      __setSummaryEnabled(false);
-      __clearSummaryCache();
-      __setSummaryBackoffForTesting(30_000, 15 * 60_000);
-      console.error = origErr;
-    }
+      if (fail) throw new Error(`summary request failed: HTTP 429 (#${calls})`);
+      return `summary ${calls}`;
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const cmdA = "echo " + "a".repeat(90);
+    const cmdB = "echo " + "b".repeat(90);
+    const rowA = h.row("bash", "a");
+    rowA.setArgs({ command: cmdA });
+    await new Promise((r) => setTimeout(r, 10)); // failure 1 → paused 100ms
+    fail = false;
+    await new Promise((r) => setTimeout(r, 120));
+    rowA.setArgs({ command: cmdA }); // retry succeeds → streak reset
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(2);
+    // A fresh failure now waits the BASE cooldown (100ms), not 2×base.
+    fail = true;
+    const rowB = h.row("bash", "b");
+    rowB.setArgs({ command: cmdB });
+    await new Promise((r) => setTimeout(r, 10)); // failure 2
+    fail = false;
+    await new Promise((r) => setTimeout(r, 120));
+    rowB.setArgs({ command: cmdB }); // retry succeeds only if streak was reset
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(4);
   });
 
-  test("an explicit Retry-After header extends the pause", async () => {
-    const origFetch = globalThis.fetch;
-    const origKey = process.env.ONEMIN_API_KEY;
-    const origErr = console.error;
-    process.env.ONEMIN_API_KEY = "test-key";
+  test("an explicit Retry-After hint extends the pause", async () => {
+    // Provider layers surface Retry-After as a retryAfterMs hint on the thrown
+    // error; the shared backoff honors it over its computed cooldown.
     __setSummaryBackoffForTesting(20, 60_000);
+    captureConsoleError();
     let calls = 0;
     let succeed = false;
-    globalThis.fetch = async () => {
+    scriptedBackend(() => {
       calls++;
       if (!succeed)
-        return {
-          ok: false,
-          status: 429,
-          headers: {
-            get: (name: string) => (name === "retry-after" ? "1" : null),
-          },
-        } as any;
-      return {
-        ok: true,
-        json: async () => ({
-          choices: [{ message: { content: "Recovers after retry-after" } }],
-        }),
-      } as any;
-    };
-    console.error = () => {};
-    try {
-      __clearSummaryCache();
-      __setSummaryEnabled(true);
-      const h = new PiHarness();
-      cleanTui(h.api);
-      h.emit("session_start", { reason: "startup" });
-      h.emit("agent_start");
-      const cmd = "echo " + "y".repeat(90);
-      const row = h.row("bash", "ra");
-      row.setArgs({ command: cmd });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(calls).toBe(1);
-      // Tiny base backoff (20ms) has long passed, but Retry-After: 1 holds.
-      await new Promise((r) => setTimeout(r, 150));
-      row.setArgs({ command: cmd });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(calls).toBe(1);
-      succeed = true;
-      await new Promise((r) => setTimeout(r, 950));
-      row.setArgs({ command: cmd });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(calls).toBe(2);
-    } finally {
-      globalThis.fetch = origFetch;
-      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
-      else process.env.ONEMIN_API_KEY = origKey;
-      __setSummaryEnabled(false);
-      __clearSummaryCache();
-      __setSummaryBackoffForTesting(30_000, 15 * 60_000);
-      console.error = origErr;
-    }
+        throw Object.assign(
+          new Error(`summary request failed: HTTP 429 (#${calls})`),
+          { retryAfterMs: 1000 },
+        );
+      return "Recovers after retry-after";
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const cmd = "echo " + "y".repeat(90);
+    const row = h.row("bash", "ra");
+    row.setArgs({ command: cmd });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(1);
+    // Tiny base backoff (20ms) has long passed, but Retry-After holds.
+    await new Promise((r) => setTimeout(r, 150));
+    row.setArgs({ command: cmd });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(1);
+    succeed = true;
+    await new Promise((r) => setTimeout(r, 950));
+    row.setArgs({ command: cmd });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toBe(2);
   });
 
-  test("missing API key logs once and keeps the heuristic hint", async () => {
-    const origFetch = globalThis.fetch;
-    const origKey = process.env.ONEMIN_API_KEY;
-    const origErr = console.error;
-    delete process.env.ONEMIN_API_KEY;
-    let fetchCalled = 0;
-    globalThis.fetch = async () => {
-      fetchCalled++;
-      throw new Error("should not be called without a key");
-    };
-    const logged: string[] = [];
-    console.error = (...args: any[]) => logged.push(args.join(" "));
-    // Point at a file that does not exist so the real key file is not read.
-    __setSummaryKeyFileForTesting("/nonexistent/ONEMIN_API_KEY");
-    try {
-      __clearSummaryCache();
-      __setSummaryEnabled(true);
-      const h = new PiHarness();
-      cleanTui(h.api);
-      h.emit("session_start", { reason: "startup" });
-      h.emit("agent_start");
-      const row = h.row("bash", "nokey");
-      row.setArgs({ command: heredoc });
-      await new Promise((r) => setTimeout(r, 20));
-      expect(fetchCalled).toBe(0); // no request without a key
-      expect(textOf(row.lastCallComponent)).toContain("(+3 lines)"); // hint stays
-      expect(logged.some((l) => l.includes("ONEMIN_API_KEY"))).toBe(true);
-    } finally {
-      globalThis.fetch = origFetch;
-      console.error = origErr;
-      if (origKey !== undefined) process.env.ONEMIN_API_KEY = origKey;
-      __setSummaryKeyFileForTesting(
-        join(homedir(), ".pi", "agent", "ONEMIN_API_KEY"),
-      );
-      __setSummaryEnabled(false);
-      __clearSummaryCache();
-    }
+  test("at most 2 summary requests run concurrently", async () => {
+    // A parallel-call burst renders N distinct long commands at once; without
+    // a cap each render fans out its own provider request simultaneously.
+    // Rows beyond the cap bounce and retry on later re-renders, exactly like
+    // real pi repaints them.
+    captureConsoleError();
+    let started = 0;
+    let active = 0;
+    let peak = 0;
+    const resolvers: Array<(v: string) => void> = [];
+    __setSummaryBackendForTesting({
+      summarize: async (cmd) => {
+        started++;
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise<string>((resolve) => resolvers.push(resolve));
+        active--;
+        return `s(${cmd.length})`;
+      },
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const [rowP, rowQ, rowR, rowS] = ["p", "q", "r", "s"].map((id) =>
+      h.row("bash", id),
+    );
+    const cmdOf = (tag: string) => `echo ${"z".repeat(85)}-${tag}`;
+    // Assistant messages are the burst boundary; fire one between rows so
+    // these four commands render solo instead of collapsing into a burst.
+    const nextSegment = () =>
+      h.emit("message_start", { message: { role: "assistant" } });
+    // First two start; the third and fourth hit the in-flight cap...
+    nextSegment();
+    rowP.setArgs({ command: cmdOf("p") });
+    nextSegment();
+    rowQ.setArgs({ command: cmdOf("q") });
+    expect(started).toBe(2);
+    expect(peak).toBe(2);
+    // ...so their later re-renders queue one at a time as slots free up.
+    // The freed slot becomes visible only after the success microtask drains.
+    const settle = () => new Promise((r) => setTimeout(r, 0));
+    resolvers[0]("sp"); // p resolves → slot frees
+    await settle();
+    nextSegment();
+    rowR.setArgs({ command: cmdOf("r") }); // r's re-render admits it
+    await settle();
+    expect(started).toBe(3);
+    expect(peak).toBe(2);
+    resolvers[1]("sq");
+    await settle();
+    nextSegment();
+    rowS.setArgs({ command: cmdOf("s") });
+    await settle();
+    expect(started).toBe(4);
+    expect(peak).toBe(2); // never more than two concurrent provider calls
+    resolvers[2]("sr");
+    resolvers[3]("ss");
+    await settle();
+    await settle(); // one hop for the result, one for the re-render
+    expect(textOf(rowR.lastCallComponent)).toContain("s(92)");
+  });
+
+  test("switching sessions abandons in-flight summaries without side effects", async () => {
+    // Render-side work outlives turns, so each session carries its own abort
+    // controller. A provider result delivered for an abandoned request must
+    // neither poison the new session's cache nor demand another penalty.
+    const logged = captureConsoleError();
+    let started = 0;
+    const resolvers: Array<(v: string) => void> = [];
+    __setSummaryBackendForTesting({
+      summarize: (_cmd, _signal) =>
+        new Promise<string>((resolve) => {
+          started++;
+          resolvers.push(resolve); // deliberately ignores abort: emulates a
+          // provider whose response raced past the cancellation.
+        }),
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const cmd = "echo " + "k".repeat(90);
+    const row = h.row("bash", "abandon");
+    row.setArgs({ command: cmd });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(started).toBe(1);
+    h.emit("session_start", { reason: "resume" }); // switches away mid-flight
+    h.emit("agent_start"); // the resumed session's first live run ends replay
+    resolvers[0]("stale answer"); // arrives after the switch
+    await new Promise((r) => setTimeout(r, 10));
+    // Same command rendered anew in the fresh session must request again —
+    // the stale result was discarded instead of cached.
+    const row2 = h.row("bash", "renewed");
+    row2.setArgs({ command: cmd });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(started).toBe(2);
+    // And a genuinely fresh result still flows end-to-end post-switch.
+    resolvers[1]("fresh summary");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(textOf(row2.lastCallComponent)).toContain("fresh summary");
+    expect(logged.filter((l) => l.includes("[clean-tui]"))).toHaveLength(0);
   });
 });
 
