@@ -65,6 +65,19 @@ Both are auto-discovered by pi at session start. Symlink source files into the d
 | `.pi/extensions/*.ts` | Project-local (only this repo) | `ln -s pi-packages/<ext>/<file>.ts .pi/extensions/<file>.ts` |
 | `~/.pi/agent/extensions/*.ts` | Global (all projects) | `ln -s pi-packages/<ext>/<file>.ts ~/.pi/agent/extensions/<file>.ts` |
 
+## Personal global extensions (not part of this repo)
+
+Files in `~/.pi/agent/extensions/` that are *not* symlinked from this repo are bermudi's local
+infrastructure. Never move them into `pi-packages/`, publish them, or delete them.
+
+- **`1min-provider.ts`** — registers bermudi's personal "1min" OpenAI-compatible proxy
+  (`https://1min-proxy.bermudi.deno.net/v1`, model `grok-4-fast-non-reasoning`) as a pi provider via
+  `pi.registerProvider`, so it appears in `/models` and resolves through the normal registry.
+  Consumed by clean-tui's smart summaries: `/goodies summary-model 1min/grok-4-fast-non-reasoning`.
+  Key resolution mirrors the pre-0.12.0 goodies behavior: `ONEMIN_API_KEY` env wins, otherwise the
+  file `~/.pi/agent/ONEMIN_API_KEY`; missing both logs a load-time warning. The key value itself is
+  never logged and must never enter agent context (RED LINE) — the extension reads it at runtime.
+
 ## Releasing bermudis-pi-goodies
 
 Release = tag push → GitHub Actions publishes to npm via OIDC trusted publishing (no npm token in CI). Steps:
