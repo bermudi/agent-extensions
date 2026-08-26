@@ -259,6 +259,7 @@ describe("clean-tui AI summary", () => {
     while (cleanupFns.length) cleanupFns.pop()!();
     __setSummaryBackendForTesting(undefined);
     __setSummaryModelRegistryForTesting(undefined);
+    __setSummaryEnabled(false);
   });
 
   /** Swap in a scripted backend (in place of the provider call). */
@@ -388,6 +389,22 @@ describe("clean-tui AI summary", () => {
     expect(textOf(row.lastCallComponent)).toContain("(+3 lines)");
   });
 
+  test("replayed history never requests summaries", async () => {
+    // Startup/-c//resume replays fire no events until a live run begins;
+    // render-side requests must stay suppressed during that window too.
+    const calls = scriptedBackend(() => "should never run in replay");
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "resume" });
+    // Deliberately NO agent_start: still inside replay.
+    const row = h.row("bash", "replay");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toHaveLength(0);
+    expect(textOf(row.lastCallComponent)).toContain("(+3 lines)");
+  });
+
   test("unknown summary-model fails once, quietly keeps the heuristic", async () => {
     // A typo'd or removed model must degrade to heuristic hints with a single
     // diagnostic — not a crash and not a render-driven failure storm.
@@ -483,12 +500,13 @@ describe("clean-tui AI summary", () => {
           : undefined,
       getAvailable: () => [integrationModel],
       async getApiKeyAndHeaders(model) {
-        expect(model.id).toBe("grok-4-fast-non-reasoning");
+        authedFor.push(`${model.provider}/${model.id}`);
         return { ok: true, apiKey: "test-key" };
       },
     });
     useScratchConfig();
     setSummaryModel("grok-4-fast-non-reasoning"); // legacy bare id — must fall back
+    const authedFor: string[] = [];
     __clearSummaryCache();
     __setSummaryEnabled(true);
     const h = new PiHarness();
@@ -506,8 +524,11 @@ describe("clean-tui AI summary", () => {
     expect(wire!.auth).toBe("Bearer test-key");
     expect(wire!.body.model).toBe("grok-4-fast-non-reasoning"); // resolved id
     expect(wire!.body.max_completion_tokens).toBe(30);
-    // reasoning: "off" — thinking would burn the tiny token budget silently.
-    expect(Object.keys(wire!.body)).not.toContain("reasoning_effort");
+    // No reasoning parameter at all: pi's own agent maps "off" to undefined,
+    // and several pi-ai APIs enable thinking on any truthy value.
+    for (const key of Object.keys(wire!.body))
+      expect(key.toLowerCase()).not.toContain("reason");
+    expect(authedFor).toEqual(["kilo/grok-4-fast-non-reasoning"]);
     expect(wire!.body.messages[0].content[0].text).toContain(
       "Summarize this shell command in 5-8 words",
     );
@@ -710,8 +731,9 @@ describe("clean-tui AI summary", () => {
 
   test("switching sessions abandons in-flight summaries without side effects", async () => {
     // Render-side work outlives turns, so each session carries its own abort
-    // controller. A provider result delivered for an abandoned request must
-    // neither poison the new session's cache nor demand another penalty.
+    // controller. The dangerous ordering is a stale provider response landing
+    // AFTER the fresh session already re-requested the same command: it must
+    // neither delete the new request's dedup marker nor poison its cache.
     const logged = captureConsoleError();
     let started = 0;
     const resolvers: Array<(v: string) => void> = [];
@@ -735,18 +757,21 @@ describe("clean-tui AI summary", () => {
     expect(started).toBe(1);
     h.emit("session_start", { reason: "resume" }); // switches away mid-flight
     h.emit("agent_start"); // the resumed session's first live run ends replay
-    resolvers[0]("stale answer"); // arrives after the switch
-    await new Promise((r) => setTimeout(r, 10));
-    // Same command rendered anew in the fresh session must request again —
-    // the stale result was discarded instead of cached.
+    // Fresh session re-requests the same command while the stale request is
+    // still pending.
     const row2 = h.row("bash", "renewed");
     row2.setArgs({ command: cmd });
     await new Promise((r) => setTimeout(r, 10));
     expect(started).toBe(2);
+    // NOW the stale response lands. It must stay fully inert.
+    resolvers[0]("stale answer");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(started).toBe(2); // dedup marker intact → no duplicate request
     // And a genuinely fresh result still flows end-to-end post-switch.
     resolvers[1]("fresh summary");
     await new Promise((r) => setTimeout(r, 10));
     expect(textOf(row2.lastCallComponent)).toContain("fresh summary");
+    expect(textOf(row2.lastCallComponent)).not.toContain("stale answer");
     expect(logged.filter((l) => l.includes("[clean-tui]"))).toHaveLength(0);
   });
 });

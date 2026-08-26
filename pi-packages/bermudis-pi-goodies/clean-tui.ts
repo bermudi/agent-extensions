@@ -30,7 +30,6 @@ import {
 import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
-import type { SimpleStreamOptions } from "@earendil-works/pi-ai";
 import {
   findSummaryModel,
   getSummaryModel,
@@ -253,23 +252,24 @@ interface SummaryBackend {
 // summary no matter how many lines. Above that, any command qualifies —
 // single-line pipelines benefit at least as much as heredocs.
 const SUMMARY_THRESHOLD_CHARS = 80;
-// Five-to-eight words fit in 30 completion tokens; thinking stays off so
-// reasoning models don't burn the budget before writing any visible text.
+// Five-to-eight words fit in 30 completion tokens. We deliberately do NOT
+// send a reasoning parameter: pi's own agent maps a session thinking level of
+// "off" to `reasoning: undefined` (agent-core agent.js), and pi-ai adapters
+// treat an absent option as their explicit no-thinking branch. Passing the
+// string "off" instead would be actively harmful on several APIs whose
+// branches key on truthiness (Anthropic/Google/Bedrock would enable thinking,
+// and budget math over DEFAULT_THINKING_BUDGETS["off"] === undefined yields
+// NaN max_tokens), even though clampThinkingLevel tolerates it at runtime.
+// Trade-off: OpenAI-family reasoning models keep their API-default effort
+// when no parameter is sent — prefer non-thinking models per the README.
 const SUMMARY_MAX_TOKENS = 30;
 const SUMMARY_PROMPT =
   "Summarize this shell command in 5-8 words, plain English, no quotes, no formatting. " +
   'Examples: "cat >> file << \'EOF\' with 20 lines of log" -> "Appends reboot log to migration file". ' +
   "Command:\n";
-
-// pi-ai's ThinkingLevel TS union lags its runtime: "off" is the first entry of
-// EXTENDED_THINKING_LEVELS, non-reasoning models clamp their supported levels
-// to ["off"], and every API adapter maps a clamped "off" to "send no reasoning
-// parameter". Requesting any visible level would let thinking share — on
-// several APIs outright consume — the tiny max_tokens budget before any text
-// appears, which reads downstream as an empty response.
-const SUMMARY_REASONING = "off" as unknown as NonNullable<
-  SimpleStreamOptions["reasoning"]
->;
+// Provider error bodies are not under our control and flow into console
+// output plus the log-once dedup set; keep both bounded.
+const SUMMARY_ERROR_SNIPPET_CHARS = 200;
 
 const summaryCache = new Map<string, string>();
 const pendingSummaries = new Set<string>();
@@ -367,8 +367,8 @@ async function summarizeViaProvider(
       apiKey: auth.apiKey,
       headers,
       maxTokens: SUMMARY_MAX_TOKENS,
-      reasoning: SUMMARY_REASONING,
       signal,
+      // No `reasoning`: see the note above the summary constants.
     },
   );
   // pi-ai encodes request failures in the returned message rather than
@@ -379,7 +379,9 @@ async function summarizeViaProvider(
     throw err;
   }
   if (response.stopReason === "error")
-    throw new Error(`${response.errorMessage ?? "request failed"} (${label})`);
+    throw new Error(
+      `${(response.errorMessage ?? "request failed").slice(0, SUMMARY_ERROR_SNIPPET_CHARS)} (${label})`,
+    );
   const text = response.content
     .filter((c): c is { type: "text"; text: string } => c.type === "text")
     .map((c) => c.text)
@@ -417,8 +419,11 @@ function logSummaryFailure(cmd: string, err: unknown, pauseMs?: number) {
 // Failure backoff: requestSummary runs on every bash renderCall, so after a
 // rate-limit (429) each re-render would immediately re-fire the request and
 // keep the limiter hot forever. A failure pauses ALL summary requests for a
-// doubling cooldown (capped); an explicit Retry-After header wins over the
+// doubling cooldown (capped); an explicit Retry-After hint wins over the
 // computed delay; the next success resets the streak.
+// (The hint arrives as err.retryAfterMs. Today the default provider backend
+// cannot produce one — pi-ai surfaces 429s as stopReason:"error" text without
+// structured headers — but seam backends may, so the override stays live.)
 const SUMMARY_BACKOFF_BASE_MS = 30_000;
 const SUMMARY_BACKOFF_CAP_MS = 15 * 60_000;
 let summaryBackoffBaseMs = SUMMARY_BACKOFF_BASE_MS;
@@ -470,17 +475,20 @@ function requestSummary(cmd: string): void {
   activeBackend()
     .summarize(cmd, signal)
     .then((raw) => {
-      pendingSummaries.delete(cmd);
-      // Providers can deliver after the user already switched sessions;
-      // such results must stay inert in the fresh session.
+      // Abort check MUST precede any shared-state mutation: a stale promise
+      // settling after a session switch would otherwise delete the marker of
+      // a newer request for the same command (session_start already cleared
+      // the set, so the abandoned branch needs no cleanup).
       if (signal.aborted) return;
+      pendingSummaries.delete(cmd);
       summaryFailStreak = 0;
       summaryBlockedUntil = 0;
       summaryCache.set(cmd, normalizeSummary(raw));
       invalidateRowsForCommand(cmd);
     })
     .catch((err) => {
-      pendingSummaries.delete(cmd);
+      if (!signal.aborted && (err as Error)?.name !== "AbortError")
+        pendingSummaries.delete(cmd);
       // Switching sessions aborts in-flight summaries deliberately: that is
       // not a provider failure — neither penalize nor log it.
       if (signal.aborted || (err as Error)?.name === "AbortError") return;

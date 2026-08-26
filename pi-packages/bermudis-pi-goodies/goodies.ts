@@ -154,17 +154,20 @@ export function suggestSummaryModels(
   value: string,
   limit = 5,
 ): string[] {
-  const terms = value
-    .toLowerCase()
-    .replace(/\//g, " ")
-    .split(/\s+/)
-    .filter(Boolean);
+  const q = value.toLowerCase();
+  const terms = q.split(/[\s/]+/).filter(Boolean);
+  // Kebab-cased model ids miss whole-term matching when users mistype one
+  // segment ("grok-4-x-typo"), so longer dash-separated fragments also count.
+  const fragments = q.split(/[\s/-]+/).filter((f) => f.length >= 4);
   if (terms.length === 0) return [];
   return registry
     .getAvailable()
     .filter((m) => {
       const hay = `${m.provider}/${m.id}`.toLowerCase();
-      return terms.some((t) => hay.includes(t));
+      return (
+        terms.some((t) => hay.includes(t)) ||
+        fragments.some((f) => hay.includes(f))
+      );
     })
     .slice(0, limit)
     .map((m) => `${m.provider}/${m.id}`);
@@ -255,9 +258,20 @@ export default function goodies(pi: ExtensionAPI): void {
         }
         // Validate against the user's own model registry before persisting:
         // a typo here would otherwise surface only as silent failures later.
-        const found = findSummaryModel(ctx.modelRegistry, value);
+        const registry = (
+          ctx as { modelRegistry?: SummaryModelRegistry } | undefined
+        )?.modelRegistry;
+        if (!registry) {
+          setSummaryModel(value);
+          ctx.ui.notify(
+            `summary-model set to ${value} (could not validate: model registry unavailable)`,
+            "warning",
+          );
+          return;
+        }
+        const found = findSummaryModel(registry, value);
         if (!found) {
-          const suggestions = suggestSummaryModels(ctx.modelRegistry, value);
+          const suggestions = suggestSummaryModels(registry, value);
           ctx.ui.notify(
             `Unknown model "${value}"` +
               (suggestions.length
@@ -271,8 +285,7 @@ export default function goodies(pi: ExtensionAPI): void {
         // the bare-id fallback.
         const canonical = `${found.provider}/${found.id}`;
         setSummaryModel(canonical);
-        const authMissing =
-          ctx.modelRegistry.hasConfiguredAuth?.(found) === false;
+        const authMissing = registry.hasConfiguredAuth?.(found) === false;
         ctx.ui.notify(
           `Smart summaries will use ${canonical}` +
             (authMissing
