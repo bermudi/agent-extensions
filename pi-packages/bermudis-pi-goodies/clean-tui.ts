@@ -305,8 +305,9 @@ async function fetchSummary(cmd: string): Promise<string> {
   if (!content) throw new Error("empty summary");
   return content
     .replace(/^["']|["']$/g, "")
+    .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 80);
+    .slice(0, SUMMARY_THRESHOLD_CHARS);
 }
 
 // Summaries are best-effort polish over the heuristic hint, but failures must
@@ -413,6 +414,11 @@ function formatBashCommand(cmd: string, theme: any, cap: number): string {
   return out;
 }
 
+// Display width a bullet's command text may occupy before ellipsizing.
+// Matches the summary floor: a command that qualified for summarization is
+// exactly the kind that needs the full 80 columns here too.
+const BASH_BULLET_WIDTH = SUMMARY_THRESHOLD_CHARS;
+
 function formatBashHeader(args: any, theme: any): string {
   const cmd = args.command || "...";
   // A summary already says what the command does; the (+N lines) size hint
@@ -436,7 +442,8 @@ function formatBashBullet(entry: Entry, theme: any): string {
   }
   const nl = cmd.indexOf("\n");
   let head = nl === -1 ? cmd : cmd.slice(0, nl);
-  if (head.length > 60) head = head.slice(0, 59) + "…";
+  if (head.length > BASH_BULLET_WIDTH)
+    head = head.slice(0, BASH_BULLET_WIDTH) + "…";
   let out = `  ${bullet}${accent(head)}`;
   if (nl !== -1) {
     const extra = cmd.split("\n").length - 1;

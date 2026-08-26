@@ -239,6 +239,69 @@ describe("clean-tui AI summary", () => {
     }
   });
 
+  test("summary is normalized to one line and capped at 80 chars", async () => {
+    const origFetch = globalThis.fetch;
+    const origKey = process.env.ONEMIN_API_KEY;
+    process.env.ONEMIN_API_KEY = "test-key";
+    globalThis.fetch = async () =>
+      ({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content:
+                  '"Runs GLM model  with four   reasoning levels and shows token usage plus verbose error diagnostics"',
+              },
+            },
+          ],
+        }),
+      }) as any;
+    try {
+      __clearSummaryCache();
+      __setSummaryEnabled(true);
+      const h = new PiHarness();
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const row = h.row("bash", "norm");
+      row.setArgs({ command: heredoc });
+      await new Promise((r) => setTimeout(r, 20));
+      const text = textOf(row.lastCallComponent);
+      expect(text).toContain("Runs GLM model with four");
+      expect(text).not.toContain('"');
+      expect(text).not.toContain("  "); // collapsed whitespace
+      expect(text.length).toBeLessThanOrEqual(120); // 80-char summary cap
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
+      else process.env.ONEMIN_API_KEY = origKey;
+      __setSummaryEnabled(false);
+      __clearSummaryCache();
+    }
+  });
+
+  test("bash bullets keep up to 80 chars of the command", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    // A real burst: both rows render as bullets under one "bash ×2" header.
+    // 80-char command fits whole; 85-char command ellipsizes at 80 columns.
+    const cmdA = "echo " + "a".repeat(74); // 79 chars — fits whole
+    const cmdB = "echo " + "b".repeat(80); // 85 chars — ellipsizes at 80
+    const a = h.row("bash", "a");
+    a.setArgs({ command: cmdA });
+    const b = h.row("bash", "b");
+    b.setArgs({ command: cmdB });
+    b.setResult({ content: ["ok"] });
+    a.setResult({ content: ["ok"] });
+
+    const text = textOf(a.lastCallComponent);
+    expect(text).toContain("a".repeat(74));
+    expect(text).toContain("b".repeat(75) + "…");
+  });
+
   test("summary model is configurable via goodies config", async () => {
     const origFetch = globalThis.fetch;
     const origKey = process.env.ONEMIN_API_KEY;
