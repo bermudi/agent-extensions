@@ -7,6 +7,7 @@ import cleanTui, {
   __setSummaryBackendForTesting,
   __setSummaryEnabled,
   __setSummaryModelRegistryForTesting,
+  setCleanTuiActive,
 } from "./clean-tui";
 import { PiHarness } from "pi-harness";
 import { homedir } from "node:os";
@@ -44,6 +45,19 @@ function freshHarness(): PiHarness {
   cleanTui(h.api);
   return h;
 }
+
+describe("clean-tui pi-codex integration flag", () => {
+  const FLAG = Symbol.for("bermudis-pi-goodies.clean-tui.active.v1");
+  const globals = globalThis as Record<symbol, unknown>;
+
+  test("loading the extension sets the flag; setCleanTuiActive(false) clears it", () => {
+    delete globals[FLAG];
+    const h = freshHarness(); // freshHarness loads clean-tui
+    expect(globals[FLAG]).toBe(true);
+    setCleanTuiActive(false);
+    expect(globals[FLAG]).toBeUndefined();
+  });
+});
 
 describe("clean-tui resume/replay", () => {
   test("replayed history stays fast (regression: /resume freeze)", () => {

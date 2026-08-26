@@ -35,6 +35,7 @@ import nameWithAi from "./name-with-ai.ts";
 import zed from "./zed.ts";
 import preferTools from "./prefer-tools.ts";
 import goodies, { isEnabled } from "./goodies.ts";
+import { setCleanTuiActive } from "./clean-tui.ts";
 
 export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   // Always register the toggle command first so you can recover even if
@@ -48,6 +49,7 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   if (isEnabled("prefer-tools")) preferTools(pi);
   if (isEnabled("keep-model")) keepModelOnNew(pi);
   if (isEnabled("clean-tui")) cleanTui(pi);
+  else setCleanTuiActive(false); // clear the pi-codex integration flag on /reload
   if (isEnabled("review")) review(pi);
   if (isEnabled("provider-balance")) providerBalance(pi);
   if (isEnabled("kilo")) kilo(pi);

@@ -36,6 +36,22 @@ import {
   type SummaryModelRegistry,
 } from "./goodies.ts";
 
+/**
+ * Process-global contract with @bermudi/pi-codex: its apply_patch/web_search
+ * tools render in clean-tui burst style only while this flag is set. Set when
+ * this extension loads (index.ts only loads it when the feature is enabled);
+ * index.ts clears it when the feature is disabled, so /reload converges.
+ * Key is versioned — bump on any contract change. Mirrored by the same
+ * Symbol.for key in pi-codex's src/clean-burst.ts.
+ */
+const CLEAN_TUI_ACTIVE = Symbol.for("bermudis-pi-goodies.clean-tui.active.v1");
+
+export function setCleanTuiActive(active: boolean): void {
+  const globals = globalThis as Record<symbol, unknown>;
+  if (active) globals[CLEAN_TUI_ACTIVE] = true;
+  else delete globals[CLEAN_TUI_ACTIVE];
+}
+
 type BuiltInTools = {
   read: ReturnType<typeof createReadTool>;
   bash: ReturnType<typeof createBashTool>;
@@ -638,6 +654,7 @@ function formatLsBullet(entry: Entry, theme: any): string {
 }
 
 export default function cleanTui(pi: ExtensionAPI): void {
+  setCleanTuiActive(true);
   const schemaTools = getBuiltInTools(process.cwd());
 
   pi.on("agent_start", (_event, ctx) => {
