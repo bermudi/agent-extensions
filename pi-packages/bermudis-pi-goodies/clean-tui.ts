@@ -237,10 +237,9 @@ function summaryModel(): string {
 }
 const SUMMARY_URL = "https://1min-proxy.bermudi.deno.net/v1/chat/completions";
 // Hard floor: commands at or under 80 chars are cheap to read as-is, so no
-// summary no matter how many lines. Above that, summarize when the command
-// is long OR multi-line (heredocs).
+// summary no matter how many lines. Above that, any command qualifies —
+// single-line pipelines benefit at least as much as heredocs.
 const SUMMARY_THRESHOLD_CHARS = 80;
-const SUMMARY_THRESHOLD_LINES = 3;
 const summaryCache = new Map<string, string>();
 const pendingSummaries = new Set<string>();
 let summaryEnabled = true;
@@ -272,8 +271,7 @@ export function __clearSummaryCache(): void {
 }
 
 function isSummarizable(cmd: string): boolean {
-  if (cmd.length <= SUMMARY_THRESHOLD_CHARS) return false;
-  return cmd.split("\n").length > SUMMARY_THRESHOLD_LINES;
+  return cmd.length > SUMMARY_THRESHOLD_CHARS;
 }
 
 async function fetchSummary(cmd: string): Promise<string> {
