@@ -4,9 +4,6 @@
   "workspaces": {
     "": {
       "name": "bermudis-pi-goodies",
-      "dependencies": {
-        "pi-harness": "file:../pi-harness",
-      },
       "devDependencies": {
         "@earendil-works/pi-agent-core": "^0.84.3",
         "@earendil-works/pi-ai": "^0.84.3",
@@ -14,6 +11,7 @@
         "@earendil-works/pi-tui": "^0.84.3",
         "@marcfargas/pi-test-harness": "0.6.1",
         "esbuild": "^0.27.0",
+        "pi-harness": "file:../pi-harness",
         "prettier": "^3.8.4",
       },
     },

@@ -231,7 +231,7 @@ function recordResult(entry: Entry | undefined, result: any, ctx: any) {
 // The model is configurable via `/goodies summary-model <model>` (persisted to
 // ~/.pi/agent/goodies.json); it defaults to a fast, cheap model. Any model
 // served by the 1min proxy works.
-const DEFAULT_SUMMARY_MODEL = "openai/gpt-oss-120b";
+const DEFAULT_SUMMARY_MODEL = "grok-4-fast-non-reasoning";
 function summaryModel(): string {
   return getSummaryModel() || DEFAULT_SUMMARY_MODEL;
 }

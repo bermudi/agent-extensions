@@ -1,24 +1,10 @@
 {
   "name": "bermudis-pi-goodies",
-  "version": "0.10.0",
-  "private": false,
-  "description": "A bundle of small, frequently-used Pi extensions.",
-  "keywords": ["pi-package"],
+  "version": "0.11.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bermudi/agent-extensions.git",
     "directory": "pi-packages/bermudis-pi-goodies"
-  },
-  "type": "module",
-  "files": ["*.ts", "!*.test.ts", "!*.bundle.ts", "README.md"],
-  "pi": {
-    "extensions": ["./index.ts"]
-  },
-  "scripts": {
-    "build": "esbuild index.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=bermudis-pi-goodies.bundle.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "bun test",
-    "format": "prettier --write \"*.ts\" \"!*.bundle.ts\""
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "^0.84.3",
@@ -27,12 +13,24 @@
     "@earendil-works/pi-tui": "^0.84.3",
     "@marcfargas/pi-test-harness": "0.6.1",
     "esbuild": "^0.27.0",
+    "pi-harness": "file:../pi-harness",
     "prettier": "^3.8.4"
   },
+  "description": "A bundle of small, frequently-used Pi extensions.",
+  "files": ["*.ts", "!*.test.ts", "!*.bundle.ts", "README.md"],
+  "keywords": ["pi-package"],
   "patchedDependencies": {
     "@marcfargas/pi-test-harness@0.6.1": "patches/@marcfargas%2Fpi-test-harness@0.6.1.patch"
   },
-  "dependencies": {
-    "pi-harness": "file:../pi-harness"
-  }
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "private": false,
+  "scripts": {
+    "build": "esbuild index.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=bermudis-pi-goodies.bundle.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "format": "prettier --write \"*.ts\" \"!*.bundle.ts\""
+  },
+  "type": "module"
 }
