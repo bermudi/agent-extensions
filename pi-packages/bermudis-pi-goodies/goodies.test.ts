@@ -3,6 +3,8 @@ import {
   isEnabled,
   setEnabled,
   listFeatures,
+  getSummaryModel,
+  setSummaryModel,
   __setConfigPathForTesting,
 } from "./goodies";
 import { readFileSync, unlinkSync, existsSync, mkdtempSync } from "node:fs";
@@ -47,5 +49,19 @@ describe("goodies feature toggles", () => {
     setEnabled("clean-tui", false);
     expect(isEnabled("kilo")).toBe(true);
     expect(isEnabled("provider-balance")).toBe(true);
+  });
+
+  test("summary-model setting round-trips and persists", () => {
+    expect(getSummaryModel()).toBeUndefined();
+    setSummaryModel("openai/gpt-oss-20b");
+    expect(getSummaryModel()).toBe("openai/gpt-oss-20b");
+    const raw = readFileSync(CONFIG_PATH, "utf-8");
+    expect(JSON.parse(raw)["summary-model"]).toBe("openai/gpt-oss-20b");
+    // reset clears it
+    setSummaryModel(undefined);
+    expect(getSummaryModel()).toBeUndefined();
+    expect(
+      JSON.parse(readFileSync(CONFIG_PATH, "utf-8"))["summary-model"],
+    ).toBeUndefined();
   });
 });

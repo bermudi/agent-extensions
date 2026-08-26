@@ -25,6 +25,7 @@ import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { getSummaryModel } from "./goodies.ts";
 
 type BuiltInTools = {
   read: ReturnType<typeof createReadTool>;
@@ -226,8 +227,14 @@ function recordResult(entry: Entry | undefined, result: any, ctx: any) {
   revalidateBurstsAround(entry.toolCallId);
 }
 
-// ── AI summary for massive bash commands (qwen3.7-flash via 1min proxy) ──
-const SUMMARY_MODEL = "qwen3.7-flash";
+// ── AI summary for massive bash commands (via 1min proxy) ──
+// The model is configurable via `/goodies summary-model <model>` (persisted to
+// ~/.pi/agent/goodies.json); it defaults to a fast, cheap model. Any model
+// served by the 1min proxy works.
+const DEFAULT_SUMMARY_MODEL = "openai/gpt-oss-120b";
+function summaryModel(): string {
+  return getSummaryModel() || DEFAULT_SUMMARY_MODEL;
+}
 const SUMMARY_URL = "https://1min-proxy.bermudi.deno.net/v1/chat/completions";
 const SUMMARY_THRESHOLD_CHARS = 120;
 const SUMMARY_THRESHOLD_LINES = 3;
@@ -285,7 +292,7 @@ async function fetchSummary(cmd: string): Promise<string> {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: SUMMARY_MODEL,
+      model: summaryModel(),
       messages: [{ role: "user", content: prompt }],
       temperature: 0.2,
       max_tokens: 30,

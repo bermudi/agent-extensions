@@ -8,6 +8,9 @@ import cleanTui, {
 import { PiHarness } from "pi-harness";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { setSummaryModel, __setConfigPathForTesting } from "./goodies";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 function textOf(component: unknown): string {
   // Box children are Text components holding a raw `text` string
@@ -218,6 +221,48 @@ describe("clean-tui AI summary", () => {
       else process.env.ONEMIN_API_KEY = origKey;
       __setSummaryEnabled(false);
       __clearSummaryCache();
+    }
+  });
+
+  test("summary model is configurable via goodies config", async () => {
+    const origFetch = globalThis.fetch;
+    const origKey = process.env.ONEMIN_API_KEY;
+    process.env.ONEMIN_API_KEY = "test-key";
+    // Redirect the goodies config to a temp file so we don't touch the real one.
+    const tmpDir = mkdtempSync(join(tmpdir(), "goodies-cfg-"));
+    __setConfigPathForTesting(join(tmpDir, "goodies.json"));
+    let seenModel: string | undefined;
+    globalThis.fetch = async (_url: any, init: any) => {
+      seenModel = JSON.parse(init?.body ?? "{}").model;
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "some summary" } }],
+        }),
+      } as any;
+    };
+    try {
+      __clearSummaryCache();
+      __setSummaryEnabled(true);
+      setSummaryModel("openai/gpt-oss-20b");
+      const h = new PiHarness();
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const row = h.row("bash", "cfg");
+      row.setArgs({ command: heredoc });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(seenModel).toBe("openai/gpt-oss-20b");
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origKey === undefined) delete process.env.ONEMIN_API_KEY;
+      else process.env.ONEMIN_API_KEY = origKey;
+      setSummaryModel(undefined);
+      __setSummaryEnabled(false);
+      __clearSummaryCache();
+      __setConfigPathForTesting(
+        join(homedir(), ".pi", "agent", "goodies.json"),
+      );
     }
   });
 

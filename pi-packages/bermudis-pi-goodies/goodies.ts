@@ -48,7 +48,10 @@ const FEATURES: FeatureName[] = [
   "tps",
 ];
 
-type Config = Partial<Record<FeatureName, boolean>>;
+type Config = Partial<Record<FeatureName, boolean>> & {
+  /** Model used by clean-tui's AI command summaries (1min proxy). */
+  "summary-model"?: string;
+};
 
 function loadConfig(): Config {
   try {
@@ -83,11 +86,25 @@ export function listFeatures(): Array<{ name: FeatureName; enabled: boolean }> {
   return FEATURES.map((name) => ({ name, enabled: isEnabled(name) }));
 }
 
+export function getSummaryModel(): string | undefined {
+  const v = config["summary-model"];
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+export function setSummaryModel(model: string | undefined): void {
+  if (model === undefined || model.trim() === "") {
+    delete config["summary-model"];
+  } else {
+    config["summary-model"] = model.trim();
+  }
+  saveConfig(config);
+}
+
 export default function goodies(pi: ExtensionAPI): void {
   pi.registerCommand("goodies", {
     description: "Toggle bermudis-pi-goodies features on/off",
     getArgumentCompletions: (prefix) => {
-      const subcommands = ["list", "enable", "disable"];
+      const subcommands = ["list", "enable", "disable", "summary-model"];
       const parts = prefix.trim().split(/\s+/);
       if (parts.length <= 1) {
         return subcommands
@@ -135,8 +152,30 @@ export default function goodies(pi: ExtensionAPI): void {
         return;
       }
 
+      if (sub === "summary-model") {
+        const model = parts.slice(1).join(" ");
+        if (!model) {
+          const current = getSummaryModel();
+          ctx.ui.notify(
+            current
+              ? `summary-model: ${current}`
+              : "summary-model: not set (using default)",
+            "info",
+          );
+          return;
+        }
+        if (model === "default") {
+          setSummaryModel(undefined);
+          ctx.ui.notify("summary-model reset to default", "info");
+          return;
+        }
+        setSummaryModel(model);
+        ctx.ui.notify(`summary-model set to ${model}`, "info");
+        return;
+      }
+
       ctx.ui.notify(
-        `Usage: /goodies [list|enable <feature>|disable <feature>]`,
+        `Usage: /goodies [list|enable <feature>|disable <feature>|summary-model [model|default]]`,
         "warning",
       );
     },
