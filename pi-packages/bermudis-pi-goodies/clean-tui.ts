@@ -6,11 +6,17 @@
  * background box instead of three separate striped rows. Followers in a burst
  * render nothing and are hidden, so N calls cost ~1 row when collapsed.
  *
- * An assistant message always closes the open burst: pi streams a message's
- * text first and creates its tool components during that same stream, so a
- * message's tools visually belong after its prose. Without this boundary every
- * same-tool call of an entire agent run accumulates into one mega-block
- * rendered at the first call's position.
+ * Visible prose always closes the open burst: pi streams a message's text
+ * first and creates its tool components during that same stream, so a
+ * message's tools visually belong after the prose that precedes them. Without
+ * this boundary every same-tool call of an entire agent run accumulates into
+ * one mega-block rendered at the first call's position.
+ *
+ * Textless assistant messages (only thinking + tool calls — the shape models
+ * emit when they call tools one at a time) do NOT close the burst: no prose
+ * separates their calls from the previous ones, so back-to-back same-tool
+ * calls chain into one block until real text appears. Typed user messages
+ * count as prose too.
  *
  * Images are respected: a read that returns an image is never grouped, stays
  * solo, and its image is rendered by Pi's native image layer (outside our
@@ -110,10 +116,10 @@ type Entry = {
   toolName: string;
   args: any;
   /**
-   * Assistant-message boundary: live entries count up from 1 (bumped on each
-   * assistant message_start); replayed entries count down from -1 (one per
-   * assistant message in the restored branch). NaN = unknown lineage — never
-   * groups. Tools of one assistant message share a segment.
+   * Visible-prose boundary: live entries count up (bumped when visible text
+   * appears — assistant text block or typed user message); replayed entries
+   * count down (one per prose boundary in the restored branch). NaN = unknown
+   * lineage — never groups. Calls with no prose between them share a segment.
    */
   seg: number;
   /** Position in `entries`; stable because entries are append-only. */
@@ -129,6 +135,8 @@ type Entry = {
 };
 
 let liveSeg = 0;
+/** Whether the assistant message currently streaming has shown visible text. */
+let curAssistantTextSeen = false;
 // True while pi is replaying persisted history (startup with -c/--continue,
 // /resume, /fork). During replay no events fire, so segment boundaries are
 // rebuilt from the session branch instead (see session_start).
@@ -162,14 +170,29 @@ function upsertEntry(
   return e;
 }
 
+/**
+ * A message shows visible prose when it has a non-empty text block. Thinking
+ * blocks and tool calls don't count — they render as placeholders/rows, not
+ * prose, and must not close a burst.
+ */
+function hasVisibleText(message: any): boolean {
+  return (message?.content ?? []).some(
+    (b: any) =>
+      b?.type === "text" &&
+      typeof b.text === "string" &&
+      b.text.trim().length > 0,
+  );
+}
+
 function shouldGroup(a: Entry, b: Entry): boolean {
-  // Grouping is by adjacency + same tool within one assistant message. A
-  // message's tools execute after its own prose and before the next message
-  // streams, so the segment counter (bumped on every assistant message_start)
-  // splits bursts exactly where the conversation visually splits. Live
-  // segments count up, replay segments count down — the two domains can never
-  // merge. NaN (unknown lineage) compares unequal to everything, so those
-  // rows render solo.
+  // Grouping is by adjacency + same tool with no visible prose in between.
+  // A message's tools execute after its own prose and before the next message
+  // streams, so the segment counter (bumped when visible text appears) splits
+  // bursts exactly where the conversation visually splits. Textless messages
+  // never bump it, so a model calling tools one-per-message still chains into
+  // a single block. Live segments count up, replay segments count down — the
+  // two domains can never merge. NaN (unknown lineage) compares unequal to
+  // everything, so those rows render solo.
   if (a.seg !== b.seg) return false;
   if (a.toolName !== b.toolName) return false;
   if (a.hasImage || b.hasImage) return false;
@@ -670,14 +693,37 @@ export default function cleanTui(pi: ExtensionAPI): void {
         .modelRegistry;
     }
   });
-  // Assistant messages are the burst boundary (see shouldGroup). message_start
-  // — not message_end — because pi creates a message's tool components while
-  // that message is still streaming, before its end event fires.
+  // Visible prose is the burst boundary (see shouldGroup / hasVisibleText).
+  // Assistant text is detected during streaming — pi creates a message's tool
+  // components while that message is still streaming, and text blocks precede
+  // its tool calls, so by the time the first tool of a message registers, any
+  // prose in that message has already bumped the segment. Textless messages
+  // (thinking + tool calls only) never bump it.
   pi.on("message_start", (event, _ctx) => {
-    if ((event as any).message?.role === "assistant") liveSeg++;
+    const message = (event as any).message;
+    if (!message) return;
+    if (message.role === "assistant") {
+      // Some providers deliver the complete message at start (no streaming).
+      curAssistantTextSeen = hasVisibleText(message);
+      if (curAssistantTextSeen) liveSeg++;
+    } else if (message.role === "user") {
+      // A typed user message is prose; it must split the surrounding bursts.
+      if (hasVisibleText(message)) liveSeg++;
+    }
+  });
+  pi.on("message_update", (event, _ctx) => {
+    const message = (event as any).message;
+    if (message?.role !== "assistant" || curAssistantTextSeen) return;
+    // Scanning the accumulating content (rather than matching text_start
+    // alone) also covers providers that skip granular streaming events.
+    if (hasVisibleText(message)) {
+      curAssistantTextSeen = true;
+      liveSeg++;
+    }
   });
   pi.on("session_start", (_event, ctx) => {
     liveSeg = 0;
+    curAssistantTextSeen = false;
     replaying = true;
     entries.length = 0;
     entryById.clear();
@@ -692,20 +738,25 @@ export default function cleanTui(pi: ExtensionAPI): void {
     summarySessionAbort.abort();
     summarySessionAbort = new AbortController();
     // Replayed history fires no events: rebuild segment boundaries from the
-    // branch by giving every assistant message's tool calls one segment,
-    // mirroring the live rule. Calls not present in the branch (defensive)
-    // get NaN and render solo.
+    // branch with one segment per prose boundary, mirroring the live rule.
+    // Textless assistant messages keep the current segment; visible text
+    // (assistant or typed user) starts a new one. Calls not present in the
+    // branch (defensive) get NaN and render solo.
     replaySegByToolCallId.clear();
     const branch = ctx?.sessionManager?.getBranch?.() ?? [];
     let seg = 0;
     for (const entry of branch) {
       const message = entry?.type === "message" ? entry.message : undefined;
-      if (message?.role !== "assistant") continue;
-      seg--;
-      for (const block of message.content ?? []) {
-        if (block?.type === "toolCall" && typeof block.id === "string") {
-          replaySegByToolCallId.set(block.id, seg);
+      if (!message) continue;
+      if (message.role === "assistant") {
+        if (hasVisibleText(message)) seg--;
+        for (const block of message.content ?? []) {
+          if (block?.type === "toolCall" && typeof block.id === "string") {
+            replaySegByToolCallId.set(block.id, seg);
+          }
         }
+      } else if (message.role === "user" && hasVisibleText(message)) {
+        seg--;
       }
     }
   });

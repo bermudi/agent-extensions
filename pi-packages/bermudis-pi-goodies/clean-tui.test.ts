@@ -127,10 +127,10 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(r2.lastCallComponent)).not.toContain("×2");
   });
 
-  test("replayed same-tool calls in different assistant messages do not group", () => {
-    // Assistant messages are burst boundaries: pi streams a message's prose
-    // before its tools render, so merging across messages would drag later
-    // calls above the text that chronologically precedes them.
+  test("replayed textless assistant messages chain into one burst", () => {
+    // Burst boundary is visible prose, not the message edge: a model that
+    // calls one tool per assistant message (thinking + toolCall, no text)
+    // produces calls with no prose between them — same block.
     const h = freshHarness();
     h.ctx.sessionManager.branch = [
       assistantMessage({ id: "a", name: "read" }),
@@ -142,8 +142,65 @@ describe("clean-tui resume/replay", () => {
     const b = h.row("read", "b");
     a.setArgs({ path: "/tmp/a.ts" });
     b.setArgs({ path: "/tmp/b.ts" });
+    expect(textOf(a.lastCallComponent)).toContain("read ×2");
+    expect(b.lastCallComponent instanceof Container).toBe(true);
+  });
+
+  test("replayed prose between messages keeps their bursts apart", () => {
+    // pi streams a message's prose before its tools render, so merging across
+    // text would drag later calls above the text that chronologically
+    // precedes them. Assistant text and typed user text both break the run.
+    const assistantWithText = (
+      text: string,
+      ...toolCalls: Array<{ id: string; name: string }>
+    ) => ({
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text },
+          ...toolCalls.map((tc) => ({
+            type: "toolCall",
+            id: tc.id,
+            name: tc.name,
+            arguments: {},
+          })),
+        ],
+      },
+    });
+
+    const h = freshHarness();
+    h.ctx.sessionManager.branch = [
+      assistantMessage({ id: "a", name: "read" }),
+      assistantWithText("Now look elsewhere.", { id: "b", name: "read" }),
+    ];
+    h.emit("session_start", { reason: "resume" });
+    const a = h.row("read", "a");
+    const b = h.row("read", "b");
+    a.setArgs({ path: "/tmp/a.ts" });
+    b.setArgs({ path: "/tmp/b.ts" });
     expect(textOf(a.lastCallComponent)).not.toContain("×2");
     expect(textOf(b.lastCallComponent)).not.toContain("×2");
+
+    const h2 = freshHarness();
+    h2.ctx.sessionManager.branch = [
+      assistantMessage({ id: "a", name: "read" }),
+      {
+        type: "message",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "stop, do something else" }],
+        },
+      },
+      assistantMessage({ id: "b", name: "read" }),
+    ];
+    h2.emit("session_start", { reason: "resume" });
+    const ua = h2.row("read", "a");
+    const ub = h2.row("read", "b");
+    ua.setArgs({ path: "/tmp/a.ts" });
+    ub.setArgs({ path: "/tmp/b.ts" });
+    expect(textOf(ua.lastCallComponent)).not.toContain("×2");
+    expect(textOf(ub.lastCallComponent)).not.toContain("×2");
   });
 
   test("a replayed image read splits its burst once the result lands", () => {
@@ -198,18 +255,104 @@ describe("clean-tui resume/replay", () => {
     // Assistant message 2 (text + another read): its tools start a fresh
     // burst instead of being dragged into message 1's block.
     h.emit("message_start", { message: { role: "assistant" } });
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Now check something else." }],
+      },
+    });
     const c = h.row("read", "c");
     c.setArgs({ path: "/tmp/c.ts" });
     expect(textOf(a.lastCallComponent)).toContain("×2");
     expect(textOf(a.lastCallComponent)).not.toContain("×3");
     expect(textOf(c.lastCallComponent)).not.toContain("×2");
 
-    // agent_start alone does not break a burst — assistant messages do.
+    // agent_start alone does not break a burst — visible prose does.
     // (Every real run begins with an assistant message; this pins the rule.)
     h.emit("agent_start");
     const d = h.row("read", "d");
     d.setArgs({ path: "/tmp/d.ts" });
     expect(textOf(c.lastCallComponent)).toContain("×2");
+  });
+
+  test("live: back-to-back textless assistant messages chain into one burst", () => {
+    // Regression guard for the glm-5.3-flash shape: the model calls one tool
+    // per assistant message (thinking + toolCall, no prose). No text between
+    // the calls, so they belong in one block; the next message's prose ends
+    // the chain.
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    const a = h.row("bash", "a");
+    a.setArgs({ command: "echo one" });
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    const b = h.row("bash", "b");
+    b.setArgs({ command: "echo two" });
+    expect(textOf(a.lastCallComponent)).toContain("bash ×2");
+    expect(b.lastCallComponent instanceof Container).toBe(true);
+
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "All done." }],
+      },
+    });
+    h.emit("message_start", { message: { role: "assistant" } });
+    const c = h.row("bash", "c");
+    c.setArgs({ command: "echo three" });
+    expect(textOf(a.lastCallComponent)).toContain("bash ×2");
+    expect(textOf(a.lastCallComponent)).not.toContain("×3");
+    expect(textOf(c.lastCallComponent)).not.toContain("×2");
+  });
+
+  test("live: a typed user message closes the open burst", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    const a = h.row("bash", "a");
+    a.setArgs({ command: "echo one" });
+
+    h.emit("message_start", {
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "actually, check this too" }],
+      },
+    });
+    h.emit("message_start", { message: { role: "assistant" } });
+    const b = h.row("bash", "b");
+    b.setArgs({ command: "echo two" });
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(textOf(b.lastCallComponent)).not.toContain("×2");
+  });
+
+  test("live: text between tool calls of one message splits them", () => {
+    // Interleaved text-and-tools in a single message: the second call must
+    // not be dragged into a burst rendered above the text.
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    const a = h.row("bash", "a");
+    a.setArgs({ command: "echo one" });
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "a", name: "bash", arguments: {} },
+          { type: "text", text: "Now the second step." },
+        ],
+      },
+    });
+    const b = h.row("bash", "b");
+    b.setArgs({ command: "echo two" });
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(textOf(b.lastCallComponent)).not.toContain("×2");
   });
 
   test("the user example: 2x read, prose, edit", () => {
@@ -230,6 +373,12 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(r1.lastCallComponent)).toContain("read ×2");
 
     h.emit("message_start", { message: { role: "assistant" } });
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Replacing a.ts with an edit." }],
+      },
+    });
     const e = h.row("edit", "e1");
     e.setArgs({ path: "/tmp/a.ts" });
     e.setResult({ content: ["ok"] });
@@ -708,10 +857,17 @@ describe("clean-tui AI summary", () => {
       h.row("bash", id),
     );
     const cmdOf = (tag: string) => `echo ${"z".repeat(85)}-${tag}`;
-    // Assistant messages are the burst boundary; fire one between rows so
-    // these four commands render solo instead of collapsing into a burst.
-    const nextSegment = () =>
+    // Visible prose is the burst boundary; emit text between rows so these
+    // four commands render solo instead of chaining into one burst.
+    const nextSegment = () => {
       h.emit("message_start", { message: { role: "assistant" } });
+      h.emit("message_update", {
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "next step" }],
+        },
+      });
+    };
     // First two start; the third and fourth hit the in-flight cap...
     nextSegment();
     rowP.setArgs({ command: cmdOf("p") });
