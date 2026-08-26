@@ -18,6 +18,22 @@ function textOf(component: unknown): string {
   return box?.children?.map((c) => c.text ?? "").join("\n") ?? "";
 }
 
+/** A replayed assistant message entry carrying tool calls (session format). */
+function assistantMessage(...toolCalls: Array<{ id: string; name: string }>) {
+  return {
+    type: "message",
+    message: {
+      role: "assistant",
+      content: toolCalls.map((tc) => ({
+        type: "toolCall",
+        id: tc.id,
+        name: tc.name,
+        arguments: {},
+      })),
+    },
+  };
+}
+
 function freshHarness(): PiHarness {
   __clearSummaryCache();
   __setSummaryEnabled(false);
@@ -48,8 +64,15 @@ describe("clean-tui resume/replay", () => {
     expect(h.totalFallbacks).toBe(0);
   });
 
-  test("consecutive same-tool calls group during replay", () => {
+  test("consecutive same-tool calls group during replay (same assistant message)", () => {
     const h = freshHarness();
+    h.ctx.sessionManager.branch = [
+      assistantMessage(
+        { id: "a", name: "read" },
+        { id: "b", name: "read" },
+        { id: "c", name: "read" },
+      ),
+    ];
     h.emit("session_start", { reason: "resume" });
 
     const a = h.row("read", "a");
@@ -69,6 +92,13 @@ describe("clean-tui resume/replay", () => {
 
     // A different tool in between breaks the run.
     const h2 = freshHarness();
+    h2.ctx.sessionManager.branch = [
+      assistantMessage(
+        { id: "r1", name: "read" },
+        { id: "sh", name: "bash" },
+        { id: "r2", name: "read" },
+      ),
+    ];
     h2.emit("session_start", { reason: "resume" });
     const r1 = h2.row("read", "r1");
     const sh = h2.row("bash", "sh");
@@ -80,8 +110,34 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(r2.lastCallComponent)).not.toContain("×2");
   });
 
+  test("replayed same-tool calls in different assistant messages do not group", () => {
+    // Assistant messages are burst boundaries: pi streams a message's prose
+    // before its tools render, so merging across messages would drag later
+    // calls above the text that chronologically precedes them.
+    const h = freshHarness();
+    h.ctx.sessionManager.branch = [
+      assistantMessage({ id: "a", name: "read" }),
+      assistantMessage({ id: "b", name: "read" }),
+    ];
+    h.emit("session_start", { reason: "resume" });
+
+    const a = h.row("read", "a");
+    const b = h.row("read", "b");
+    a.setArgs({ path: "/tmp/a.ts" });
+    b.setArgs({ path: "/tmp/b.ts" });
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(textOf(b.lastCallComponent)).not.toContain("×2");
+  });
+
   test("a replayed image read splits its burst once the result lands", () => {
     const h = freshHarness();
+    h.ctx.sessionManager.branch = [
+      assistantMessage(
+        { id: "a", name: "read" },
+        { id: "img", name: "read" },
+        { id: "b", name: "read" },
+      ),
+    ];
     h.emit("session_start", { reason: "resume" });
     const a = h.row("read", "a");
     const img = h.row("read", "img");
@@ -100,33 +156,15 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(b.lastCallComponent)).not.toContain("×3");
   });
 
-  test("sequential calls across model round-trips still group (turn_start per round)", () => {
-    // Regression: pi fires turn_start per model round-trip, not per user
-    // message. An agent run with 3 sequential reads fires turn_start 3 times;
-    // grouping keyed on turn boundaries never grouped anything live.
+  test("live bursts group within one assistant message", () => {
+    // Regression guard for the mega-burst: bursts must break at assistant
+    // messages, not accumulate across an entire agent run.
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
 
-    const rows = ["a", "b", "c"].map((id) => {
-      h.emit("turn_start"); // each tool call is its own model round-trip
-      const row = h.row("read", id);
-      row.setArgs({ path: `/tmp/${id}.ts` });
-      row.setResult({ content: ["ok"] });
-      h.emit("turn_end");
-      return row;
-    });
-
-    expect(rows[1].lastCallComponent instanceof Container).toBe(true);
-    expect(rows[2].lastCallComponent instanceof Container).toBe(true);
-    expect(textOf(rows[0].lastCallComponent)).toContain("read ×3");
-  });
-
-  test("live bursts group within one agent run", () => {
-    const h = freshHarness();
-    h.emit("session_start", { reason: "startup" });
-    h.emit("agent_start");
-
+    // Assistant message 1 streams (thinking + two parallel reads).
+    h.emit("message_start", { message: { role: "assistant" } });
     const a = h.row("read", "a");
     const b = h.row("read", "b");
     a.setArgs({ path: "/tmp/a.ts" });
@@ -140,16 +178,47 @@ describe("clean-tui resume/replay", () => {
     expect(a.lastCallComponent instanceof Box).toBe(true);
     expect(textOf(a.lastCallComponent)).toContain("×2");
 
-    // A different tool breaks the burst.
-    const c = h.row("bash", "c");
-    c.setArgs({ command: "echo hi" });
+    // Assistant message 2 (text + another read): its tools start a fresh
+    // burst instead of being dragged into message 1's block.
+    h.emit("message_start", { message: { role: "assistant" } });
+    const c = h.row("read", "c");
+    c.setArgs({ path: "/tmp/c.ts" });
+    expect(textOf(a.lastCallComponent)).toContain("×2");
+    expect(textOf(a.lastCallComponent)).not.toContain("×3");
     expect(textOf(c.lastCallComponent)).not.toContain("×2");
 
-    // A new agent run starts a fresh burst.
+    // agent_start alone does not break a burst — assistant messages do.
+    // (Every real run begins with an assistant message; this pins the rule.)
     h.emit("agent_start");
     const d = h.row("read", "d");
-    d.setArgs({ path: "/tmp/c.ts" });
-    expect(textOf(d.lastCallComponent)).not.toContain("×2");
+    d.setArgs({ path: "/tmp/d.ts" });
+    expect(textOf(c.lastCallComponent)).toContain("×2");
+  });
+
+  test("the user example: 2x read, prose, edit", () => {
+    // Message 1: thinking + two parallel reads. Message 2: text + an edit.
+    // Display must interleave: [read ×2] prose [edit] — never
+    // [read ×2 + edit] above the prose.
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    const r1 = h.row("read", "r1");
+    const r2 = h.row("read", "r2");
+    r1.setArgs({ path: "/tmp/a.ts" });
+    r2.setArgs({ path: "/tmp/b.ts" });
+    r1.setResult({ content: ["ok"] });
+    r2.setResult({ content: ["ok"] });
+    expect(textOf(r1.lastCallComponent)).toContain("read ×2");
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    const e = h.row("edit", "e1");
+    e.setArgs({ path: "/tmp/a.ts" });
+    e.setResult({ content: ["ok"] });
+    expect(textOf(r1.lastCallComponent)).not.toContain("edit");
+    expect(textOf(e.lastCallComponent)).toContain("edit");
+    expect(textOf(e.lastCallComponent)).not.toContain("×2");
   });
 });
 

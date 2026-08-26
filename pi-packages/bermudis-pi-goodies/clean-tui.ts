@@ -1,10 +1,16 @@
 /**
  * Collapse built-in tool output for a cleaner TUI focused on agent prose.
  *
- * Consecutive tool calls of the same type collapse into a single block to
- * save vertical space. A burst like `read ×3` shares one background box
- * instead of three separate striped rows. Followers in a burst render nothing
- * and are hidden, so N calls cost ~1 row when collapsed.
+ * Tool calls of the same type within one assistant message collapse into a
+ * single block to save vertical space. A burst like `read ×3` shares one
+ * background box instead of three separate striped rows. Followers in a burst
+ * render nothing and are hidden, so N calls cost ~1 row when collapsed.
+ *
+ * An assistant message always closes the open burst: pi streams a message's
+ * text first and creates its tool components during that same stream, so a
+ * message's tools visually belong after its prose. Without this boundary every
+ * same-tool call of an entire agent run accumulates into one mega-block
+ * rendered at the first call's position.
  *
  * Images are respected: a read that returns an image is never grouped, stays
  * solo, and its image is rendered by Pi's native image layer (outside our
@@ -84,8 +90,13 @@ type Entry = {
   toolCallId: string;
   toolName: string;
   args: any;
-  /** Agent-run boundary: bumped on agent_start; negative while replaying. */
-  turnId: number;
+  /**
+   * Assistant-message boundary: live entries count up from 1 (bumped on each
+   * assistant message_start); replayed entries count down from -1 (one per
+   * assistant message in the restored branch). NaN = unknown lineage — never
+   * groups. Tools of one assistant message share a segment.
+   */
+  seg: number;
   /** Position in `entries`; stable because entries are append-only. */
   index: number;
   result?: {
@@ -98,14 +109,12 @@ type Entry = {
   contentRef?: unknown;
 };
 
-let turnId = 0;
+let liveSeg = 0;
 // True while pi is replaying persisted history (startup with -c/--continue,
-// /resume, /fork). During replay no agent events fire and wall-clock
-// timestamps are meaningless (every upsert lands "now"), so replayed entries
-// get negative turnIds: they group by adjacency + same tool instead of the
-// live same-run rule (see shouldGroup).
+// /resume, /fork). During replay no events fire, so segment boundaries are
+// rebuilt from the session branch instead (see session_start).
 let replaying = true;
-let replayTurnId = -1;
+const replaySegByToolCallId = new Map<string, number>();
 const entries: Entry[] = [];
 const entryById = new Map<string, Entry>();
 const invalidateById = new Map<string, () => void>();
@@ -122,7 +131,7 @@ function upsertEntry(
       toolCallId,
       toolName,
       args,
-      turnId: replaying ? replayTurnId-- : turnId,
+      seg: replaying ? (replaySegByToolCallId.get(toolCallId) ?? NaN) : liveSeg,
       index: entries.length,
     };
     entries.push(e);
@@ -135,17 +144,14 @@ function upsertEntry(
 }
 
 function shouldGroup(a: Entry, b: Entry): boolean {
-  // Grouping is by adjacency + same tool within one agent run. pi fires
-  // turn_start per model round-trip (every tool-call cycle), so turn boundaries
-  // are useless here; agent_start marks a real run. A time window is also
-  // useless: model latency between sequential calls routinely exceeds seconds.
-  // Replay entries (negative turnId) have no run boundaries at all, so they
-  // group purely by adjacency + same tool — consecutive same-tool calls in
-  // the replay stream were consecutive in the original transcript.
-  const aReplay = a.turnId < 0;
-  const bReplay = b.turnId < 0;
-  if (aReplay !== bReplay) return false;
-  if (!aReplay && a.turnId !== b.turnId) return false;
+  // Grouping is by adjacency + same tool within one assistant message. A
+  // message's tools execute after its own prose and before the next message
+  // streams, so the segment counter (bumped on every assistant message_start)
+  // splits bursts exactly where the conversation visually splits. Live
+  // segments count up, replay segments count down — the two domains can never
+  // merge. NaN (unknown lineage) compares unequal to everything, so those
+  // rows render solo.
+  if (a.seg !== b.seg) return false;
   if (a.toolName !== b.toolName) return false;
   if (a.hasImage || b.hasImage) return false;
   return true;
@@ -483,21 +489,40 @@ function formatLsBullet(entry: Entry, theme: any): string {
 export default function cleanTui(pi: ExtensionAPI): void {
   const schemaTools = getBuiltInTools(process.cwd());
 
-  // agent_start = one agent run (one user message). pi's turn_start fires per
-  // model round-trip, which would give every sequential tool call its own
-  // boundary and kill grouping — so runs, not turns, are the burst boundary.
-  pi.on("agent_start", (_event, ctx) => {
-    turnId++;
+  pi.on("agent_start", (_event, _ctx) => {
     // First live run after startup/resume: tool calls from here on may group.
     replaying = false;
   });
+  // Assistant messages are the burst boundary (see shouldGroup). message_start
+  // — not message_end — because pi creates a message's tool components while
+  // that message is still streaming, before its end event fires.
+  pi.on("message_start", (event, _ctx) => {
+    if ((event as any).message?.role === "assistant") liveSeg++;
+  });
   pi.on("session_start", (_event, ctx) => {
-    turnId++;
+    liveSeg = 0;
     replaying = true;
     entries.length = 0;
     entryById.clear();
     invalidateById.clear();
     pendingSummaries.clear();
+    // Replayed history fires no events: rebuild segment boundaries from the
+    // branch by giving every assistant message's tool calls one segment,
+    // mirroring the live rule. Calls not present in the branch (defensive)
+    // get NaN and render solo.
+    replaySegByToolCallId.clear();
+    const branch = ctx?.sessionManager?.getBranch?.() ?? [];
+    let seg = 0;
+    for (const entry of branch) {
+      const message = entry?.type === "message" ? entry.message : undefined;
+      if (message?.role !== "assistant") continue;
+      seg--;
+      for (const block of message.content ?? []) {
+        if (block?.type === "toolCall" && typeof block.id === "string") {
+          replaySegByToolCallId.set(block.id, seg);
+        }
+      }
+    }
   });
 
   // ── read ──────────────────────────────────────────────────────

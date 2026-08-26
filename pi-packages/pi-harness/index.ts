@@ -78,14 +78,23 @@ export interface ExtensionAPIStub {
 export interface HarnessContext {
   hasUI: boolean;
   ui: { setHiddenThinkingLabel(label?: string): void };
+  /** pi's ctx exposes sessionManager; seed `branch` to simulate restored history. */
+  sessionManager: { branch: unknown[]; getBranch(): readonly unknown[] };
 }
 
 export function createHarnessContext(): HarnessContext & {
   hiddenThinkingLabel: string | undefined;
 } {
+  const sessionManager = {
+    branch: [] as unknown[],
+    getBranch() {
+      return sessionManager.branch;
+    },
+  };
   const ctx = {
     hasUI: true,
     hiddenThinkingLabel: undefined as string | undefined,
+    sessionManager,
     ui: {
       setHiddenThinkingLabel(label?: string) {
         ctx.hiddenThinkingLabel = label;
