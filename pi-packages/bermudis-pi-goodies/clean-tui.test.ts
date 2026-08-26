@@ -122,6 +122,18 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(rows[0].lastCallComponent)).toContain("read ×3");
   });
 
+  test("hidden-thinking label is suppressed and re-applied per run", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    expect(h.ctx.hiddenThinkingLabel).toBe("");
+
+    // Pi resets the label to its default on every agent_start (in real pi,
+    // not the harness), so clean-tui must re-apply the empty label per run.
+    h.ctx.hiddenThinkingLabel = "Thinking..."; // simulate pi's reset
+    h.emit("agent_start");
+    expect(h.ctx.hiddenThinkingLabel).toBe("");
+  });
+
   test("live bursts group within one agent run", () => {
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });

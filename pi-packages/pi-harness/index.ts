@@ -70,8 +70,29 @@ export interface ToolDefinition {
 
 /** Minimal slice of pi's ExtensionAPI that loader functions consume. */
 export interface ExtensionAPIStub {
-  on(event: string, handler: (event: unknown) => void): void;
+  on(event: string, handler: (event: unknown, ctx?: unknown) => void): void;
   registerTool(definition: ToolDefinition): void;
+}
+
+/** Minimal ExtensionContext stand-in: only what extensions under test touch. */
+export interface HarnessContext {
+  hasUI: boolean;
+  ui: { setHiddenThinkingLabel(label?: string): void };
+}
+
+export function createHarnessContext(): HarnessContext & {
+  hiddenThinkingLabel: string | undefined;
+} {
+  const ctx = {
+    hasUI: true,
+    hiddenThinkingLabel: undefined as string | undefined,
+    ui: {
+      setHiddenThinkingLabel(label?: string) {
+        ctx.hiddenThinkingLabel = label;
+      },
+    },
+  };
+  return ctx;
 }
 
 export interface ToolRowOptions {
@@ -210,9 +231,13 @@ export class ToolRow {
  * creates rows that render through faithful ToolExecutionComponent semantics.
  */
 export class PiHarness {
-  readonly handlers = new Map<string, Array<(event: unknown) => void>>();
+  readonly handlers = new Map<
+    string,
+    Array<(event: unknown, ctx?: unknown) => void>
+  >();
   readonly tools = new Map<string, ToolDefinition>();
   readonly rows: ToolRow[] = [];
+  readonly ctx = createHarnessContext();
   private readonly theme: Theme;
   private readonly maxUpdates: number | undefined;
 
@@ -234,7 +259,8 @@ export class PiHarness {
   };
 
   emit(event: string, payload: unknown = {}): void {
-    for (const handler of this.handlers.get(event) ?? []) handler(payload);
+    for (const handler of this.handlers.get(event) ?? [])
+      handler(payload, this.ctx);
   }
 
   tool(name: string): ToolDefinition {

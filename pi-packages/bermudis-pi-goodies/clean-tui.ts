@@ -478,18 +478,25 @@ export default function cleanTui(pi: ExtensionAPI): void {
   // agent_start = one agent run (one user message). pi's turn_start fires per
   // model round-trip, which would give every sequential tool call its own
   // boundary and kill grouping — so runs, not turns, are the burst boundary.
-  pi.on("agent_start", () => {
+  pi.on("agent_start", (_event, ctx) => {
     turnId++;
     // First live run after startup/resume: tool calls from here on may group.
     replaying = false;
+    // Pi resets the hidden-thinking label to its default on every agent_start,
+    // so re-apply the empty label per run to keep "Thinking..." suppressed.
+    if (ctx.hasUI) ctx.ui.setHiddenThinkingLabel("");
   });
-  pi.on("session_start", () => {
+  pi.on("session_start", (_event, ctx) => {
     turnId++;
     replaying = true;
     entries.length = 0;
     entryById.clear();
     invalidateById.clear();
     pendingSummaries.clear();
+    // Pi re-applies the default label on every agent_start, so an empty label
+    // must be re-set per run (see the agent_start handler). Setting it here
+    // covers the restored-history render before the first run starts.
+    if (ctx.hasUI) ctx.ui.setHiddenThinkingLabel("");
   });
 
   // ── read ──────────────────────────────────────────────────────
