@@ -621,7 +621,16 @@ function formatBashHeader(args: any, theme: any): string {
   if (isSummarizable(cmd) && summaryCache.has(cmd)) {
     return theme.fg("accent", summaryCache.get(cmd)!);
   }
-  return formatBashCommand(cmd, theme, 120);
+  // Cap must match BASH_BULLET_WIDTH, not exceed it: when a summary lands it
+  // replaces this text, and summaries are capped at SUMMARY_THRESHOLD_CHARS.
+  // A larger raw cap means the raw header can wrap where the summary won't,
+  // so the swap shrinks total line count mid-run — and pi-tui answers any
+  // drop below its high-water mark with a full clear-screen + scrollback wipe
+  // (clearOnShrink), i.e. a visible full-screen flash per summarized command
+  // (reproduced in panes narrower than ~124 cols; see clean-tui.test.ts
+  // "summary swap is height-neutral at 110 columns"). Equal caps keep the
+  // swap height-neutral wherever 80 columns fit.
+  return formatBashCommand(cmd, theme, BASH_BULLET_WIDTH);
 }
 
 function formatBashBullet(entry: Entry, theme: any): string {

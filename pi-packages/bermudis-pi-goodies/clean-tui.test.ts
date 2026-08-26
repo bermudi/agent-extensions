@@ -491,6 +491,38 @@ describe("clean-tui AI summary", () => {
     expect(textOf(row.lastCallComponent)).not.toContain("(+3 lines)");
   });
 
+  test("summary swap is height-neutral at 110 columns (flicker regression)", async () => {
+    // Regression (observed on 0.11.4 in a 110-col ghostty window): the solo
+    // bash header was capped at 120 chars while summaries are capped at 80,
+    // so an arriving summary collapsed a 2-line wrapped header to 1 line.
+    // Total transcript height dropping below pi-tui's high-water mark
+    // triggers clearOnShrink: a full clear-screen + scrollback wipe — a
+    // visible flash per summarized command while the agent works. Equal
+    // caps (header uses BASH_BULLET_WIDTH) keep the swap height-neutral.
+    scriptedBackend(() => "Typechecks the extension sources");
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "flicker");
+    // 81–120 chars: the band 0.11.x summarizes (floor 80) but pre-0.11 did
+    // not (floor 120). At 110 cols with the old 120-char header cap this
+    // 112-char command wrapped to two lines until the summary collapsed it.
+    const cmd =
+      "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies && rm -rf node_modules/.cache && bun run typecheck";
+    expect(cmd.length).toBeGreaterThan(105);
+    expect(cmd.length).toBeLessThanOrEqual(120);
+    row.setArgs({ command: cmd });
+    const before = (row.lastCallComponent as Box).render(110).length;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Typechecks the extension sources",
+    );
+    const after = (row.lastCallComponent as Box).render(110).length;
+    expect(after).toBe(before);
+  });
+
   test("summary is normalized to one line and capped at 80 chars", async () => {
     scriptedBackend(
       () =>
