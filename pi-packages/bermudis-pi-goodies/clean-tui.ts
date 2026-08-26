@@ -537,8 +537,19 @@ function requestSummary(cmd: string): void {
 }
 
 function invalidateRowsForCommand(cmd: string): void {
+  // Only rows that are STILL EXECUTING get refreshed when a summary lands.
+  // Executing rows sit at the transcript tail, inside pi's viewport, so the
+  // re-render is a cheap differential line update. Finished rows — including
+  // replayed ones from before a /resume — can sit far above the viewport on a
+  // long transcript, and pi's diff renderer answers any change above the
+  // viewport with fullRender(true): clear screen + scrollback wipe + full
+  // repaint, i.e. the "flicker while pi is working" seen on 0.11.x (fits any
+  // width; reproduced reasoning from tui-main-screen.js `firstChanged <
+  // prevViewportTop`). Finished rows simply keep the raw command text, which
+  // is more informative than the summary anyway; the summary stays cached
+  // and future rows of the same command render it from the start.
   for (const e of entries) {
-    if (e.args?.command === cmd) {
+    if (!e.result && e.args?.command === cmd) {
       const fn = invalidateById.get(e.toolCallId);
       if (fn) fn();
     }

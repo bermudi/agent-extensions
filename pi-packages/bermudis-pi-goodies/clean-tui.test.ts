@@ -523,6 +523,45 @@ describe("clean-tui AI summary", () => {
     expect(after).toBe(before);
   });
 
+  test("summary arrival never re-renders finished rows (scrollback flicker)", async () => {
+    // Regression (0.11.x, tall transcripts, any width): a landing summary
+    // invalidated EVERY row that ever ran the command — including replayed
+    // rows from before a /resume, far above pi's viewport. pi's diff
+    // renderer turns any change above the viewport into fullRender(true):
+    // clear screen + scrollback wipe (the reported "flicker while pi is
+    // working"). Only still-executing rows refresh now; finished ones keep
+    // the raw command text, and the cache still serves future rows.
+    scriptedBackend(() => "Typechecks the extension sources");
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const cmd =
+      "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies && bun run typecheck && bun run test";
+    const done = h.row("bash", "done");
+    done.setArgs({ command: cmd });
+    done.setResult({ content: [{ type: "text", text: "132 pass" }] });
+    const updatesAfterResult = done.updates;
+    await new Promise((r) => setTimeout(r, 20));
+    // Summary arrived (cache populated) but must NOT have re-rendered the
+    // finished row.
+    expect(done.updates).toBe(updatesAfterResult);
+    expect(textOf(done.lastCallComponent)).toContain("&& bun run");
+    expect(textOf(done.lastCallComponent)).not.toContain(
+      "Typechecks the extension sources",
+    );
+    // A future row for the same command still gets the summary immediately:
+    // it bursts with the finished row (same command), renders as a follower,
+    // and its render hop refreshes the leader — whose bullets now show the
+    // cached summary. No network, no finished-row invalidation.
+    const fresh = h.row("bash", "fresh");
+    fresh.setArgs({ command: cmd });
+    expect(textOf(done.lastCallComponent)).toContain(
+      "Typechecks the extension sources",
+    );
+  });
+
   test("summary is normalized to one line and capped at 80 chars", async () => {
     scriptedBackend(
       () =>
@@ -769,12 +808,18 @@ describe("clean-tui AI summary", () => {
     expect(textOf(row.lastCallComponent)).not.toContain(
       "Lists agent settings and extensions",
     );
-    // After the cooldown the next render retries and recovers.
+    // After the cooldown the next render retries and recovers. The row has
+    // finished, so the arrival must NOT re-render it (scrollback-flicker
+    // rule) — verify the cache took the summary via a fresh row instead:
+    // same command bursts with the original row, and the follower's render
+    // hop refreshes the leader, whose bullets show the recovered summary.
     succeed = true;
     await new Promise((r) => setTimeout(r, 120));
     row.setArgs({ command: cmd });
     await new Promise((r) => setTimeout(r, 10));
     expect(calls).toBe(2);
+    const recovered = h.row("bash", "recovered");
+    recovered.setArgs({ command: cmd });
     expect(textOf(row.lastCallComponent)).toContain(
       "Lists agent settings and extensions",
     );

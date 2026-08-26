@@ -67,6 +67,30 @@ Failures degrade gracefully: the raw command stays visible as a heuristic
 hint, each distinct failure is logged once (naming the model), and repeated
 failures back off exponentially instead of hammering the provider.
 
+### Render-safety rules (why summaries only refresh running rows)
+
+Pi's diff renderer answers two situations with `fullRender(true)` — clear
+screen, wipe scrollback, repaint everything — which reads as a full-screen
+flash:
+
+1. total rendered height dropping below the session high-water mark
+   (`clearOnShrink`), and
+2. any content change to a line **above the scrolled viewport**
+   (`firstChanged < prevViewportTop` — width-independent; on a long
+   transcript this is any row more than a screenful above the input box).
+
+clean-tui therefore follows two rules in its render paths:
+
+- **Height-neutral swaps:** text that may be replaced by a summary later is
+  capped at the same width as summaries (`BASH_BULLET_WIDTH`), so an
+  arriving summary never collapses a wrapped line (rule 1).
+- **Pending-only refresh:** when a summary lands, only rows whose tool is
+  still executing are re-rendered — those sit at the transcript tail, inside
+  the viewport, so the swap is a cheap differential update. Finished rows
+  (including replayed ones from before a `/resume`) keep the raw command
+  text for the rest of the session; the summary stays cached, and future
+  rows of the same command render it from the start (rule 2).
+
 ## Per-model thinking levels (retired in favor of Pi 0.84.3)
 
 This package previously shipped a `model-thinking` module with a `/levels`
