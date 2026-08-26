@@ -226,6 +226,9 @@ describe("clean-tui AI summary", () => {
       expect(textOf(row.lastCallComponent)).toContain(
         "Appends reboot log to migration file",
       );
+      // A summary replaces the heuristic hint entirely — no redundant
+      // "(+N lines)" next to a sentence that already describes the command.
+      expect(textOf(row.lastCallComponent)).not.toContain("(+3 lines)");
       expect(seenAuth).toBe("Bearer test-key");
     } finally {
       globalThis.fetch = origFetch;

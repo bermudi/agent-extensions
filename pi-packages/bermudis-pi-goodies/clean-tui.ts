@@ -414,32 +414,34 @@ function formatBashCommand(cmd: string, theme: any, cap: number): string {
 
 function formatBashHeader(args: any, theme: any): string {
   const cmd = args.command || "...";
+  // A summary already says what the command does; the (+N lines) size hint
+  // only matters for the raw first-line fallback, where it warns that the
+  // shown line isn't the whole command.
   if (isSummarizable(cmd) && summaryCache.has(cmd)) {
-    const summary = summaryCache.get(cmd)!;
-    let out = theme.fg("accent", summary);
-    const nl = cmd.indexOf("\n");
-    if (nl !== -1) {
-      const extra = cmd.split("\n").length - 1;
-      out += theme.fg("muted", ` (+${extra} lines)`);
-    }
-    return out;
+    return theme.fg("accent", summaryCache.get(cmd)!);
   }
   return formatBashCommand(cmd, theme, 120);
 }
 
 function formatBashBullet(entry: Entry, theme: any): string {
   const cmd = entry.args.command || "...";
+  const bullet = `${theme.fg("muted", "•")} `;
+  // Failed calls get red text so a single failure is visible without
+  // poisoning the whole burst's background (see renderCall: box color now
+  // follows the leader's status only).
+  const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
   if (isSummarizable(cmd) && summaryCache.has(cmd)) {
-    const summary = summaryCache.get(cmd)!;
-    let out = `  ${theme.fg("muted", "•")} ${theme.fg("accent", summary)}`;
-    const nl = cmd.indexOf("\n");
-    if (nl !== -1) {
-      const extra = cmd.split("\n").length - 1;
-      out += theme.fg("muted", ` (+${extra} lines)`);
-    }
-    return out;
+    return `  ${bullet}${accent(summaryCache.get(cmd)!)}`;
   }
-  return `  ${theme.fg("muted", "•")} ${formatBashCommand(cmd, theme, 60)}`;
+  const nl = cmd.indexOf("\n");
+  let head = nl === -1 ? cmd : cmd.slice(0, nl);
+  if (head.length > 60) head = head.slice(0, 59) + "…";
+  let out = `  ${bullet}${accent(head)}`;
+  if (nl !== -1) {
+    const extra = cmd.split("\n").length - 1;
+    out += theme.fg("muted", ` (+${extra} line${extra === 1 ? "" : "s"})`);
+  }
+  return out;
 }
 
 function formatWriteBullet(entry: Entry, theme: any): string {
@@ -613,12 +615,12 @@ export default function cleanTui(pi: ExtensionAPI): void {
       const isGrouped = burst && burst.entries.length > 1;
       const isLeader =
         isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
-      const pending = isGrouped
-        ? burst.entries.some((e) => !e.result)
-        : !entry.result;
-      const isError = isGrouped
-        ? burst.entries.some((e) => e.isError)
-        : !!entry.isError;
+      // Box color follows the leader's own status. Aggregating any-pending/
+      // any-error over the whole burst paints 37 rows red for one failure;
+      // per-entry failures are marked on their own bullet instead
+      // (formatBashBullet).
+      const pending = !entry.result;
+      const isError = !!entry.isError;
 
       if (isGrouped && !isLeader) {
         // Refresh the leader's header/count. Single hop: a leader's renderCall
