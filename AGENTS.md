@@ -7,6 +7,9 @@ Personal repo for Pi coding agent extensions.
 ```
 pi-packages/
   bermudis-pi-goodies/   # ACTIVE (npm/global): commands/hooks + Kilo provider & balance footer
+                         # clean-tui render paths MUST follow the render-safety rules in its
+                         # README (pi-tui fullRender escalation: clearOnShrink + above-viewport
+                         # changes wipe the screen in regular mode; fullscreen has neither)
   critique/               # ACTIVE (opt-in): launch the Bun-only Critique TUI from Pi
   diff/                   # ACTIVE (project-local)
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs

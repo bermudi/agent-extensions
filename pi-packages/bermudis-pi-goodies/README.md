@@ -69,9 +69,18 @@ failures back off exponentially instead of hammering the provider.
 
 ### Render-safety rules (why summaries only refresh running rows)
 
-Pi's diff renderer answers two situations with `fullRender(true)` — clear
-screen, wipe scrollback, repaint everything — which reads as a full-screen
-flash:
+These rules apply to pi's **regular** TUI mode (`tuiMode: "regular"`, the
+default — `TuiMainScreen`, the scrolling scrollback renderer). Pi also has a
+**fullscreen** mode (`TuiAltScreen`): no scrollback, a fixed `height`-line
+slice of the transcript diffed row-by-row, full clears only on first
+render/resize/image redraws. Neither escalation below exists there — a
+summary arrival re-rendering an old row is either invisible (scrolled off
+the slice) or a one-line rewrite. Check `~/.pi/agent/settings.json`
+`tuiMode` before reasoning about render escalation.
+
+Pi's regular-mode diff renderer answers two situations with
+`fullRender(true)` — clear screen, wipe scrollback, repaint everything —
+which reads as a full-screen flash:
 
 1. total rendered height dropping below the session high-water mark
    (`clearOnShrink`), and
@@ -90,6 +99,11 @@ clean-tui therefore follows two rules in its render paths:
   (including replayed ones from before a `/resume`) keep the raw command
   text for the rest of the session; the summary stays cached, and future
   rows of the same command render it from the start (rule 2).
+
+To catch a flash red-handed, run `PI_DEBUG_REDRAW=1 pi`, reproduce, then
+`grep fullRender ~/.pi/agent/pi-debug.log` — every line is one screen wipe
+with its reason (`clearOnShrink`, `firstChanged < viewportTop`, resize, …).
+Note the log is append-only across sessions; check timestamps.
 
 ## Per-model thinking levels (retired in favor of Pi 0.84.3)
 
