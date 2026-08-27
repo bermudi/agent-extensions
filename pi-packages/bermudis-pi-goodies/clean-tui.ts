@@ -35,6 +35,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
+import { join } from "node:path";
+import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
   findSummaryModel,
@@ -449,10 +451,48 @@ function logSummaryFailure(cmd: string, err: unknown, pauseMs?: number) {
   const key = `${msg}${pause}`;
   if (summaryFailuresLogged.has(key)) return;
   summaryFailuresLogged.add(key);
-  console.error(
-    `[clean-tui] command summary failed (${msg})${pause}; keeping heuristic hint. ` +
-      `Command starts: ${JSON.stringify(cmd.slice(0, 60))}`,
-  );
+  const detail =
+    `command summary failed (${msg})${pause}; keeping heuristic hint. ` +
+    `Command starts: ${JSON.stringify(cmd.slice(0, 60))}`;
+  console.error(`[clean-tui] ${detail}`);
+  appendSummaryLog(detail);
+}
+
+// ── Summary log file ────────────────────────────────────────────
+//
+// console.error is invisible in TUI mode (pi owns the terminal), so summary
+// failures also append to a small capped log file next to goodies.json and
+// pi-debug.log. Failures only — successes are noise. Every fs call is
+// guarded: an unwritable log destination must never break rendering or
+// swallow the original error (console.error above already carried it).
+const SUMMARY_LOG_DEFAULT_PATH = join(homedir(), ".pi", "agent", "goodies.log");
+let summaryLogPath = SUMMARY_LOG_DEFAULT_PATH;
+const SUMMARY_LOG_MAX_BYTES = 256 * 1024;
+const SUMMARY_LOG_KEEP_BYTES = 64 * 1024;
+
+/** Redirect the failure log (tests point this at scratch storage). */
+export function __setSummaryLogPathForTesting(path?: string): void {
+  summaryLogPath = path ?? SUMMARY_LOG_DEFAULT_PATH;
+}
+
+function appendSummaryLog(line: string): void {
+  const stamped = `${new Date().toISOString()} [${process.pid}] ${line}`;
+  try {
+    if (statSync(summaryLogPath).size > SUMMARY_LOG_MAX_BYTES) {
+      // Size cap without timers or rotation daemons: keep the newest tail.
+      writeFileSync(
+        summaryLogPath,
+        readFileSync(summaryLogPath).subarray(-SUMMARY_LOG_KEEP_BYTES),
+      );
+    }
+  } catch {
+    // Missing/unreadable file — the append below (re)creates it.
+  }
+  try {
+    appendFileSync(summaryLogPath, `${stamped}\n`);
+  } catch {
+    // Unwritable destination — nothing else to do; console.error carried it.
+  }
 }
 
 // Failure backoff: requestSummary runs on every bash renderCall, so after a
@@ -698,6 +738,11 @@ function formatLsBullet(entry: Entry, theme: any): string {
 
 export default function cleanTui(pi: ExtensionAPI): void {
   setCleanTuiActive(true);
+  // One line per load (pi process start, /reload) so the log answers "was the
+  // feature even on, and pointing at which model" without guessing.
+  appendSummaryLog(
+    `clean-tui active; summary-model=${getSummaryModel() ?? "off"}`,
+  );
   const schemaTools = getBuiltInTools(process.cwd());
 
   pi.on("agent_start", (_event, ctx) => {

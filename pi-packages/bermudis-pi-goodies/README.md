@@ -53,6 +53,11 @@ are no extra endpoints or keys to configure. `/goodies list` shows whether
 summaries are on or off, and `/goodies summary-model off` disables them
 again.
 
+Failures are invisible in the TUI (pi owns the terminal), so each distinct
+failure is also appended to `~/.pi/agent/goodies.log` (capped at 256 KB,
+oldest lines dropped), along with one `clean-tui active; summary-model=…`
+line per load. If summaries silently stop, look there first.
+
 Two practical notes:
 
 - **Pick a fast non-thinking model.** Summaries get a tiny response budget;

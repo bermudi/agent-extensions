@@ -1,4 +1,4 @@
-import { describe, expect, test, afterEach } from "bun:test";
+import { describe, expect, test, afterEach, beforeEach } from "bun:test";
 import { Box, Container } from "@earendil-works/pi-tui";
 import type { Model } from "@earendil-works/pi-ai";
 import cleanTui, {
@@ -6,6 +6,7 @@ import cleanTui, {
   __setSummaryBackoffForTesting,
   __setSummaryBackendForTesting,
   __setSummaryEnabled,
+  __setSummaryLogPathForTesting,
   __setSummaryModelRegistryForTesting,
   setCleanTuiActive,
 } from "./clean-tui";
@@ -13,8 +14,20 @@ import { PiHarness, type Theme } from "pi-harness";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setSummaryModel, __setConfigPathForTesting } from "./goodies";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+
+// Every cleanTui() load appends a line to the summary log; keep all tests off
+// the real ~/.pi/agent/goodies.log by pointing at throwaway storage per test.
+beforeEach(() => {
+  __setSummaryLogPathForTesting(
+    join(
+      tmpdir(),
+      `goodies-log-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`,
+    ),
+  );
+});
+afterEach(() => __setSummaryLogPathForTesting(undefined));
 
 function textOf(component: unknown): string {
   // Box children are Text components holding a raw `text` string
@@ -470,6 +483,15 @@ describe("clean-tui AI summary", () => {
     __setSummaryEnabled(true);
   }
 
+  /** Redirect the summary log to scratch storage; returns its path. */
+  function useScratchSummaryLog(): string {
+    const tmpDir = mkdtempSync(join(tmpdir(), "goodies-log-"));
+    const logPath = join(tmpDir, "goodies.log");
+    __setSummaryLogPathForTesting(logPath);
+    cleanupFns.push(() => __setSummaryLogPathForTesting(undefined));
+    return logPath;
+  }
+
   test("long command triggers AI summary and swaps display", async () => {
     scriptedBackend(() => "Appends reboot log to migration file");
     enableSummariesForTest();
@@ -608,7 +630,11 @@ describe("clean-tui AI summary", () => {
     // no resolution work, and no error spam about a config they never made.
     const calls = scriptedBackend(() => "should never run");
     const logged = captureConsoleError();
-    // No setSummaryModel call here: exactly what fresh installs look like.
+    // Scratch config, but NO setSummaryModel call: exactly what fresh installs
+    // look like. (Without the scratch redirect this test would read the real
+    // ~/.pi/agent/goodies.json — on machines where summary-model is set, the
+    // "off" premise silently breaks. Found the hard way.)
+    useScratchConfig();
     __clearSummaryCache();
     __setSummaryEnabled(true);
     const h = new PiHarness();
@@ -621,6 +647,35 @@ describe("clean-tui AI summary", () => {
     expect(calls).toHaveLength(0);
     expect(logged).toHaveLength(0); // off is a state, not an error
     expect(textOf(row.lastCallComponent)).toContain("(+3 lines)");
+  });
+
+  test("summary failures land in the log file, deduped per cause", async () => {
+    // console.error vanishes in TUI mode, so failures must also reach the
+    // capped log file — one line per distinct cause, plus the load line.
+    const logPath = useScratchSummaryLog();
+    // Zero backoff so a second command re-requests instead of being blocked;
+    // an identical error message then proves the per-cause dedup.
+    __setSummaryBackoffForTesting(0, 0);
+    cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
+    scriptedBackend(() => {
+      throw new Error("summary request failed: HTTP 429 (kilo/x)");
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api); // writes the load line
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "log-a");
+    row.setArgs({ command: heredoc });
+    const row2 = h.row("bash", "log-b");
+    row2.setArgs({ command: `${heredoc}\n# variant` });
+    await new Promise((r) => setTimeout(r, 50));
+    const lines = readFileSync(logPath, "utf-8").trim().split("\n");
+    expect(lines[0]).toContain("clean-tui active; summary-model=test/model");
+    const failures = lines.filter((l) => l.includes("command summary failed"));
+    expect(failures).toHaveLength(1); // same cause twice → one line
+    expect(failures[0]).toContain("HTTP 429 (kilo/x)");
+    expect(failures[0]).toContain("Command starts:");
   });
 
   test("replayed history never requests summaries", async () => {
