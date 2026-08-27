@@ -1,0 +1,13 @@
+id = "pi.reload"
+name = "Pi Reload"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Send /reload to every idle pi instance in this Herdr session"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "reload-all"
+title = "Reload all pi instances"
+description = "Send /reload to every pi coding agent in this session that is at its prompt; busy, blocked, and unknown-state panes are skipped and reported"
+contexts = ["global"]
+command = ["python3", "reload_pi.py"]

@@ -18,7 +18,27 @@ pi-packages/
   session-summarizer/     # ACTIVE (project-local)
   zen-relay/              # ACTIVE (standalone, not a pi extension): all-local multi-IP relay for OpenCode Zen. Per-gateway SSH SOCKS tunnels + one local relay; pi uses it via models.json baseUrl override.
   experiments/            # ARCHIVE — unused/exploratory. Not typechecked, not in default test run.
+herdr-plugins/           # Herdr plugins (python3, stdlib-only), linked via `herdr plugin link`
+  pane-layouts/           # ACTIVE: apply pane layouts (columns/rows/quad/main+stack) from a popup picker
+  pi-reload/              # ACTIVE: send /reload to every idle pi instance in the session
 ```
+
+## Herdr plugins
+
+`herdr-plugins/<name>/` each hold a `herdr-plugin.toml` + scripts; install with
+`herdr plugin link <path>` (reversible via `herdr plugin unlink <id>`). Actions
+run with `HERDR_BIN_PATH`, `HERDR_SOCKET_PATH`, and cwd = plugin root; stdout
+lands in `herdr plugin log list --plugin <id>`.
+
+SAFETY RULE for any plugin that types into agent panes: herdr 0.8.2
+`agent prompt` does NOT refuse blocked agents. pi's dialogs confirm the
+highlighted option on Enter, so typing into a `blocked` pane can answer an
+approval dialog. Only send input to pi panes whose `agent_status` is
+`idle`/`done`; skip `working` (pi refuses /reload mid-turn anyway), `blocked`,
+and `unknown`. pi's status is authoritative — it self-reports via the
+`herdr:pi` hook (`~/.pi/agent/extensions/herdr-agent-state.ts`).
+
+## Extracted sibling repos
 
 Two large projects were extracted into standalone sibling repos (full history
 preserved via `git filter-repo`): **`../pi-delegate`** (was `pi/delegate`) and
