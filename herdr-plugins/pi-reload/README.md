@@ -39,6 +39,17 @@ The toast calls out how many were mid-turn so you know whether a rerun is
 needed. Blocked panes are the one hard skip: typing into a pi pane that is
 showing a dialog can answer it.
 
+## Draft guard
+
+Before typing anywhere, the plugin reads each candidate pane's bottom region
+(`herdr agent read --source detection`) and checks pi's input box — the lines
+between the last two border rules. If a draft is sitting in the input box,
+the pane is skipped: `/reload` would be appended to the draft and Enter would
+submit it. Panes whose bottom region can't be parsed (alternate-screen app,
+unusual layout) are skipped too — when in doubt, don't type. Queued messages,
+spinners, and transient warnings render outside the input box and don't
+trigger the guard.
+
 ## Install
 
 ```bash

@@ -37,6 +37,10 @@ approval dialog. Never send input to `blocked` or `unknown` panes.
 `working` is fine (pi refuses /reload mid-turn with a warning and drops the
 text — bermudi accepted that). pi's status is authoritative — it self-reports
 via the `herdr:pi` hook (`~/.pi/agent/extensions/herdr-agent-state.ts`).
+pi-reload also skips panes with a draft in the input box: detected from
+`agent read --source detection` — the editor is the lines between the last
+two `─` border rules; blank cursor line = empty, any text = skip, unparseable
+= skip.
 
 ## Extracted sibling repos
 
