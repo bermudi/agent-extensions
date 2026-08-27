@@ -39,9 +39,9 @@ How it works
 6. A per-pane report goes to stdout (captured in `herdr plugin log`) and a
    summary toast is raised via `herdr notification show`.
 
-Exit codes: 0 = at least one /reload sent (or would be, with --dry-run),
-1 = nothing sent (no pi instances, or every candidate was skipped) or an
-operational failure, 2 = usage error.
+Exit codes: 0 = every targeted pane reloaded with no failures,
+1 = any send failure, nothing sent (no pi instances or everything
+skipped), or an operational failure, 2 = usage error.
 """
 
 import argparse
@@ -287,7 +287,9 @@ def main(argv=None):
             has_text, err = None, str(exc)
         if has_text is not False:
             row["outcome"] = "skip"
-            row["skip_kind"] = "editor"
+            # Confirmed drafts and unreadable panes are reported separately:
+            # the toast must not count a parse failure as "draft text".
+            row["skip_kind"] = "editor" if has_text else "editor-unreadable"
             reason = (
                 "input box has text"
                 if has_text
@@ -334,7 +336,8 @@ def main(argv=None):
     failed = [r for r in rows if r["outcome"] == "failed"]
     skipped = [r for r in rows if r["outcome"] == "skip"]
     editor_skips = [r for r in skipped if r.get("skip_kind") == "editor"]
-    status_skips = [r for r in skipped if r.get("skip_kind") != "editor"]
+    unreadable = [r for r in skipped if r.get("skip_kind") == "editor-unreadable"]
+    status_skips = [r for r in skipped if r.get("skip_kind") not in ("editor", "editor-unreadable")]
     midturn = [r for r in reloaded if r.get("status_now", r["status"]) == "working"]
     total = len(rows)
 
@@ -343,6 +346,8 @@ def main(argv=None):
         summary += f", {len(midturn)} mid-turn (rerun when idle)"
     if editor_skips:
         summary += f", {len(editor_skips)} had draft text"
+    if unreadable:
+        summary += f", {len(unreadable)} unreadable"
     if status_skips:
         summary += f", {len(status_skips)} blocked/unknown"
     if failed:
@@ -350,7 +355,10 @@ def main(argv=None):
 
     print(summary)
     show_toast("pi reload", build_toast(summary, reloaded))
-    return 0 if reloaded else 1
+    # 0 only for complete success: every targeted pane reloaded, no send
+    # failures. Partial failure or nothing-sent is nonzero so whatever
+    # invokes the action can tell the difference.
+    return 0 if reloaded and not failed else 1
 
 
 if __name__ == "__main__":
