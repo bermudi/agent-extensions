@@ -22,15 +22,21 @@ How it works
                        ruled out; skipped
 3. Before typing anywhere, each candidate's input box is checked via
    `herdr agent read --source detection` (the bottom-of-screen snapshot):
-   pi renders the editor between the last two border rules, so any
-   non-blank content there means a draft is sitting in the input box.
+   pi renders the editor between the last two full-width border rules, so
+   any non-blank content there means a draft is sitting in the input box.
    Typing `/reload` would append to that draft and Enter would submit it,
    so those panes are skipped. If the region can't be parsed at all
    (alternate-screen app, odd layout), the pane is skipped too — when in
    doubt, don't type.
-4. Each remaining target gets `herdr agent prompt <pane> "/reload"`, which
+4. Immediately before sending, the pane's status is re-checked
+   (`herdr agent get`): the listing is seconds stale by then, and a pane
+   that was `working` can be sitting at a fresh approval dialog — exactly
+   the pane Enter must never touch. A residual millisecond-level race
+   remains (state can change between re-check and keystrokes); herdr has
+   no guarded prompt to close it fully.
+5. Each remaining target gets `herdr agent prompt <pane> "/reload"`, which
    types the command into pi's editor and presses Enter.
-5. A per-pane report goes to stdout (captured in `herdr plugin log`) and a
+6. A per-pane report goes to stdout (captured in `herdr plugin log`) and a
    summary toast is raised via `herdr notification show`.
 
 Exit codes: 0 = at least one /reload sent (or would be, with --dry-run),
@@ -41,6 +47,7 @@ operational failure, 2 = usage error.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -108,10 +115,14 @@ def classify(status):
     return "skip", f"unknown state ({status}) — cannot rule out a dialog; not touched"
 
 
-def is_border_rule(line):
-    """pi draws rules as full-width box-drawing lines."""
+def is_border_rule(line, min_width):
+    """pi draws editor borders as (near-)full-width box-drawing lines.
+
+    The width check keeps box-drawing lines INSIDE a draft (pasted
+    dividers, table rules) from being mistaken for editor borders.
+    """
     stripped = line.rstrip()
-    return bool(stripped) and all(ch in "─━═" for ch in stripped)
+    return len(stripped) >= min_width and all(ch in "─━═" for ch in stripped)
 
 
 def editor_has_text(detection_text):
@@ -122,9 +133,19 @@ def editor_has_text(detection_text):
     that region (verified against idle/working/queued/warning states).
     Returns True (draft present), False (empty), or None (layout not
     parseable — caller should skip the pane).
+
+    Fragile assumption: nothing may render a full-width box-drawing rule
+    between the editor's top and bottom borders (a below-editor widget
+    would shift the anchor and permanently false-skip the pane —
+    fail-closed, but worth knowing). A draft whose visible tail is itself
+    a full-width rule is likewise undetectable from text alone.
     """
     lines = detection_text.splitlines()
-    rules = [i for i, line in enumerate(lines) if is_border_rule(line)]
+    widths = [len(ln.rstrip()) for ln in lines if ln.strip()]
+    if not widths:
+        return None
+    min_width = max(10, int(max(widths) * 0.9))
+    rules = [i for i, line in enumerate(lines) if is_border_rule(line, min_width)]
     if len(rules) < 2:
         return None
     top, bottom = rules[-2], rules[-1]
@@ -146,6 +167,22 @@ def input_box_state(pane_id):
     return editor_has_text(stdout), None
 
 
+def current_status(pane_id):
+    """Re-read an agent's status right before typing (the listing is stale
+    by then). Returns (status, error_detail)."""
+    rc, stdout, stderr = run_cli(["agent", "get", pane_id])
+    if rc != 0:
+        return None, (stderr.strip() or stdout.strip())[:120] or f"exit {rc}"
+    try:
+        agent = json.loads(stdout).get("result", {}).get("agent", {})
+    except json.JSONDecodeError:
+        return None, "invalid JSON from agent get"
+    status = agent.get("agent_status")
+    if not status:
+        return None, "no agent_status in response"
+    return status, None
+
+
 def reload_one(pane_id):
     """Submit /reload to one pi instance. Returns (ok, detail)."""
     rc, stdout, stderr = run_cli(["agent", "prompt", pane_id, "/reload"])
@@ -161,27 +198,34 @@ def project_name(cwd):
 
 def build_toast(summary, reloaded_agents):
     """Toast body: counts first, then reloaded project names if they fit."""
-    parts = [summary]
-    if reloaded_agents:
-        names = sorted({project_name(a["cwd"]) for a in reloaded_agents})
-        listing = ", ".join(names)
-        base = f"{parts[0]}: "
-        if len(base) + len(listing) <= TOAST_BODY_MAX:
-            parts.append(listing)
+    if not reloaded_agents:
+        return summary[:TOAST_BODY_MAX]
+    names = sorted({project_name(a["cwd"]) for a in reloaded_agents})
+    suffix = ""
+    while names:
+        candidate = f"{summary} · {', '.join(names)}{suffix}"
+        if len(candidate) <= TOAST_BODY_MAX:
+            return candidate
+        if suffix:
+            names.pop()
         else:
-            while names and len(base) + len(", ".join(names)) + 1 > TOAST_BODY_MAX:
-                names.pop()
-                listing = ", ".join(names) + ", …"
-            if names:
-                parts.append(listing)
-    body = " · ".join(parts)
-    return body[:TOAST_BODY_MAX]
+            suffix = ", …"
+    return summary[:TOAST_BODY_MAX]
 
 
 def show_toast(title, body):
-    rc, stdout, stderr = run_cli(["notification", "show", title, "--body", body])
+    try:
+        rc, stdout, stderr = run_cli(["notification", "show", title, "--body", body])
+    except RuntimeError as exc:
+        print(f"warning: notification show failed: {exc}", file=sys.stderr)
+        return
     if rc != 0:
         print(f"warning: notification show failed (exit {rc}): {stderr.strip()}", file=sys.stderr)
+
+
+def natural_key(value):
+    """Sort w9 after w10: split digit runs into integers."""
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", value)]
 
 
 def print_report(rows):
@@ -193,7 +237,7 @@ def print_report(rows):
         "skip": "skipped",
     }
     width = max(len(r["pane_id"]) for r in rows) if rows else 0
-    for row in sorted(rows, key=lambda r: (r["workspace_id"], r["pane_id"])):
+    for row in sorted(rows, key=lambda r: (natural_key(r["workspace_id"]), natural_key(r["pane_id"]))):
         name = project_name(row["cwd"])
         label = labels.get(row["outcome"], row["outcome"])
         detail = row["detail"] or (f"(was {row['status']})" if row["outcome"] in ("reload", "reloaded") else "")
@@ -229,22 +273,53 @@ def main(argv=None):
         action, reason = classify(agent["status"])
         rows.append({**agent, "outcome": action, "detail": reason or ""})
 
-    # Draft-text guard: typing into a pane whose input box already has
-    # content would append to the draft and Enter would submit it.
+    # Per-pane and interleaved, so each pane's checks run as close to its
+    # own prompt as possible: a check done up front for all panes would be
+    # seconds stale by the time the last pane is reached.
     for row in rows:
         if row["outcome"] != "reload":
             continue
-        has_text, err = input_box_state(row["pane_id"])
-        if has_text is False:
-            row["skip_kind"] = None
+        # Draft guard: typing into a pane whose input box has content
+        # would append to the draft and Enter would submit it.
+        try:
+            has_text, err = input_box_state(row["pane_id"])
+        except RuntimeError as exc:
+            has_text, err = None, str(exc)
+        if has_text is not False:
+            row["outcome"] = "skip"
+            row["skip_kind"] = "editor"
+            reason = (
+                "input box has text"
+                if has_text
+                else f"could not read input box ({err or 'empty/unparseable snapshot'})"
+            )
+            row["detail"] = f"{reason} — not touched"
             continue
-        row["outcome"] = "skip"
-        row["skip_kind"] = "editor"
-        row["detail"] = (
-            "input box has text — not touched"
-            if has_text
-            else f"could not read input box ({err}) — not touched"
-        )
+        # TOCTOU guard: the listing status is stale, and a pane that was
+        # `working` can be sitting at a fresh approval dialog now — exactly
+        # the pane Enter must never touch.
+        try:
+            status, err = current_status(row["pane_id"])
+        except RuntimeError as exc:
+            status, err = None, str(exc)
+        if status not in ("idle", "done", "working"):
+            row["outcome"] = "skip"
+            row["skip_kind"] = "status"
+            shown = status or "unreadable"
+            row["detail"] = f"status now {shown}" + (f" ({err})" if err else "") + " — not touched"
+            continue
+        row["status_now"] = status
+        if args.dry_run:
+            continue  # checks passed; would send
+        try:
+            ok, detail = reload_one(row["pane_id"])
+        except RuntimeError as exc:
+            ok, detail = False, str(exc)
+        if ok:
+            row["outcome"] = "reloaded"  # keep the classify detail (mid-turn note)
+        else:
+            row["outcome"] = "failed"
+            row["detail"] = detail
 
     if args.dry_run:
         print(f"dry run — {len(agents)} pi instance(s) found:")
@@ -253,13 +328,6 @@ def main(argv=None):
         print(f"would send /reload to {would_send} of {len(agents)}")
         return 0 if would_send else 1
 
-    for row in rows:
-        if row["outcome"] != "reload":
-            continue
-        ok, detail = reload_one(row["pane_id"])
-        row["outcome"] = "reloaded" if ok else "failed"
-        row["detail"] = detail
-
     print_report(rows)
 
     reloaded = [r for r in rows if r["outcome"] == "reloaded"]
@@ -267,7 +335,7 @@ def main(argv=None):
     skipped = [r for r in rows if r["outcome"] == "skip"]
     editor_skips = [r for r in skipped if r.get("skip_kind") == "editor"]
     status_skips = [r for r in skipped if r.get("skip_kind") != "editor"]
-    midturn = [r for r in reloaded if r["status"] == "working"]
+    midturn = [r for r in reloaded if r.get("status_now", r["status"]) == "working"]
     total = len(rows)
 
     summary = f"sent /reload to {len(reloaded)}/{total} pi instances"

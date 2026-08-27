@@ -39,8 +39,10 @@ text — bermudi accepted that). pi's status is authoritative — it self-report
 via the `herdr:pi` hook (`~/.pi/agent/extensions/herdr-agent-state.ts`).
 pi-reload also skips panes with a draft in the input box: detected from
 `agent read --source detection` — the editor is the lines between the last
-two `─` border rules; blank cursor line = empty, any text = skip, unparseable
-= skip.
+two full-width `─` border rules; blank cursor line = empty, any text = skip,
+unparseable = skip. It re-checks `agent get` right before each prompt
+(listing status is seconds stale; a residual ms race remains — herdr has no
+guarded prompt).
 
 ## Extracted sibling repos
 

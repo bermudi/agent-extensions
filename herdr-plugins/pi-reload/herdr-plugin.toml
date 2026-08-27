@@ -8,6 +8,6 @@ platforms = ["linux", "macos"]
 [[actions]]
 id = "reload-all"
 title = "Reload all pi instances"
-description = "Send /reload to every pi coding agent in this session; panes at an approval dialog (blocked) or of unknown state are skipped and reported"
+description = "Send /reload to every pi coding agent in this session; skips panes at an approval dialog, of unknown state, or with a draft in the input box"
 contexts = ["global"]
 command = ["python3", "reload_pi.py"]
