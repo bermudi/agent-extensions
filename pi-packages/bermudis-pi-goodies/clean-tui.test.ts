@@ -9,7 +9,7 @@ import cleanTui, {
   __setSummaryModelRegistryForTesting,
   setCleanTuiActive,
 } from "./clean-tui";
-import { PiHarness } from "pi-harness";
+import { PiHarness, type Theme } from "pi-harness";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setSummaryModel, __setConfigPathForTesting } from "./goodies";
@@ -1059,6 +1059,63 @@ describe("clean-tui massive commands", () => {
     const text = textOf(row.lastCallComponent);
     expect(text).toContain("detail line 19"); // full command visible
     expect(text).toContain("done"); // output still shown
+  });
+
+  test("a failed leader does not paint the whole burst box red", () => {
+    // Regression (twice): aggregating any-error over the burst painted every
+    // row red for one failure, and b80a14d's "follow the leader's status"
+    // still did when the leader itself was the failed call (e.g. `skills add
+    // -g ...` failing as the first of four bash calls). The shared box never
+    // takes the error color; the failed call is marked on its own bullet.
+    const taggingTheme: Theme = {
+      fg: (_c, t) => t,
+      bg: (c, t) => `<${c}>${t}`,
+      bold: (t) => t,
+    };
+    const h = new PiHarness({ theme: taggingTheme });
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const a = h.row("bash", "a");
+    const b = h.row("bash", "b");
+    a.setArgs({ command: "skills add -g content-retrieval" });
+    b.setArgs({ command: "skills update content-retrieval -g -y" });
+    a.setResult({ content: ["error: add expects a repo"], isError: true });
+    b.setResult({ content: ["updated"] });
+    const box = a.lastCallComponent as Box;
+    const bg = (box as unknown as { bgFn?: (s: string) => string }).bgFn?.(
+      "probe",
+    );
+    expect(bg).toBe("<toolSuccessBg>probe");
+    // The failure is still visible — on the failing call's own bullet.
+    expect(textOf(box)).toContain("skills add -g content-retrieval");
+  });
+
+  test("burst box stays pending until every call in the burst lands", () => {
+    const taggingTheme: Theme = {
+      fg: (_c, t) => t,
+      bg: (c, t) => `<${c}>${t}`,
+      bold: (t) => t,
+    };
+    const h = new PiHarness({ theme: taggingTheme });
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const a = h.row("bash", "a");
+    const b = h.row("bash", "b");
+    a.setArgs({ command: "echo one" });
+    b.setArgs({ command: "echo two" });
+    a.setResult({ content: ["one"] });
+    // Leader finished, follower has not: the shared box is still running.
+    let bg = (
+      a.lastCallComponent as unknown as { bgFn?: (s: string) => string }
+    ).bgFn?.("probe");
+    expect(bg).toBe("<toolPendingBg>probe");
+    b.setResult({ content: ["two"] });
+    bg = (
+      a.lastCallComponent as unknown as { bgFn?: (s: string) => string }
+    ).bgFn?.("probe");
+    expect(bg).toBe("<toolSuccessBg>probe");
   });
 
   test("burst bullets stay single-line for multi-line commands", () => {

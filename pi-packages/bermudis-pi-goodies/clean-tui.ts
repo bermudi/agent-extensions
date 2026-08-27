@@ -648,8 +648,8 @@ function formatBashBullet(entry: Entry, theme: any): string {
   const cmd = entry.args.command || "...";
   const bullet = `${theme.fg("muted", "•")} `;
   // Failed calls get red text so a single failure is visible without
-  // poisoning the whole burst's background (see renderCall: box color now
-  // follows the leader's status only).
+  // poisoning the whole burst's background (see renderCall: the grouped box
+  // never takes the error color, whichever call failed).
   const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
   if (isSummarizable(cmd) && summaryCache.has(cmd)) {
     return `  ${bullet}${accent(summaryCache.get(cmd)!)}`;
@@ -895,12 +895,17 @@ export default function cleanTui(pi: ExtensionAPI): void {
       const isGrouped = burst && burst.entries.length > 1;
       const isLeader =
         isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
-      // Box color follows the leader's own status. Aggregating any-pending/
-      // any-error over the whole burst paints 37 rows red for one failure;
-      // per-entry failures are marked on their own bullet instead
-      // (formatBashBullet).
-      const pending = !entry.result;
-      const isError = !!entry.isError;
+      // The burst box is shared by every call in the group, so its background
+      // never takes the error color — a failure (the leader included) is
+      // marked on its own bullet instead (formatBashBullet). "Follow the
+      // leader's status" (b80a14d) still painted the whole block red whenever
+      // the first call itself was the one that failed. Pending does
+      // aggregate: the box stays in its running state until every call in
+      // the burst has landed.
+      const pending = isGrouped
+        ? burst.entries.some((e) => !e.result)
+        : !entry.result;
+      const isError = isGrouped ? false : !!entry.isError;
 
       if (isGrouped && !isLeader) {
         // Refresh the leader's header/count. Single hop: a leader's renderCall
