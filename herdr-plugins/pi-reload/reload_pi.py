@@ -11,10 +11,10 @@ How it works
    kind is `pi` are pi coding-agent instances.
 2. pi reports its own lifecycle state to Herdr through the `herdr:pi`
    extension hook, so `agent_status` is authoritative:
-       idle / done  -> editor is free: safe to submit /reload
-       working      -> pi refuses /reload mid-turn ("Wait for the current
-                       response to finish before reloading."), so sending
-                       would only flash a warning; skipped
+       idle / done  -> editor is free: /reload takes effect immediately
+       working      -> sent anyway: pi refuses mid-turn with a warning
+                       ("Wait for the current response to finish before
+                       reloading.") and drops the text; rerun when idle
        blocked      -> pi is showing an approval/question dialog; Enter
                        would CONFIRM the highlighted dialog option, so
                        these panes are never typed into; skipped
@@ -92,7 +92,9 @@ def classify(status):
     if status in ("idle", "done"):
         return "reload", None
     if status == "working":
-        return "skip", "working — pi refuses /reload mid-turn; rerun when idle"
+        # bermudi's call: send anyway. pi warns ("Wait for the current
+        # response to finish before reloading.") and drops the text.
+        return "reload", "mid-turn — pi will warn and drop it; rerun when idle"
     if status == "blocked":
         return "skip", "blocked — approval dialog open, not touched (Enter would confirm it)"
     return "skip", f"unknown state ({status}) — cannot rule out a dialog; not touched"
@@ -200,12 +202,12 @@ def main(argv=None):
     reloaded = [r for r in rows if r["outcome"] == "reloaded"]
     failed = [r for r in rows if r["outcome"] == "failed"]
     skipped = [r for r in rows if r["outcome"] == "skip"]
+    midturn = [r for r in reloaded if r["status"] == "working"]
     total = len(rows)
 
-    if reloaded:
-        summary = f"reloaded {len(reloaded)}/{total} pi instances"
-    else:
-        summary = f"reloaded 0/{total} pi instances"
+    summary = f"sent /reload to {len(reloaded)}/{total} pi instances"
+    if midturn:
+        summary += f", {len(midturn)} mid-turn (rerun when idle)"
     if failed:
         summary += f", {len(failed)} failed"
     if skipped:

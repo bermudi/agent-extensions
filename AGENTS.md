@@ -33,10 +33,10 @@ lands in `herdr plugin log list --plugin <id>`.
 SAFETY RULE for any plugin that types into agent panes: herdr 0.8.2
 `agent prompt` does NOT refuse blocked agents. pi's dialogs confirm the
 highlighted option on Enter, so typing into a `blocked` pane can answer an
-approval dialog. Only send input to pi panes whose `agent_status` is
-`idle`/`done`; skip `working` (pi refuses /reload mid-turn anyway), `blocked`,
-and `unknown`. pi's status is authoritative — it self-reports via the
-`herdr:pi` hook (`~/.pi/agent/extensions/herdr-agent-state.ts`).
+approval dialog. Never send input to `blocked` or `unknown` panes.
+`working` is fine (pi refuses /reload mid-turn with a warning and drops the
+text — bermudi accepted that). pi's status is authoritative — it self-reports
+via the `herdr:pi` hook (`~/.pi/agent/extensions/herdr-agent-state.ts`).
 
 ## Extracted sibling repos
 

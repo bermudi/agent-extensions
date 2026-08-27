@@ -30,14 +30,14 @@ into panes that are safe:
 
 | pi state      | action                                                                     |
 |---------------|----------------------------------------------------------------------------|
-| `idle` / `done` | `/reload` is typed into the editor and submitted                          |
-| `working`     | skipped — pi refuses `/reload` mid-turn ("Wait for the current response…") |
+| `idle` / `done` | `/reload` is typed into the editor and takes effect immediately           |
+| `working`     | sent anyway — pi warns ("Wait for the current response to finish before reloading.") and drops the text; run the action again after the turn ends |
 | `blocked`     | skipped — an approval dialog is open; pressing Enter would **confirm the highlighted option**, so blocked panes are never typed into |
 | `unknown`     | skipped — state hook not authoritative, a dialog cannot be ruled out       |
 
-Busy/blocked panes are listed in the toast and log; run the action again once
-they settle. There is deliberately no "send anyway" mode: typing into a pi
-pane that is showing a dialog can answer it.
+The toast calls out how many were mid-turn so you know whether a rerun is
+needed. Blocked panes are the one hard skip: typing into a pi pane that is
+showing a dialog can answer it.
 
 ## Install
 
