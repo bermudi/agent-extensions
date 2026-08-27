@@ -623,6 +623,7 @@ describe("extension", () => {
     const { config: cfg } = loadConfig(cfgPath);
 
     const handlers: Record<string, (event: any, ctx: any) => unknown> = {};
+    const commands: Record<string, (args: string, ctx: any) => unknown> = {};
     const appended: Array<{ customType: string; data: unknown }> = [];
     const notifications: Array<{ message: string; level?: string }> = [];
     const sessionEntries: any[] = [];
@@ -638,9 +639,17 @@ describe("extension", () => {
       },
       appendEntry: (customType: string, data?: unknown) => {
         appended.push({ customType, data });
+        // Mirror real pi: appendCustomEntry synchronously updates what
+        // sessionManager.getEntries() returns.
+        sessionEntries.push({ type: "custom", customType, data });
       },
       registerEntryRenderer: () => {},
-      registerCommand: () => {},
+      registerCommand: (
+        name: string,
+        opts: { handler: (args: string, ctx: any) => unknown },
+      ) => {
+        commands[name] = opts.handler;
+      },
     };
     const fakeCtx = {
       cwd: tempDir,
@@ -661,6 +670,10 @@ describe("extension", () => {
       fakePi,
       fakeCtx,
       handlers,
+      commands,
+      runCommand: async (args: string) => {
+        await commands["claudish"]!(args, fakeCtx);
+      },
       appended,
       notifications,
       sessionEntries,
@@ -930,6 +943,203 @@ describe("extension", () => {
     await h.tick();
 
     expect(existsSync(join(mdDir, "note.plain.md"))).toBe(true);
+  });
+
+  // ── /claudish explain (on-demand rewrite) ──
+
+  function seedExchange(h: ReturnType<typeof makeHarness>, answer: string) {
+    h.sessionEntries.push(
+      {
+        type: "message",
+        message: { role: "user", content: [{ type: "text", text: "why?" }] },
+      },
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: answer }],
+        },
+      },
+    );
+  }
+
+  test("explain rewrites the last assistant message on demand", async () => {
+    const h = makeHarness({ stub: true, minChars: 1 });
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    seedExchange(h, "The system is down because of reasons.");
+    await h.runCommand("explain");
+    await h.tick();
+    expect(h.appended).toHaveLength(1);
+    expect(h.appended[0]!.customType).toBe("claudish-rewrite");
+    const data = h.appended[0]!.data as { text: string };
+    expect(data.text).toBe(
+      "[claudish stub] The system is down because of reasons.",
+    );
+  });
+
+  test("explain skips when the last message already has a rewrite", async () => {
+    const h = makeHarness({ stub: true, minChars: 1 });
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    seedExchange(h, "Already answered at length.");
+    h.sessionEntries.push({
+      type: "custom",
+      customType: "claudish-rewrite",
+      data: { text: "[claudish stub] Already answered at length.", at: 1 },
+    });
+    await h.runCommand("explain");
+    await h.tick();
+    expect(h.appended).toHaveLength(0);
+    expect(
+      h.notifications.some((n) => n.message.includes("already has a rewrite")),
+    ).toBe(true);
+  });
+
+  test("explain skips when a rewrite is already in flight", async () => {
+    const h = makeHarness({ stub: true, minChars: 1 });
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    seedExchange(h, "Answer being rewritten right now.");
+    h.sessionEntries.push({
+      type: "custom",
+      customType: "claudish-rewrite",
+      data: { text: "", at: 2, pending: true },
+    });
+    await h.runCommand("explain");
+    await h.tick();
+    expect(h.appended).toHaveLength(0);
+    expect(
+      h.notifications.some((n) => n.message.includes("already running")),
+    ).toBe(true);
+  });
+
+  test("explain retries after a failed (hidden) rewrite", async () => {
+    const h = makeHarness({ stub: true, minChars: 1 });
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    seedExchange(h, "The first attempt failed open.");
+    h.sessionEntries.push({
+      type: "custom",
+      customType: "claudish-rewrite",
+      data: { text: "", at: 3, pending: false },
+    });
+    await h.runCommand("explain");
+    await h.tick();
+    expect(h.appended).toHaveLength(1);
+    const data = h.appended[0]!.data as { text: string };
+    expect(data.text).toBe("[claudish stub] The first attempt failed open.");
+  });
+
+  test("explain respects the enabled=false master switch", async () => {
+    const h = makeHarness({ stub: true, minChars: 1, enabled: false });
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    seedExchange(h, "A long enough answer that qualifies.");
+    await h.runCommand("explain");
+    await h.tick();
+    expect(h.appended).toHaveLength(0);
+    expect(h.notifications[0]!.message).toContain("enabled=false");
+  });
+
+  test("explain bypasses the off-file kill switch", async () => {
+    const h = makeHarness({ stub: true, minChars: 1 });
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    seedExchange(h, "Paused automation, explicit request still works.");
+    writeFileSync(h.cfg.offFile, "");
+    await h.runCommand("explain");
+    await h.tick();
+    expect(h.appended).toHaveLength(1);
+    rmSync(h.cfg.offFile, { force: true });
+  });
+
+  test("explain with no assistant message notifies and does nothing", async () => {
+    const h = makeHarness({ stub: true, minChars: 1 });
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    await h.runCommand("explain");
+    await h.tick();
+    expect(h.appended).toHaveLength(0);
+    expect(
+      h.notifications.some((n) => n.message.includes("no assistant message")),
+    ).toBe(true);
+  });
+
+  test("explain refuses messages below minChars", async () => {
+    const h = makeHarness({ stub: true, minChars: 200 });
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    seedExchange(h, "tiny");
+    await h.runCommand("explain");
+    await h.tick();
+    expect(h.appended).toHaveLength(0);
+    expect(h.notifications.some((n) => n.message.includes("too short"))).toBe(
+      true,
+    );
+  });
+
+  test("agent_settled does not double-fire after message_end handled the message", async () => {
+    const h = makeHarness({ stub: true, minChars: 1 });
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    seedExchange(h, "A complete answer that was already handled.");
+    await h.handlers["message_end"]!(
+      assistantMessage("A complete answer that was already handled."),
+      h.fakeCtx,
+    );
+    await h.handlers["agent_settled"]!({ type: "agent_settled" }, h.fakeCtx);
+    await h.tick();
+    expect(h.appended).toHaveLength(1);
+  });
+
+  test("agent_settled ignores a short final message instead of re-explaining an older one", async () => {
+    const h = makeHarness({ stub: true, minChars: 200 });
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    const long =
+      "A long and detailed answer with plenty of prose to qualify for the " +
+      "automatic rewrite path, well above the two hundred character minimum.";
+    h.sessionEntries.push(
+      {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: long }] },
+      },
+      {
+        type: "message",
+        message: { role: "user", content: [{ type: "text", text: "ok" }] },
+      },
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "tiny" }],
+        },
+      },
+    );
+    await h.handlers["agent_settled"]!({ type: "agent_settled" }, h.fakeCtx);
+    await h.tick();
+    // The old implementation walked back to the long message and re-explained
+    // it (stale, visually detached); the refactor must append nothing.
+    expect(h.appended).toHaveLength(0);
+  });
+
+  test("session_start flips pending entries left by a crashed run to failed", async () => {
+    const h = makeHarness({ stub: true, minChars: 1 });
+    seedExchange(h, "An answer whose rewrite never landed.");
+    const stale = {
+      type: "custom",
+      customType: "claudish-rewrite",
+      data: { text: "", at: Date.now() - 3_600_000, pending: true },
+    };
+    h.sessionEntries.push(stale);
+    await registerFactory(h.fakePi, h.cfgPath);
+    await h.start();
+    expect((stale.data as { pending?: boolean }).pending).toBe(false);
+    // And explain now proceeds instead of reporting "already running".
+    await h.runCommand("explain");
+    await h.tick();
+    expect(h.appended).toHaveLength(1);
   });
 
   test("md hook fails open when the rewriter fails (original untouched)", async () => {

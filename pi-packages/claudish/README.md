@@ -191,6 +191,20 @@ You create and remove this file yourself; nothing creates it on install, and its
 absence is the normal "on" state. Override the path with `offFile` in the config
 file. Pi-native alternative: `/claudish on|off|status`.
 
+### On-demand rewrite: `/claudish explain`
+
+Explains the **last assistant message** of the current session, right now — for
+when the turn settled before claudish could run: the extension wasn't loaded yet
+(exit, restart with `pi -c -e <path-to-index.ts>`, run the command), the kill
+switch was on, or the automatic rewrite failed open.
+
+- Skips with a notice if the message already has a rewrite or one is in flight;
+  a **failed** (hidden) rewrite does not count, so the command doubles as a
+  retry.
+- Respects `minChars` and refuses with a notice for too-short messages.
+- Bypasses the off-file kill switch (an explicit request is the consent) but
+  honors the `enabled: false` master switch.
+
 ## Configuration reference
 
 All fields are optional. An absent file or empty `{}` uses all defaults.
@@ -232,7 +246,8 @@ All fields are optional. An absent file or empty `{}` uses all defaults.
   for you.
 - The Markdown hook covers Pi's write/edit tools (the plugin's NotebookEdit
   equivalent doesn't exist here).
-- `/claudish on|off|status` is a pi-native toggle for the kill-switch file.
+- `/claudish on|off|status|explain` is a pi-native toggle for the kill-switch
+  file, plus an on-demand rewrite of the last assistant message.
 
 ## Development
 

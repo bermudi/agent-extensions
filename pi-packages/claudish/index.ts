@@ -80,7 +80,10 @@ interface RewriteEntryData {
 }
 
 /** Live Text refs for pending placeholders so we can mutate them in place without a new entry. */
-const pendingPlaceholders = new Map<number, { box: Box; body: Text; header: Text }>();
+const pendingPlaceholders = new Map<
+  number,
+  { box: Box; body: Text; header: Text }
+>();
 
 function requestRender(ctx: ExtensionContext): void {
   try {
@@ -152,11 +155,17 @@ function truncateLines(s: string, max: number): string {
   );
 }
 
-/** Find the most recent user message in the session, for context only. */
-function findLastUserQuestion(ctx: ExtensionContext): string | undefined {
+/**
+ * Find the most recent user message at or before session index `from`,
+ * for context only.
+ */
+function findUserQuestionBefore(
+  ctx: ExtensionContext,
+  from: number,
+): string | undefined {
   try {
     const entries = ctx.sessionManager.getEntries();
-    for (let i = entries.length - 1; i >= 0; i--) {
+    for (let i = Math.min(from, entries.length - 1); i >= 0; i--) {
       const e = entries[i];
       if (e && e.type === "message" && e.message?.role === "user") {
         const text = extractText(e.message.content).trim();
@@ -165,6 +174,41 @@ function findLastUserQuestion(ctx: ExtensionContext): string | undefined {
     }
   } catch {
     // the question is only context — fail open
+  }
+  return undefined;
+}
+
+/** Find the most recent user message in the session, for context only. */
+function findLastUserQuestion(ctx: ExtensionContext): string | undefined {
+  return findUserQuestionBefore(ctx, Number.MAX_SAFE_INTEGER);
+}
+
+/**
+ * Find the last assistant message entry that carries text, skipping error
+ * messages and tool-call-only messages. Returns the text and its session
+ * index so callers can inspect the entries that follow the message.
+ */
+function findLastAssistantMessage(
+  ctx: ExtensionContext,
+): { text: string; index: number } | undefined {
+  try {
+    const entries = ctx.sessionManager.getEntries();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i] as unknown as {
+        type: string;
+        message?: { role: string; content: unknown; errorMessage?: unknown };
+      };
+      if (
+        e.type === "message" &&
+        e.message?.role === "assistant" &&
+        !e.message.errorMessage
+      ) {
+        const t = extractText(e.message.content).trim();
+        if (t) return { text: t, index: i };
+      }
+    }
+  } catch {
+    // fail open — nothing to explain
   }
   return undefined;
 }
@@ -303,8 +347,16 @@ async function runDisplayRewrite(
     try {
       const entries = ctx.sessionManager.getEntries();
       for (let i = entries.length - 1; i >= 0; i--) {
-        const e = entries[i] as unknown as { type: string; customType?: string; data?: RewriteEntryData };
-        if (e.type === "custom" && e.customType === ENTRY_TYPE && e.data?.at === at) {
+        const e = entries[i] as unknown as {
+          type: string;
+          customType?: string;
+          data?: RewriteEntryData;
+        };
+        if (
+          e.type === "custom" &&
+          e.customType === ENTRY_TYPE &&
+          e.data?.at === at
+        ) {
           e.data.pending = false;
           e.data.text = "";
           break;
@@ -320,8 +372,16 @@ async function runDisplayRewrite(
       // Persist for reloads / export.
       const entries = ctx.sessionManager.getEntries();
       for (let i = entries.length - 1; i >= 0; i--) {
-        const e = entries[i] as unknown as { type: string; customType?: string; data?: RewriteEntryData };
-        if (e.type === "custom" && e.customType === ENTRY_TYPE && e.data?.at === at) {
+        const e = entries[i] as unknown as {
+          type: string;
+          customType?: string;
+          data?: RewriteEntryData;
+        };
+        if (
+          e.type === "custom" &&
+          e.customType === ENTRY_TYPE &&
+          e.data?.at === at
+        ) {
           e.data.text = outcome.text;
           e.data.pending = false;
           break;
@@ -337,7 +397,10 @@ async function runDisplayRewrite(
       requestRender(ctx);
     } catch {}
     pendingPlaceholders.delete(at);
-    debugLog(cfg, `display: populated placeholder (${outcome.text.length} chars)`);
+    debugLog(
+      cfg,
+      `display: populated placeholder (${outcome.text.length} chars)`,
+    );
     return;
   }
 
@@ -349,15 +412,26 @@ async function runDisplayRewrite(
     try {
       const entries = ctx.sessionManager.getEntries();
       for (let i = entries.length - 1; i >= 0; i--) {
-        const e = entries[i] as unknown as { type: string; customType?: string; data?: RewriteEntryData };
-        if (e.type === "custom" && e.customType === ENTRY_TYPE && e.data?.at === at) {
+        const e = entries[i] as unknown as {
+          type: string;
+          customType?: string;
+          data?: RewriteEntryData;
+        };
+        if (
+          e.type === "custom" &&
+          e.customType === ENTRY_TYPE &&
+          e.data?.at === at
+        ) {
           e.data.text = outcome.text;
           e.data.pending = false;
           break;
         }
       }
     } catch {}
-    debugLog(cfg, `display: populated placeholder (headless, ${outcome.text.length} chars)`);
+    debugLog(
+      cfg,
+      `display: populated placeholder (headless, ${outcome.text.length} chars)`,
+    );
     return;
   }
 
@@ -435,12 +509,37 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
   configPath = options.configPath ?? join(getAgentDir(), CONFIG_FILENAME);
 
   // Read config at session start; reset the once-per-session notice.
-  pi.on("session_start", () => {
+  pi.on("session_start", (_event, ctx) => {
     config = loadConfig(configPath).config;
     noticeShown = false;
     pendingPlaceholders.clear();
     lastHandledText = undefined;
     lastHandledAt = 0;
+    // A pending rewrite entry in a freshly loaded session was written by a
+    // previous process that died mid-rewrite (crash/kill) — its rewrite can
+    // never land. Flip it to the hidden failed state so it doesn't render an
+    // eternal spinner and doesn't make /claudish explain report "already
+    // running" forever.
+    try {
+      const entries = ctx.sessionManager.getEntries();
+      for (let i = 0; i < entries.length; i++) {
+        const e = entries[i] as unknown as {
+          type: string;
+          customType?: string;
+          data?: RewriteEntryData;
+        };
+        if (
+          e.type === "custom" &&
+          e.customType === ENTRY_TYPE &&
+          e.data?.pending
+        ) {
+          e.data.pending = false;
+          e.data.text = "";
+        }
+      }
+    } catch {
+      // fail open — worst case is the old eternal-spinner behavior
+    }
   });
 
   // The rewrite block: a custom entry that renders in the TUI but never
@@ -504,6 +603,78 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
     void runDisplayRewrite(pi, ctx, cfg, text, question);
   }
 
+  /**
+   * On-demand rewrite of the last assistant message (/claudish explain) —
+   * the manual override for "the turn settled before claudish could run":
+   * the extension was loaded after the fact, the kill switch was on, or the
+   * automatic rewrite failed open. Bypasses the off-file kill switch (an
+   * explicit request is the consent) but honors the enabled master switch.
+   */
+  async function explainLastMessage(ctx: ExtensionContext): Promise<void> {
+    const cfg = getConfig();
+    if (!cfg.enabled) {
+      ctx.ui.notify(
+        'claudish: enabled=false in config — set "enabled": true to use /claudish explain',
+        "warning",
+      );
+      return;
+    }
+    const found = findLastAssistantMessage(ctx);
+    if (!found) {
+      ctx.ui.notify(
+        "claudish: no assistant message to explain in this session",
+        "warning",
+      );
+      return;
+    }
+    // Skip when this message already has a rewrite or one is in flight; a
+    // failed (hidden) rewrite does not count, so explain doubles as a retry.
+    try {
+      const entries = ctx.sessionManager.getEntries();
+      let inFlight = false;
+      let explained = false;
+      for (let i = found.index + 1; i < entries.length; i++) {
+        const e = entries[i] as unknown as {
+          type: string;
+          customType?: string;
+          data?: RewriteEntryData;
+        };
+        if (e.type === "custom" && e.customType === ENTRY_TYPE) {
+          if (e.data?.pending) inFlight = true;
+          if (e.data?.text) explained = true;
+        }
+      }
+      if (inFlight) {
+        ctx.ui.notify(
+          "claudish: a rewrite of the last message is already running",
+          "info",
+        );
+        return;
+      }
+      if (explained) {
+        ctx.ui.notify(
+          "claudish: last assistant message already has a rewrite",
+          "info",
+        );
+        return;
+      }
+    } catch {
+      // scan failed — proceed; worst case is a duplicate rewrite
+    }
+    if (proseLength(found.text) < cfg.minChars) {
+      ctx.ui.notify(
+        `claudish: last assistant message is too short to explain (prose < minChars=${cfg.minChars})`,
+        "warning",
+      );
+      return;
+    }
+    const question = findUserQuestionBefore(ctx, found.index - 1);
+    // Mark as handled so a concurrent agent_settled cannot double-fire.
+    lastHandledText = found.text;
+    lastHandledAt = Date.now();
+    void runDisplayRewrite(pi, ctx, cfg, found.text, question);
+  }
+
   // Display hook: after an assistant message completes, show a placeholder
   // immediately and rewrite in the background. Fire-and-forget so the stream
   // and the agent loop are never blocked.
@@ -518,25 +689,9 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
   // agent is idle, even if the final message was streamed in chunks. The
   // deduplication above prevents a second placeholder for the same text.
   pi.on("agent_settled", async (_event, ctx) => {
-    let lastText: string | undefined;
-    try {
-      const entries = ctx.sessionManager.getEntries();
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const e = entries[i] as unknown as {
-          type: string;
-          message?: { role: string; content: unknown; errorMessage?: unknown };
-        };
-        if (e.type === "message" && e.message?.role === "assistant" && !e.message.errorMessage) {
-          const t = extractText(e.message.content).trim();
-          if (t && proseLength(t) >= getConfig().minChars) {
-            lastText = t;
-            break;
-          }
-        }
-      }
-    } catch {}
-    if (!lastText) return;
-    await handleAssistantText(lastText, ctx);
+    const found = findLastAssistantMessage(ctx);
+    if (!found) return;
+    await handleAssistantText(found.text, ctx);
   });
 
   // Markdown file hook (opt-in via mdDir in config): rewrite *.md files
@@ -579,7 +734,7 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
   // Convenience kill switch, pi-native equivalent of touch/rm on the off file.
   pi.registerCommand("claudish", {
     description:
-      "Control claudish plain-English rewrites: /claudish [on|off|status]",
+      "Control claudish plain-English rewrites: /claudish [on|off|status|explain] — explain rewrites the last assistant message on demand",
     handler: async (args, ctx) => {
       const cfg = getConfig();
       const cmd = (args?.trim() || "status").toLowerCase();
@@ -593,7 +748,7 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
           );
           return;
         }
-        ctx.ui.notify("claudish: rewrites on", "info");
+        ctx.ui.notify("claudish: automatic rewrites on", "info");
       } else if (cmd === "off") {
         try {
           mkdirSync(dirname(cfg.offFile), { recursive: true });
@@ -603,9 +758,11 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
           return;
         }
         ctx.ui.notify(
-          "claudish: rewrites paused — resume with /claudish on",
+          "claudish: automatic rewrites paused — resume with /claudish on",
           "info",
         );
+      } else if (cmd === "explain") {
+        await explainLastMessage(ctx);
       } else {
         const state = isKillSwitched(cfg)
           ? "paused (off file present)"

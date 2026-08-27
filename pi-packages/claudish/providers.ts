@@ -269,18 +269,18 @@ export async function rewriteViaPi(
   const prompt = buildPrompt(text, userQuestion);
   const { signal, clear } = timeoutSignal(timeoutMs);
   try {
-      const msg = (await (registry as unknown as {
-      complete: (
-        model: unknown,
-        context: unknown,
-        options: unknown,
-      ) => Promise<unknown>;
-    }).complete(
+    const msg = (await (
+      registry as unknown as {
+        complete: (
+          model: unknown,
+          context: unknown,
+          options: unknown,
+        ) => Promise<unknown>;
+      }
+    ).complete(
       model as unknown,
       {
-        messages: [
-          { role: "user", content: prompt, timestamp: Date.now() },
-        ],
+        messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
       },
       {
         signal,
