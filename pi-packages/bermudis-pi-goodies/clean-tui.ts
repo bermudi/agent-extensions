@@ -134,6 +134,14 @@ type Entry = {
   hasImage?: boolean;
   /** Content array of the last result seen; detects real mutations vs re-renders. */
   contentRef?: unknown;
+  /**
+   * When a summary request was first fired for this entry's command. A row
+   * whose result landed after this stamp finished while its summary was in
+   * flight — it may still swap when the summary lands (viewport-tail safe).
+   */
+  summaryRequestedAt?: number;
+  /** When the first genuine tool result landed (stamped in recordResult). */
+  resultAt?: number;
 };
 
 let liveSeg = 0;
@@ -272,6 +280,7 @@ function recordResult(entry: Entry | undefined, result: any, ctx: any) {
   if (!entry || entry.contentRef === result?.content) return;
   entry.contentRef = result?.content;
   entry.result = result;
+  entry.resultAt = Date.now();
   entry.isError = !!ctx.isError || !!result.isError;
   entry.hasImage = hasImageContent(result);
   revalidateBurstsAround(entry.toolCallId);
@@ -314,6 +323,10 @@ const SUMMARY_ERROR_SNIPPET_CHARS = 200;
 
 const summaryCache = new Map<string, string>();
 const pendingSummaries = new Set<string>();
+// Commands whose requests were deferred by the inflight cap or a failure
+// backoff. Drained whenever a slot frees (request settle) or a later
+// renderCall finds capacity — no timers. Cleared on session switch.
+const summaryRequestQueue: string[] = [];
 // A burst of distinct long commands can fan out N simultaneous renders; keep
 // concurrent provider requests bounded so we don't hammer the rate limiter.
 const SUMMARY_MAX_INFLIGHT = 2;
@@ -325,6 +338,7 @@ export function __setSummaryEnabled(v: boolean): void {
 export function __clearSummaryCache(): void {
   summaryCache.clear();
   pendingSummaries.clear();
+  summaryRequestQueue.length = 0;
   summaryFailuresLogged.clear();
   summaryFailStreak = 0;
   summaryBlockedUntil = 0;
@@ -534,6 +548,9 @@ function noteSummaryFailure(err: unknown): number {
 }
 
 function requestSummary(cmd: string): void {
+  // Deferred requests drain here too: renderCalls are the heartbeat that
+  // notices backoff expiry when nothing else is in flight.
+  drainSummaryQueue();
   // Guard order matters: renderCall fires on every rerender, so all guards
   // here are cheap sync checks, and anything that can differ across rerenders
   // of the same command must not mutate state (mutating in a render path once
@@ -543,12 +560,29 @@ function requestSummary(cmd: string): void {
     replaying ||
     !isSummarizable(cmd) ||
     !getSummaryModel() || // unset = feature off: no resolution, no network.
-    summaryCache.has(cmd) ||
-    pendingSummaries.has(cmd) ||
-    Date.now() < summaryBlockedUntil ||
-    pendingSummaries.size >= SUMMARY_MAX_INFLIGHT
+    summaryCache.has(cmd)
   )
     return;
+  // Stamp before any deferral: a row whose result lands while its summary is
+  // queued or in flight may still swap when the summary arrives (see
+  // invalidateRowsForCommand) — at landing such rows are at most one summary
+  // latency old, so they sit at the viewport tail.
+  stampSummaryRequested(cmd);
+  if (pendingSummaries.has(cmd) || summaryRequestQueue.includes(cmd)) return;
+  if (
+    Date.now() < summaryBlockedUntil ||
+    pendingSummaries.size >= SUMMARY_MAX_INFLIGHT
+  ) {
+    // Defer, don't drop: a burst of N commands renders faster than summaries
+    // complete, and a dropped request would never retry (its row may not
+    // re-render). Drained on settle and on later renderCalls.
+    summaryRequestQueue.push(cmd);
+    return;
+  }
+  startSummaryRequest(cmd);
+}
+
+function startSummaryRequest(cmd: string): void {
   pendingSummaries.add(cmd);
   const signal = summarySessionAbort.signal;
   activeBackend()
@@ -573,27 +607,70 @@ function requestSummary(cmd: string): void {
       if (signal.aborted || (err as Error)?.name === "AbortError") return;
       const pauseMs = noteSummaryFailure(err);
       logSummaryFailure(cmd, err, pauseMs);
+    })
+    .finally(() => {
+      if (!signal.aborted) drainSummaryQueue();
     });
 }
 
-function invalidateRowsForCommand(cmd: string): void {
-  // Only rows that are STILL EXECUTING get refreshed when a summary lands.
-  // Executing rows sit at the transcript tail, inside pi's viewport, so the
-  // re-render is a cheap differential line update. Finished rows — including
-  // replayed ones from before a /resume — can sit far above the viewport on a
-  // long transcript, and pi's diff renderer answers any change above the
-  // viewport with fullRender(true): clear screen + scrollback wipe + full
-  // repaint, i.e. the "flicker while pi is working" seen on 0.11.x (fits any
-  // width; reproduced reasoning from tui-main-screen.js `firstChanged <
-  // prevViewportTop`). Finished rows simply keep the raw command text, which
-  // is more informative than the summary anyway; the summary stays cached
-  // and future rows of the same command render it from the start.
+/** Start queued requests while capacity allows and no backoff is active. */
+function drainSummaryQueue(): void {
+  while (
+    summaryRequestQueue.length > 0 &&
+    pendingSummaries.size < SUMMARY_MAX_INFLIGHT &&
+    Date.now() >= summaryBlockedUntil
+  ) {
+    const cmd = summaryRequestQueue.shift()!;
+    if (summaryCache.has(cmd) || pendingSummaries.has(cmd)) continue;
+    startSummaryRequest(cmd);
+  }
+}
+
+function stampSummaryRequested(cmd: string): void {
+  const now = Date.now();
   for (const e of entries) {
-    if (!e.result && e.args?.command === cmd) {
+    if (e.args?.command === cmd && e.summaryRequestedAt === undefined)
+      e.summaryRequestedAt = now;
+  }
+}
+
+function invalidateRowsForCommand(cmd: string): void {
+  // Refresh rows that are STILL EXECUTING, plus rows that finished while
+  // their summary was in flight — at landing those are at most one summary
+  // latency old, so they sit at the viewport tail and a differential
+  // re-render is safe. This is what makes fast commands (finished before the
+  // ~2s summary arrives) visibly summarize at all. Older finished rows —
+  // including replayed ones from before a /resume — keep the raw command
+  // text: they can sit far above the viewport on a long transcript, and pi's
+  // diff renderer answers any change above the viewport with fullRender(true):
+  // clear screen + scrollback wipe + full repaint, i.e. the "flicker while pi
+  // is working" seen on 0.11.x. The summary stays cached either way, and
+  // future rows of the same command render it from the start.
+  for (const e of entries) {
+    if (e.args?.command !== cmd) continue;
+    const finishedDuringFlight =
+      e.resultAt !== undefined &&
+      e.summaryRequestedAt !== undefined &&
+      e.resultAt >= e.summaryRequestedAt &&
+      // Strictly younger than the window: a zero window must admit nothing,
+      // and stamp/result often land in the same millisecond in tests.
+      Date.now() - e.resultAt < summarySwapMaxAgeMs;
+    if (!e.result || finishedDuringFlight) {
       const fn = invalidateById.get(e.toolCallId);
       if (fn) fn();
     }
   }
+}
+
+// Bounds how long after finishing a row may still swap. Covers the normal
+// race (summary lands ~2s after start, row finished ≤2s ago) with margin;
+// backoff-delayed landings (30s+) exceed it and correctly keep raw text,
+// since such rows may have scrolled above the viewport.
+const SUMMARY_SWAP_MAX_AGE_MS = 10_000;
+let summarySwapMaxAgeMs = SUMMARY_SWAP_MAX_AGE_MS;
+
+export function __setSummarySwapMaxAgeForTesting(ms: number): void {
+  summarySwapMaxAgeMs = ms;
 }
 
 function bgFor(
@@ -794,6 +871,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
     entryById.clear();
     invalidateById.clear();
     pendingSummaries.clear();
+    summaryRequestQueue.length = 0;
     // Capture the registry slice render context lacks, and cut off any
     // summaries still in flight from the previous session.
     const modelRegistry = (
@@ -934,8 +1012,9 @@ export default function cleanTui(pi: ExtensionAPI): void {
       );
     },
     renderCall(args, theme, ctx: any) {
-      if (args.command) requestSummary(args.command);
+      // Upsert before requestSummary so the stamp sees this row's entry.
       const entry = upsertEntry(ctx.toolCallId, "bash", args, ctx.invalidate);
+      if (args.command) requestSummary(args.command);
       const burst = getBurstForId(ctx.toolCallId);
       const isGrouped = burst && burst.entries.length > 1;
       const isLeader =

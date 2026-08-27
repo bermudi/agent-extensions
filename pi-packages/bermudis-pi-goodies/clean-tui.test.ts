@@ -8,6 +8,7 @@ import cleanTui, {
   __setSummaryEnabled,
   __setSummaryLogPathForTesting,
   __setSummaryModelRegistryForTesting,
+  __setSummarySwapMaxAgeForTesting,
   setCleanTuiActive,
 } from "./clean-tui";
 import { PiHarness, type Theme } from "pi-harness";
@@ -545,14 +546,38 @@ describe("clean-tui AI summary", () => {
     expect(after).toBe(before);
   });
 
-  test("summary arrival never re-renders finished rows (scrollback flicker)", async () => {
-    // Regression (0.11.x, tall transcripts, any width): a landing summary
-    // invalidated EVERY row that ever ran the command — including replayed
-    // rows from before a /resume, far above pi's viewport. pi's diff
-    // renderer turns any change above the viewport into fullRender(true):
-    // clear screen + scrollback wipe (the reported "flicker while pi is
-    // working"). Only still-executing rows refresh now; finished ones keep
-    // the raw command text, and the cache still serves future rows.
+  test("summary swaps a row that finished while its summary was in flight", async () => {
+    // Fast commands used to never show summaries: the row finished before the
+    // ~2s summary landed, and finished rows kept raw text forever (anti-
+    // flicker rule). Rows that finish DURING the flight are at most one
+    // summary latency old at landing — still at the viewport tail — so they
+    // swap. This is the exact burst residue: 2 of 4 summarized, 2 raw.
+    scriptedBackend(() => "Typechecks the extension sources");
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const cmd =
+      "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies && bun run typecheck && bun run test";
+    const row = h.row("bash", "fast");
+    row.setArgs({ command: cmd }); // request fires here
+    row.setResult({ content: [{ type: "text", text: "132 pass" }] }); // finishes mid-flight
+    await new Promise((r) => setTimeout(r, 20));
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Typechecks the extension sources",
+    );
+    expect(textOf(row.lastCallComponent)).not.toContain("&& bun run");
+  });
+
+  test("summaries never swap rows that finished long before the landing", async () => {
+    // The 0.11.x flicker regression: invalidating finished rows far above the
+    // viewport (replayed history, old rows) triggers pi's fullRender(true) —
+    // clear screen + scrollback wipe. The freshness window bounds the swap to
+    // rows still at the viewport tail; with the window at zero, even a
+    // just-finished row keeps raw text, proving the guard bites.
+    __setSummarySwapMaxAgeForTesting(0);
+    cleanupFns.push(() => __setSummarySwapMaxAgeForTesting(10_000));
     scriptedBackend(() => "Typechecks the extension sources");
     enableSummariesForTest();
     const h = new PiHarness();
@@ -863,11 +888,10 @@ describe("clean-tui AI summary", () => {
     expect(textOf(row.lastCallComponent)).not.toContain(
       "Lists agent settings and extensions",
     );
-    // After the cooldown the next render retries and recovers. The row has
-    // finished, so the arrival must NOT re-render it (scrollback-flicker
-    // rule) — verify the cache took the summary via a fresh row instead:
-    // same command bursts with the original row, and the follower's render
-    // hop refreshes the leader, whose bullets show the recovered summary.
+    // After the cooldown the next render retries and recovers. The row
+    // finished during the failed first flight, so the recovered summary now
+    // swaps it directly (finished-during-flight rule, freshness window
+    // covers the short cooldown); verify via the original row's text:
     succeed = true;
     await new Promise((r) => setTimeout(r, 120));
     row.setArgs({ command: cmd });
@@ -963,8 +987,7 @@ describe("clean-tui AI summary", () => {
   test("at most 2 summary requests run concurrently", async () => {
     // A parallel-call burst renders N distinct long commands at once; without
     // a cap each render fans out its own provider request simultaneously.
-    // Rows beyond the cap bounce and retry on later re-renders, exactly like
-    // real pi repaints them.
+    // Rows beyond the cap queue and drain as slots free.
     captureConsoleError();
     let started = 0;
     let active = 0;
@@ -1029,6 +1052,42 @@ describe("clean-tui AI summary", () => {
     await settle();
     await settle(); // one hop for the result, one for the re-render
     expect(textOf(rowR.lastCallComponent)).toContain("s(92)");
+  });
+
+  test("burst rows beyond the inflight cap queue and still get summaries", async () => {
+    // A 4-command burst renders faster than summaries complete: rows 3-4 hit
+    // the cap at first render. Dropping them left raw rows forever (their
+    // components may never re-render — the observed burst residue);
+    // queueing drains them as slots free instead.
+    captureConsoleError();
+    const resolvers: Array<(v: string) => void> = [];
+    __setSummaryBackendForTesting({
+      summarize: async (cmd) =>
+        new Promise<string>((resolve) => resolvers.push(resolve)),
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const rows = ["b1", "b2", "b3", "b4"].map((id) => h.row("bash", id));
+    const cmdOf = (tag: string) => `echo ${"y".repeat(85)}-${tag}`;
+    // All four render back-to-back (one textless segment → one burst).
+    for (const [i, row] of rows.entries())
+      row.setArgs({ command: cmdOf(`v${i}`) });
+    // Cap: exactly two requests out; the other two queued, not dropped.
+    expect(resolvers).toHaveLength(2);
+    // Settling the first two drains the queue in render order.
+    resolvers[0]("s v0");
+    resolvers[1]("s v1");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(resolvers).toHaveLength(4);
+    resolvers[2]("s v2");
+    resolvers[3]("s v3");
+    await new Promise((r) => setTimeout(r, 20));
+    const leader = textOf(rows[0].lastCallComponent);
+    expect(leader).toContain("s v2");
+    expect(leader).toContain("s v3");
   });
 
   test("switching sessions abandons in-flight summaries without side effects", async () => {

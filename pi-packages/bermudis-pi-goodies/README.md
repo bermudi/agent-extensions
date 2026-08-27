@@ -98,12 +98,19 @@ clean-tui therefore follows two rules in its render paths:
 - **Height-neutral swaps:** text that may be replaced by a summary later is
   capped at the same width as summaries (`BASH_BULLET_WIDTH`), so an
   arriving summary never collapses a wrapped line (rule 1).
-- **Pending-only refresh:** when a summary lands, only rows whose tool is
-  still executing are re-rendered — those sit at the transcript tail, inside
-  the viewport, so the swap is a cheap differential update. Finished rows
+- **Tail-only refresh:** when a summary lands, only rows that are still
+  executing, or that finished while their summary was in flight (bounded by
+  a ~10s freshness window), are re-rendered — at landing such rows sit at
+  the transcript tail, inside the viewport, so the swap is a cheap
+  differential update. This is what lets fast commands — finished before
+  the ~2s summary arrives — show their summary at all. Older finished rows
   (including replayed ones from before a `/resume`) keep the raw command
   text for the rest of the session; the summary stays cached, and future
   rows of the same command render it from the start (rule 2).
+- **Queued, not dropped:** burst rows beyond the two-concurrent-requests
+  cap, and requests deferred by failure backoff, are queued and drained
+  when a slot frees — never silently dropped (their rows may never
+  re-render to retry).
 
 To catch a flash red-handed, run `PI_DEBUG_REDRAW=1 pi`, reproduce, then
 `grep fullRender ~/.pi/agent/pi-debug.log` — every line is one screen wipe
