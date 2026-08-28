@@ -44,6 +44,8 @@ export interface RenderContext {
   toolCallId: string;
   expanded: boolean;
   isPartial: boolean;
+  /** False while the call's JSON args are still streaming in. */
+  argsComplete: boolean;
   isError: boolean;
   cwd: string;
   showImages: boolean;
@@ -136,6 +138,7 @@ export class ToolRow {
   private aborted = false;
 
   private argsValue: unknown;
+  private argsComplete = true;
   private resultContent?: unknown[];
   private resultIsError = false;
   private hasResult = false;
@@ -158,6 +161,7 @@ export class ToolRow {
       toolCallId: row.toolCallId,
       expanded: row.expandedValue,
       isPartial: false,
+      argsComplete: row.argsComplete,
       isError: row.resultIsError,
       cwd: process.cwd(),
       showImages: true,
@@ -165,9 +169,15 @@ export class ToolRow {
     };
   }
 
-  /** Simulate streaming/partial args (pi calls updateArgs -> updateDisplay). */
-  setArgs(args: unknown): void {
+  /**
+   * Simulate streaming/partial args (pi calls updateArgs -> updateDisplay).
+   * Pass `{ argsComplete: false }` for intermediate streaming renders — pi's
+   * ToolExecutionComponent reports argsComplete=false until the JSON args
+   * finish streaming, then re-renders once more with argsComplete=true.
+   */
+  setArgs(args: unknown, opts?: { argsComplete?: boolean }): void {
     this.argsValue = args;
+    this.argsComplete = opts?.argsComplete ?? true;
     this.update();
   }
 

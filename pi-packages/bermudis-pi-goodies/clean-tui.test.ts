@@ -1182,6 +1182,44 @@ describe("clean-tui AI summary", () => {
     expect(leader).toContain("s v3");
   });
 
+  test("streaming args fire one request per row, only when args complete", async () => {
+    // pi re-renders each row while the JSON args stream in. Every partial
+    // command longer than the threshold used to fire its own request —
+    // truncated, undisplayable, queue-blocking — so the complete command's
+    // request landed after the freshness window had closed. Bursts
+    // summarized their first row only (the reported "works for the first
+    // cmd only").
+    captureConsoleError();
+    const resolvers: Array<(v: string) => void> = [];
+    __setSummaryBackendForTesting({
+      summarize: async () =>
+        new Promise<string>((resolve) => resolvers.push(resolve)),
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const rows = ["s1", "s2"].map((id) => h.row("bash", id));
+    const cmdOf = (tag: string) => `echo ${"y".repeat(130)}-${tag}`;
+    for (const [i, row] of rows.entries()) {
+      const full = cmdOf(`v${i}`);
+      for (const cut of [20, 45, 70, 100, 130, full.length])
+        row.setArgs(
+          { command: full.slice(0, cut) },
+          { argsComplete: cut === full.length },
+        );
+    }
+    // Exactly one request per row — for the complete command only.
+    expect(resolvers).toHaveLength(2);
+    resolvers[0]("s v0");
+    resolvers[1]("s v1");
+    await new Promise((r) => setTimeout(r, 10));
+    const leader = textOf(rows[0].lastCallComponent);
+    expect(leader).toContain("s v0");
+    expect(leader).toContain("s v1");
+  });
+
   test("switching sessions abandons in-flight summaries without side effects", async () => {
     // Render-side work outlives turns, so each session carries its own abort
     // controller. The dangerous ordering is a stale provider response landing

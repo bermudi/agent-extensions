@@ -1123,7 +1123,14 @@ export default function cleanTui(pi: ExtensionAPI): void {
     renderCall(args, theme, ctx: any) {
       // Upsert before requestSummary so the stamp sees this row's entry.
       const entry = upsertEntry(ctx.toolCallId, "bash", args, ctx.invalidate);
-      if (args.command) requestSummary(args.command);
+      // Request only when args are COMPLETE: pi re-renders each row as the
+      // JSON args stream in, and every partial command longer than the
+      // threshold used to fire its own request — truncated, undisplayable,
+      // and queue-blocking. The complete command's request then landed so
+      // late the freshness window had closed: bursts summarized their first
+      // row only. argsComplete is undefined in the test harness → request.
+      if (ctx.argsComplete !== false && args.command)
+        requestSummary(args.command);
       const burst = getBurstForId(ctx.toolCallId);
       const isGrouped = burst && burst.entries.length > 1;
       const isLeader =
