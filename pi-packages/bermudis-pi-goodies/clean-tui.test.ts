@@ -9,6 +9,7 @@ import cleanTui, {
   __setSummaryLogPathForTesting,
   __setSummaryModelRegistryForTesting,
   __setSummarySwapMaxAgeForTesting,
+  __setSummaryUiForTesting,
   setCleanTuiActive,
 } from "./clean-tui";
 import { PiHarness, type Theme } from "pi-harness";
@@ -678,6 +679,7 @@ describe("clean-tui AI summary", () => {
     // console.error vanishes in TUI mode, so failures must also reach the
     // capped log file — one line per distinct cause, plus the load line.
     const logPath = useScratchSummaryLog();
+    const logged = captureConsoleError();
     // Zero backoff so a second command re-requests instead of being blocked;
     // an identical error message then proves the per-cause dedup.
     __setSummaryBackoffForTesting(0, 0);
@@ -701,6 +703,53 @@ describe("clean-tui AI summary", () => {
     expect(failures).toHaveLength(1); // same cause twice → one line
     expect(failures[0]).toContain("HTTP 429 (kilo/x)");
     expect(failures[0]).toContain("Command starts:");
+    // Console stays short (pi's TUI prints stderr inline — a full error body
+    // once plastered a screen-width JSON blob across the transcript); the
+    // file carries the detail.
+    const consoleLine = logged.find((l) => l.includes("[clean-tui]"));
+    expect(consoleLine).toContain("HTTP 429 (kilo/x)");
+    expect(consoleLine).toContain("details in ~/.pi/agent/goodies.log");
+    expect(consoleLine).not.toContain("Command starts:");
+  });
+
+  test("failures show a pause widget; recovery clears it", async () => {
+    // pi's TUI prints extension stderr inline, so console.error plastered a
+    // screen-width error blob across the transcript. With a UI present the
+    // failure surfaces as a widget line above the editor instead, and the
+    // first success clears it. Console stays quiet while the widget lives.
+    const widgets: Array<[string, string[] | undefined]> = [];
+    __setSummaryUiForTesting({
+      hasUI: true,
+      setWidget: (key, content) => widgets.push([key, content]),
+    });
+    cleanupFns.push(() => __setSummaryUiForTesting(undefined));
+    __setSummaryBackoffForTesting(0, 0);
+    cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
+    let fail = true;
+    scriptedBackend(() => {
+      if (fail) throw new Error("summary request failed: HTTP 429 (kilo/x)");
+      return "Recovers the summary stream";
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "widget");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 20));
+    const shown = widgets.at(-1);
+    expect(shown?.[0]).toBe("bermudis-pi-goodies.summaries");
+    expect(shown?.[1]?.[0]).toContain("⏸ summaries");
+    expect(shown?.[1]?.[0]).toContain("HTTP 429");
+    // Recovery: first success clears the widget.
+    fail = false;
+    row.setArgs({ command: heredoc }); // re-render retries (backoff 0)
+    await new Promise((r) => setTimeout(r, 20));
+    expect(widgets.at(-1)?.[1]).toBeUndefined();
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Recovers the summary stream",
+    );
   });
 
   test("replayed history never requests summaries", async () => {

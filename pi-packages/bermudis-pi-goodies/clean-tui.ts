@@ -327,6 +327,46 @@ const pendingSummaries = new Set<string>();
 // backoff. Drained whenever a slot frees (request settle) or a later
 // renderCall finds capacity — no timers. Cleared on session switch.
 const summaryRequestQueue: string[] = [];
+
+// ── Pause indicator (widget) ────────────────────────────────────
+//
+// pi's TUI prints extension stderr inline, so console.error is a lousy
+// failure surface: a 429 body once plastered a screen-width JSON blob across
+// the transcript. Failures instead show as a widget line above the editor
+// while summaries are paused, and clear themselves on recovery. The console
+// line remains only for headless modes (no UI to attach a widget to).
+interface SummaryUi {
+  hasUI: boolean;
+  setWidget(key: string, content: string[] | undefined): void;
+}
+const SUMMARY_WIDGET_KEY = "bermudis-pi-goodies.summaries";
+let summaryUi: SummaryUi | undefined;
+let summaryWidgetShown = false;
+
+export function __setSummaryUiForTesting(ui?: SummaryUi): void {
+  summaryUi = ui;
+}
+
+function showSummaryPauseWidget(short: string, pauseMs?: number): void {
+  if (!summaryUi?.hasUI) return;
+  const pause = pauseMs ? ` paused ${Math.round(pauseMs / 1000)}s` : "";
+  // Trim harder than the console/file lines: the widget sits above the
+  // editor and must not wrap on narrow terminals.
+  const brief = short.length > 80 ? `${short.slice(0, 80)}…` : short;
+  summaryUi.setWidget(SUMMARY_WIDGET_KEY, [`⏸ summaries${pause} — ${brief}`]);
+  summaryWidgetShown = true;
+}
+
+function clearSummaryPauseWidget(): void {
+  if (!summaryWidgetShown) return;
+  summaryWidgetShown = false;
+  try {
+    summaryUi?.setWidget(SUMMARY_WIDGET_KEY, undefined);
+  } catch {
+    // A stale UI handle across a session switch must not break the request
+    // path — the next failure re-shows the widget with a fresh handle.
+  }
+}
 // A burst of distinct long commands can fan out N simultaneous renders; keep
 // concurrent provider requests bounded so we don't hammer the rate limiter.
 const SUMMARY_MAX_INFLIGHT = 2;
@@ -468,7 +508,16 @@ function logSummaryFailure(cmd: string, err: unknown, pauseMs?: number) {
   const detail =
     `command summary failed (${msg})${pause}; keeping heuristic hint. ` +
     `Command starts: ${JSON.stringify(cmd.slice(0, 60))}`;
-  console.error(`[clean-tui] ${detail}`);
+  // TUI: widget above the editor shows the pause state and clears on
+  // recovery. Headless: a short console line (no UI to attach a widget to).
+  const short = msg.length > 120 ? `${msg.slice(0, 120)}…` : msg;
+  if (summaryUi?.hasUI) {
+    showSummaryPauseWidget(short, pauseMs);
+  } else {
+    console.error(
+      `[clean-tui] summary failed (${short})${pause}; details in ~/.pi/agent/goodies.log`,
+    );
+  }
   appendSummaryLog(detail);
 }
 
@@ -597,6 +646,7 @@ function startSummaryRequest(cmd: string): void {
       summaryFailStreak = 0;
       summaryBlockedUntil = 0;
       summaryCache.set(cmd, normalizeSummary(raw));
+      clearSummaryPauseWidget();
       invalidateRowsForCommand(cmd);
     })
     .catch((err) => {
@@ -872,6 +922,12 @@ export default function cleanTui(pi: ExtensionAPI): void {
     invalidateById.clear();
     pendingSummaries.clear();
     summaryRequestQueue.length = 0;
+    // Capture the UI handle for the pause widget (guarded: harness stubs and
+    // limited contexts lack setWidget), and drop any stale pause indicator
+    // left over from the previous session.
+    const ui = (ctx as { ui?: Partial<SummaryUi> } | undefined)?.ui;
+    if (ui && typeof ui.setWidget === "function") summaryUi = ui as SummaryUi;
+    clearSummaryPauseWidget();
     // Capture the registry slice render context lacks, and cut off any
     // summaries still in flight from the previous session.
     const modelRegistry = (
