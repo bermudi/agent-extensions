@@ -8,6 +8,7 @@ import cleanTui, {
   __setSummaryEnabled,
   __setSummaryLogPathForTesting,
   __setSummaryModelRegistryForTesting,
+  __setSummaryRequestTimeoutForTesting,
   __setSummarySwapMaxAgeForTesting,
   __setSummaryUiForTesting,
   setCleanTuiActive,
@@ -698,7 +699,9 @@ describe("clean-tui AI summary", () => {
     row2.setArgs({ command: `${heredoc}\n# variant` });
     await new Promise((r) => setTimeout(r, 50));
     const lines = readFileSync(logPath, "utf-8").trim().split("\n");
-    expect(lines[0]).toContain("clean-tui active; summary-model=test/model");
+    expect(lines[0]).toMatch(
+      /clean-tui active; v\d+\.\d+\.\d+; summary-model=test\/model/,
+    );
     const failures = lines.filter((l) => l.includes("command summary failed"));
     expect(failures).toHaveLength(1); // same cause twice → one line
     expect(failures[0]).toContain("HTTP 429 (kilo/x)");
@@ -750,6 +753,46 @@ describe("clean-tui AI summary", () => {
     expect(textOf(row.lastCallComponent)).toContain(
       "Recovers the summary stream",
     );
+  });
+
+  test("a stalled summary request times out, logs, and frees the slot", async () => {
+    // A hung provider request used to hold its concurrency slot forever and
+    // queue-block everything behind it — with nothing in the log, because
+    // nothing "failed". The timeout turns the stall into a visible failure.
+    const logPath = useScratchSummaryLog();
+    const logged = captureConsoleError();
+    __setSummaryRequestTimeoutForTesting(30);
+    cleanupFns.push(() => __setSummaryRequestTimeoutForTesting(20_000));
+    __setSummaryBackoffForTesting(0, 0); // retry immediately after timeout
+    cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
+    let hang = true;
+    scriptedBackend(() => {
+      if (hang) return new Promise<string>(() => {}); // never settles
+      return "Recovered after the timeout";
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "hang");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 60)); // > 30ms timeout
+    const failures = readFileSync(logPath, "utf-8")
+      .split("\n")
+      .filter((l) => l.includes("command summary failed"));
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("timed out after 30ms");
+    // Slot freed: a re-render retries and the summary lands.
+    hang = false;
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Recovered after the timeout",
+    );
+    // The hung promise never settled, so nothing else may have leaked —
+    // in particular no unhandled rejection from the raced loser.
+    expect(logged.filter((l) => l.includes("timed out"))).toHaveLength(1);
   });
 
   test("replayed history never requests summaries", async () => {

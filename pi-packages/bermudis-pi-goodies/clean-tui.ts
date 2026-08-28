@@ -370,6 +370,16 @@ function clearSummaryPauseWidget(): void {
 // A burst of distinct long commands can fan out N simultaneous renders; keep
 // concurrent provider requests bounded so we don't hammer the rate limiter.
 const SUMMARY_MAX_INFLIGHT = 2;
+// A summary is a ~30-token call: if it hasn't landed in 20s, the provider is
+// stalled. Without this, a hung request holds its concurrency slot forever,
+// the queue behind it never drains, and nothing logs — because nothing
+// "failed", it just never came back. pi-ai's timeoutMs is best-effort
+// ("providers/SDKs that support it"), so race the promise ourselves.
+const SUMMARY_REQUEST_TIMEOUT_MS = 20_000;
+let summaryRequestTimeoutMs = SUMMARY_REQUEST_TIMEOUT_MS;
+export function __setSummaryRequestTimeoutForTesting(ms: number): void {
+  summaryRequestTimeoutMs = ms;
+}
 let summaryEnabled = true;
 
 export function __setSummaryEnabled(v: boolean): void {
@@ -634,8 +644,34 @@ function requestSummary(cmd: string): void {
 function startSummaryRequest(cmd: string): void {
   pendingSummaries.add(cmd);
   const signal = summarySessionAbort.signal;
-  activeBackend()
-    .summarize(cmd, signal)
+  // Per-request controller so a timeout actually cancels the HTTP request
+  // instead of only stopping the wait; chained to the session signal.
+  const controller = new AbortController();
+  const onSessionAbort = () => controller.abort();
+  if (signal.aborted) controller.abort();
+  else signal.addEventListener("abort", onSessionAbort, { once: true });
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutTimer = setTimeout(() => {
+      controller.abort();
+      reject(
+        new Error(
+          `summary request timed out after ${
+            summaryRequestTimeoutMs < 1000
+              ? `${summaryRequestTimeoutMs}ms`
+              : `${Math.round(summaryRequestTimeoutMs / 1000)}s`
+          }`,
+        ),
+      );
+    }, summaryRequestTimeoutMs);
+  });
+  timeoutTimer?.unref?.();
+  const summarizePromise = activeBackend().summarize(cmd, controller.signal);
+  // The race below decides the outcome; the underlying promise may settle
+  // later (timeout won) — swallow its late rejection so it never becomes
+  // unhandled. Late landings are dropped; the queue retries after backoff.
+  summarizePromise.catch(() => {});
+  Promise.race([summarizePromise, timeout])
     .then((raw) => {
       // Abort check MUST precede any shared-state mutation: a stale promise
       // settling after a session switch would otherwise delete the marker of
@@ -659,6 +695,8 @@ function startSummaryRequest(cmd: string): void {
       logSummaryFailure(cmd, err, pauseMs);
     })
     .finally(() => {
+      clearTimeout(timeoutTimer);
+      signal.removeEventListener("abort", onSessionAbort);
       if (!signal.aborted) drainSummaryQueue();
     });
 }
@@ -863,12 +901,27 @@ function formatLsBullet(entry: Entry, theme: any): string {
   return `  ${theme.fg("muted", "•")} ${theme.fg("accent", path)}`;
 }
 
+/** Extension version from the package manifest, for the load line. */
+function loadExtensionVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(new URL("./package.json", import.meta.url), "utf-8"),
+    ) as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export default function cleanTui(pi: ExtensionAPI): void {
   setCleanTuiActive(true);
   // One line per load (pi process start, /reload) so the log answers "was the
-  // feature even on, and pointing at which model" without guessing.
+  // feature even on, pointing at which model, and running which version"
+  // without guessing — stale processes have burned us repeatedly.
   appendSummaryLog(
-    `clean-tui active; summary-model=${getSummaryModel() ?? "off"}`,
+    `clean-tui active; v${loadExtensionVersion()}; summary-model=${
+      getSummaryModel() ?? "off"
+    }`,
   );
   const schemaTools = getBuiltInTools(process.cwd());
 
