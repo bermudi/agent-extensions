@@ -755,6 +755,48 @@ describe("clean-tui AI summary", () => {
     );
   });
 
+  test("session_start wires the widget from a realistic context", async () => {
+    // Regression: the capture used to store ctx.ui itself, whose type has no
+    // hasUI flag — summaryUi.hasUI was always undefined, so every TUI failure
+    // took the console.error branch and flashed raw stderr across the
+    // terminal. The widget test above injects a fake UI directly and could
+    // never catch it; this one goes through the real session_start path with
+    // a context shaped like production's (hasUI on the context, setWidget on
+    // ctx.ui).
+    useScratchSummaryLog();
+    const logged = captureConsoleError();
+    __setSummaryBackoffForTesting(0, 0);
+    cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
+    scriptedBackend(() => {
+      throw new Error("summary request failed: HTTP 429 (kilo/x)");
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    const widgets: Array<[string, string[] | undefined]> = [];
+    (h.ctx.ui as { setWidget?: unknown }).setWidget = (
+      key: string,
+      content: string[] | undefined,
+    ) => {
+      widgets.push([key, content]);
+    };
+    cleanTui(h.api);
+    // summaryUi is module-level and persists across tests — drop it, or later
+    // tests inherit hasUI: true and their console-branch assertions break.
+    cleanupFns.push(() => __setSummaryUiForTesting(undefined));
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "capture");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 20));
+    const shown = widgets.at(-1);
+    expect(shown?.[0]).toBe("bermudis-pi-goodies.summaries");
+    expect(shown?.[1]?.[0]).toContain("⏸ summaries");
+    // No raw stderr flash: the console branch stays quiet when a UI exists.
+    expect(logged.some((l) => l.includes("[clean-tui] summary failed"))).toBe(
+      false,
+    );
+  });
+
   test("a stalled summary request times out, logs, and frees the slot", async () => {
     // A hung provider request used to hold its concurrency slot forever and
     // queue-block everything behind it — with nothing in the log, because

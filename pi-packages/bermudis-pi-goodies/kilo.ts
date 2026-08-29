@@ -27,6 +27,7 @@ import type {
   ExtensionAPI,
   ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
+import { reportFailure } from "./goodies-log.ts";
 
 // =============================================================================
 // Constants
@@ -668,9 +669,10 @@ export default function kilo(pi: ExtensionAPI): void {
             lastFullCatalogCheckedAt = stored?.checkedAt ?? 0;
           }
         } catch (error) {
-          console.warn(
-            "[kilo] Failed to restore cached models:",
-            error instanceof Error ? error.message : error,
+          reportFailure(
+            `[kilo] Failed to restore cached models: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
           );
         }
       }
@@ -700,9 +702,10 @@ export default function kilo(pi: ExtensionAPI): void {
             return lastFullCatalog ?? KILO_FREE_MODELS;
           }
         } catch (error) {
-          console.warn(
-            "[kilo] Failed to persist refreshed models:",
-            error instanceof Error ? error.message : error,
+          reportFailure(
+            `[kilo] Failed to persist refreshed models: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
           );
         }
         lastFullCatalog = models;
@@ -713,9 +716,10 @@ export default function kilo(pi: ExtensionAPI): void {
         // Each generation owns its request so a successor never inherits an
         // aborted promise from the generation it superseded.
         if (!context.signal?.aborted) {
-          console.warn(
-            "[kilo] refreshModels fetch failed:",
-            error instanceof Error ? error.message : error,
+          reportFailure(
+            `[kilo] refreshModels fetch failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
           );
         }
         return lastFullCatalog ?? KILO_FREE_MODELS;

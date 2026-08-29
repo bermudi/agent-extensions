@@ -35,9 +35,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import {
+  appendGoodiesLog,
+  setGoodiesLogPathForTesting,
+} from "./goodies-log.ts";
 import {
   findSummaryModel,
   getSummaryModel,
@@ -528,44 +531,20 @@ function logSummaryFailure(cmd: string, err: unknown, pauseMs?: number) {
       `[clean-tui] summary failed (${short})${pause}; details in ~/.pi/agent/goodies.log`,
     );
   }
-  appendSummaryLog(detail);
+  appendGoodiesLog(detail);
 }
 
 // ── Summary log file ────────────────────────────────────────────
 //
 // console.error is invisible in TUI mode (pi owns the terminal), so summary
 // failures also append to a small capped log file next to goodies.json and
-// pi-debug.log. Failures only — successes are noise. Every fs call is
-// guarded: an unwritable log destination must never break rendering or
-// swallow the original error (console.error above already carried it).
-const SUMMARY_LOG_DEFAULT_PATH = join(homedir(), ".pi", "agent", "goodies.log");
-let summaryLogPath = SUMMARY_LOG_DEFAULT_PATH;
-const SUMMARY_LOG_MAX_BYTES = 256 * 1024;
-const SUMMARY_LOG_KEEP_BYTES = 64 * 1024;
+// pi-debug.log. Failures only — successes are noise. The implementation lives
+// in goodies-log.ts and is shared: kilo provider warnings and config-save
+// failures land in the same file, each line prefixed by its source.
 
 /** Redirect the failure log (tests point this at scratch storage). */
 export function __setSummaryLogPathForTesting(path?: string): void {
-  summaryLogPath = path ?? SUMMARY_LOG_DEFAULT_PATH;
-}
-
-function appendSummaryLog(line: string): void {
-  const stamped = `${new Date().toISOString()} [${process.pid}] ${line}`;
-  try {
-    if (statSync(summaryLogPath).size > SUMMARY_LOG_MAX_BYTES) {
-      // Size cap without timers or rotation daemons: keep the newest tail.
-      writeFileSync(
-        summaryLogPath,
-        readFileSync(summaryLogPath).subarray(-SUMMARY_LOG_KEEP_BYTES),
-      );
-    }
-  } catch {
-    // Missing/unreadable file — the append below (re)creates it.
-  }
-  try {
-    appendFileSync(summaryLogPath, `${stamped}\n`);
-  } catch {
-    // Unwritable destination — nothing else to do; console.error carried it.
-  }
+  setGoodiesLogPathForTesting(path);
 }
 
 // Failure backoff: requestSummary runs on every bash renderCall, so after a
@@ -918,7 +897,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
   // One line per load (pi process start, /reload) so the log answers "was the
   // feature even on, pointing at which model, and running which version"
   // without guessing — stale processes have burned us repeatedly.
-  appendSummaryLog(
+  appendGoodiesLog(
     `clean-tui active; v${loadExtensionVersion()}; summary-model=${
       getSummaryModel() ?? "off"
     }`,
@@ -977,9 +956,18 @@ export default function cleanTui(pi: ExtensionAPI): void {
     summaryRequestQueue.length = 0;
     // Capture the UI handle for the pause widget (guarded: harness stubs and
     // limited contexts lack setWidget), and drop any stale pause indicator
-    // left over from the previous session.
+    // left over from the previous session. hasUI comes from the context —
+    // ctx.ui carries no such flag, so storing ctx.ui directly left hasUI
+    // undefined and every TUI failure took the console.error branch, flashing
+    // raw stderr across the terminal; the widget never showed.
     const ui = (ctx as { ui?: Partial<SummaryUi> } | undefined)?.ui;
-    if (ui && typeof ui.setWidget === "function") summaryUi = ui as SummaryUi;
+    const setWidget = ui?.setWidget;
+    if (typeof setWidget === "function") {
+      summaryUi = {
+        hasUI: ctx.hasUI,
+        setWidget: (key, content) => setWidget(key, content),
+      };
+    }
     clearSummaryPauseWidget();
     // Capture the registry slice render context lacks, and cut off any
     // summaries still in flight from the previous session.

@@ -70,7 +70,10 @@ export default function keepModelOnNew(
     const model = ctx.modelRegistry.find(previous.provider, previous.id);
     if (!model) {
       const message = `Could not keep model after /new: ${previous.provider}/${previous.id} is unavailable`;
-      console.warn(`[keep-model-on-new] ${message}`);
+      // With a UI, notify() renders a persistent warning; console output
+      // would only flash raw on the terminal and be wiped by the next
+      // repaint. Console is the headless surface.
+      if (!ctx.hasUI) console.warn(`[keep-model-on-new] ${message}`);
       ctx.ui.notify(message, "warning");
       return;
     }
@@ -79,14 +82,15 @@ export default function keepModelOnNew(
       const restored = await pi.setModel(model);
       if (!restored) {
         const message = `Could not keep model after /new: ${previous.provider}/${previous.id} is not authenticated`;
-        console.warn(`[keep-model-on-new] ${message}`);
+        if (!ctx.hasUI) console.warn(`[keep-model-on-new] ${message}`);
         ctx.ui.notify(message, "warning");
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      console.warn(
-        `[keep-model-on-new] Failed to restore ${previous.provider}/${previous.id}: ${detail}`,
-      );
+      if (!ctx.hasUI)
+        console.warn(
+          `[keep-model-on-new] Failed to restore ${previous.provider}/${previous.id}: ${detail}`,
+        );
       ctx.ui.notify(`Could not keep model after /new: ${detail}`, "warning");
     }
   });

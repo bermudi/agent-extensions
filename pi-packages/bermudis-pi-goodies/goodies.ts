@@ -14,6 +14,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { reportFailure } from "./goodies-log.ts";
 
 let CONFIG_PATH = join(homedir(), ".pi", "agent", "goodies.json");
 
@@ -72,7 +73,11 @@ function saveConfig(config: Config): void {
     mkdirSync(join(homedir(), ".pi", "agent"), { recursive: true });
     writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
   } catch (err) {
-    console.error("goodies: failed to save config", err);
+    reportFailure(
+      `goodies: failed to save config: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 }
 
