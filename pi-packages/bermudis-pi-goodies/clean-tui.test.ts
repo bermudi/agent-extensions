@@ -971,7 +971,7 @@ describe("clean-tui AI summary", () => {
     expect(wire!.url).toBe("https://mock.local/v1/chat/completions");
     expect(wire!.auth).toBe("Bearer test-key");
     expect(wire!.body.model).toBe("grok-4-fast-non-reasoning"); // resolved id
-    expect(wire!.body.max_completion_tokens).toBe(30);
+    expect(wire!.body.max_completion_tokens).toBe(512);
     // No reasoning parameter at all: pi's own agent maps "off" to undefined,
     // and several pi-ai APIs enable thinking on any truthy value.
     for (const key of Object.keys(wire!.body))
@@ -987,6 +987,84 @@ describe("clean-tui AI summary", () => {
     row.setArgs({ command: heredoc });
     await new Promise((r) => setTimeout(r, 10));
     expect(wireCount).toBe(1);
+  });
+
+  test("reasoning-only models get their lowest effort, not the API default", async () => {
+    // Groq's gpt-oss maps off and minimal to null: thinking cannot be
+    // disabled, and with no reasoning parameter the endpoint runs its
+    // API-default (medium) effort — which burns the shared completion budget
+    // and returns an empty answer. The summary request must pin the lowest
+    // supported effort ("low" here, via clampThinkingLevel) and raise the
+    // cap so reasoning + answer both fit.
+    const origFetch = globalThis.fetch;
+    let wire: { body: any } | undefined;
+    globalThis.fetch = (async (_url: any, init: any) => {
+      wire = { body: JSON.parse(init.body) };
+      const sse = [
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant" } }] })}`,
+        `data: ${JSON.stringify({
+          choices: [{ index: 0, delta: { content: "Appends reboot log" } }],
+        })}`,
+        `data: ${JSON.stringify({
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        })}`,
+        "data: [DONE]",
+      ].join("\n\n");
+      return new Response(sse + "\n\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+    cleanupFns.push(() => {
+      globalThis.fetch = origFetch;
+    });
+    const reasoningModel: Model<"openai-completions"> = {
+      id: "openai/gpt-oss-20b",
+      name: "GPT OSS 20B",
+      api: "openai-completions",
+      provider: "groq",
+      baseUrl: "https://mock.local/v1",
+      reasoning: true,
+      thinkingLevelMap: {
+        off: null,
+        minimal: null,
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 8000,
+      maxTokens: 100,
+      compat: { supportsReasoningEffort: true },
+    };
+    __setSummaryModelRegistryForTesting({
+      find: (provider, id) =>
+        provider === "groq" && id === "openai/gpt-oss-20b"
+          ? reasoningModel
+          : undefined,
+      getAvailable: () => [reasoningModel],
+      async getApiKeyAndHeaders(model) {
+        return { ok: true, apiKey: "test-key" };
+      },
+    });
+    useScratchConfig();
+    setSummaryModel("groq/openai/gpt-oss-20b");
+    __clearSummaryCache();
+    __setSummaryEnabled(true);
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "wire-reasoning");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(textOf(row.lastCallComponent)).toContain("Appends reboot log");
+    expect(wire).toBeDefined();
+    expect(wire!.body.reasoning_effort).toBe("low");
+    expect(wire!.body.max_completion_tokens).toBe(512);
   });
 
   test("429 engages a backoff instead of retrying on every render", async () => {

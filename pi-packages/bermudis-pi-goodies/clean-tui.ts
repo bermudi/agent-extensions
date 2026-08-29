@@ -37,6 +37,7 @@ import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import {
   appendGoodiesLog,
   setGoodiesLogPathForTesting,
@@ -305,17 +306,13 @@ interface SummaryBackend {
 // summary no matter how many lines. Above that, any command qualifies —
 // single-line pipelines benefit at least as much as heredocs.
 const SUMMARY_THRESHOLD_CHARS = 80;
-// Five-to-eight words fit in 30 completion tokens. We deliberately do NOT
-// send a reasoning parameter: pi's own agent maps a session thinking level of
-// "off" to `reasoning: undefined` (agent-core agent.js), and pi-ai adapters
-// treat an absent option as their explicit no-thinking branch. Passing the
-// string "off" instead would be actively harmful on several APIs whose
-// branches key on truthiness (Anthropic/Google/Bedrock would enable thinking,
-// and budget math over DEFAULT_THINKING_BUDGETS["off"] === undefined yields
-// NaN max_tokens), even though clampThinkingLevel tolerates it at runtime.
-// Trade-off: OpenAI-family reasoning models keep their API-default effort
-// when no parameter is sent — prefer non-thinking models per the README.
-const SUMMARY_MAX_TOKENS = 30;
+// Five-to-eight words fit in a handful of tokens, but on OpenAI-compatible
+// endpoints reasoning and the answer SHARE max_tokens (pi-ai: "a reasoning-
+// heavy turn can consume the whole response and emit no answer") — at the
+// old 30-token cap, gpt-oss running its API-default effort returned an empty
+// summary every time. 512 gives reasoning headroom; non-reasoning models
+// stop at the answer's natural end, so the raised cap costs them nothing.
+const SUMMARY_MAX_TOKENS = 512;
 const SUMMARY_PROMPT =
   "Summarize this shell command in 5-8 words, plain English, no quotes, no formatting. " +
   'Examples: "cat >> file << \'EOF\' with 20 lines of log" -> "Appends reboot log to migration file". ' +
@@ -476,7 +473,7 @@ async function summarizeViaProvider(
       headers,
       maxTokens: SUMMARY_MAX_TOKENS,
       signal,
-      // No `reasoning`: see the note above the summary constants.
+      reasoning: summaryReasoning(found),
     },
   );
   // pi-ai encodes request failures in the returned message rather than
@@ -503,6 +500,24 @@ async function summarizeViaProvider(
 
 function activeBackend(): SummaryBackend {
   return summaryBackendOverride ?? { summarize: summarizeViaProvider };
+}
+
+// Lowest-effort reasoning, but only where silence is broken: on OpenAI-
+// compatible endpoints a reasoning model with no mapped "off" (Groq's
+// gpt-oss maps off and minimal to null) runs its API-default effort when no
+// reasoning parameter is sent — medium for gpt-oss — which burns the shared
+// completion budget and returns an empty answer. "minimal" clamps to the
+// model's lowest supported level ("low" for gpt-oss). Everything else keeps
+// the absent option: non-reasoning models clamp to "off" (no parameter),
+// models whose catalog maps "off" to a concrete value already disable
+// thinking when nothing is sent, and non-OpenAI adapters enable thinking on
+// truthy values (see the retired no-reasoning note in git history).
+function summaryReasoning(model: Model<Api>): ThinkingLevel | undefined {
+  if (model.api !== "openai-completions" && model.api !== "openai-responses")
+    return undefined;
+  if (!model.reasoning) return undefined;
+  if (typeof model.thinkingLevelMap?.off === "string") return undefined;
+  return "minimal";
 }
 
 // Summaries are best-effort polish over the heuristic hint, but failures must
