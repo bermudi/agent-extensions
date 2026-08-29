@@ -55,15 +55,19 @@ again.
 
 While summaries are paused by a failure, a `⏸ summaries paused Ns — …`
 widget line above the editor shows the cause and clears itself on the first
-success. Each distinct failure is also appended to `~/.pi/agent/goodies.log`
-(capped at 256 KB, oldest lines dropped), along with one `clean-tui active;
-summary-model=…` line per load. If summaries silently stop, look there first.
+success. The log at `~/.pi/agent/goodies.log` (capped at 256 KB, oldest
+lines dropped) records one structured JSONL event per summary request —
+success or failure, with duration and the command prefix — plus `load`,
+`kilo_warning`, and `config_error` events. If summaries silently stop, look
+there first; e.g. `jq -r 'select(.type == "summary_request") | .outcome'
+~/.pi/agent/goodies.log | sort | uniq -c` gives request counts by outcome.
 
 Two practical notes:
 
-- **Pick a fast non-thinking model.** Summaries get a tiny response budget;
-  models that insist on thinking first spend that budget invisibly and fail,
-  which pauses summaries via backoff. A quick chat-class model works best.
+- **Thinking models are handled, non-thinking ones are cheaper.** Requests
+  pin the model's lowest reasoning effort and carry a 512-token budget that
+  covers thinking plus the answer, so reasoning models work; a quick
+  chat-class model still costs the least.
 - **Privacy:** qualifying commands (longer than 80 characters) are sent —
   first ~2000 characters — to whichever provider hosts the model you chose.
   That is the same trust decision as running an agent session against that

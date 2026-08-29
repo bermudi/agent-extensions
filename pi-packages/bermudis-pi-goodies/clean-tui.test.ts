@@ -676,13 +676,14 @@ describe("clean-tui AI summary", () => {
     expect(textOf(row.lastCallComponent)).toContain("(+3 lines)");
   });
 
-  test("summary failures land in the log file, deduped per cause", async () => {
-    // console.error vanishes in TUI mode, so failures must also reach the
-    // capped log file — one line per distinct cause, plus the load line.
+  test("every summary request lands in the log as structured JSONL", async () => {
+    // console.error vanishes in TUI mode, so the log is the durable record —
+    // one summary_request event per attempt (success or failure), queryable
+    // with jq. Two distinct commands → two failed requests; the load line is
+    // structured too.
     const logPath = useScratchSummaryLog();
     const logged = captureConsoleError();
-    // Zero backoff so a second command re-requests instead of being blocked;
-    // an identical error message then proves the per-cause dedup.
+    // Zero backoff so a second command re-requests instead of being blocked.
     __setSummaryBackoffForTesting(0, 0);
     cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
     scriptedBackend(() => {
@@ -690,7 +691,7 @@ describe("clean-tui AI summary", () => {
     });
     enableSummariesForTest();
     const h = new PiHarness();
-    cleanTui(h.api); // writes the load line
+    cleanTui(h.api); // writes the load event
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
     const row = h.row("bash", "log-a");
@@ -698,21 +699,29 @@ describe("clean-tui AI summary", () => {
     const row2 = h.row("bash", "log-b");
     row2.setArgs({ command: `${heredoc}\n# variant` });
     await new Promise((r) => setTimeout(r, 50));
-    const lines = readFileSync(logPath, "utf-8").trim().split("\n");
-    expect(lines[0]).toMatch(
-      /clean-tui active; v\d+\.\d+\.\d+; summary-model=test\/model/,
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const load = events[0];
+    expect(load.type).toBe("load");
+    expect(load.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(load.summaryModel).toBe("test/model");
+    const failures = events.filter(
+      (e) => e.type === "summary_request" && e.outcome === "failed",
     );
-    const failures = lines.filter((l) => l.includes("command summary failed"));
-    expect(failures).toHaveLength(1); // same cause twice → one line
-    expect(failures[0]).toContain("HTTP 429 (kilo/x)");
-    expect(failures[0]).toContain("Command starts:");
+    expect(failures).toHaveLength(2); // one per distinct command
+    for (const f of failures) {
+      expect(f.error).toContain("HTTP 429 (kilo/x)");
+      expect(typeof f.ts).toBe("string");
+    }
+    expect(failures[0].cmd).not.toBe(failures[1].cmd);
     // Console stays short (pi's TUI prints stderr inline — a full error body
     // once plastered a screen-width JSON blob across the transcript); the
     // file carries the detail.
     const consoleLine = logged.find((l) => l.includes("[clean-tui]"));
     expect(consoleLine).toContain("HTTP 429 (kilo/x)");
     expect(consoleLine).toContain("details in ~/.pi/agent/goodies.log");
-    expect(consoleLine).not.toContain("Command starts:");
   });
 
   test("failures show a pause widget; recovery clears it", async () => {
@@ -820,11 +829,15 @@ describe("clean-tui AI summary", () => {
     const row = h.row("bash", "hang");
     row.setArgs({ command: heredoc });
     await new Promise((r) => setTimeout(r, 60)); // > 30ms timeout
-    const failures = readFileSync(logPath, "utf-8")
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
       .split("\n")
-      .filter((l) => l.includes("command summary failed"));
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const failures = events.filter(
+      (e) => e.type === "summary_request" && e.outcome === "failed",
+    );
     expect(failures).toHaveLength(1);
-    expect(failures[0]).toContain("timed out after 30ms");
+    expect(failures[0].error).toContain("timed out after 30ms");
     // Slot freed: a re-render retries and the summary lands.
     hang = false;
     row.setArgs({ command: heredoc });
@@ -896,6 +909,7 @@ describe("clean-tui AI summary", () => {
     // The single wire-level test: legacy bare-id config resolves through a
     // model registry, auth comes from getApiKeyAndHeaders, and the actual LLM
     // call goes through pi-ai's completeSimple against a mocked transport.
+    const logPath = useScratchSummaryLog();
     const origFetch = globalThis.fetch;
     let wireCount = 0;
     let wire: { url: string; auth: string | null; body: any } | undefined;
@@ -987,6 +1001,17 @@ describe("clean-tui AI summary", () => {
     row.setArgs({ command: heredoc });
     await new Promise((r) => setTimeout(r, 10));
     expect(wireCount).toBe(1);
+    // Request accounting: exactly one structured event for the one wire call,
+    // with outcome and duration — re-renders add no lines.
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.type === "summary_request");
+    expect(events).toHaveLength(1);
+    expect(events[0].outcome).toBe("ok");
+    expect(typeof events[0].ms).toBe("number");
+    expect(events[0].cmd).toContain("MIGRATION-LOG");
   });
 
   test("reasoning-only models get their lowest effort, not the API default", async () => {

@@ -74,6 +74,7 @@ function saveConfig(config: Config): void {
     writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
   } catch (err) {
     reportFailure(
+      "config_error",
       `goodies: failed to save config: ${
         err instanceof Error ? err.message : String(err)
       }`,

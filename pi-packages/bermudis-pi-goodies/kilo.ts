@@ -670,6 +670,7 @@ export default function kilo(pi: ExtensionAPI): void {
           }
         } catch (error) {
           reportFailure(
+            "kilo_warning",
             `[kilo] Failed to restore cached models: ${
               error instanceof Error ? error.message : String(error)
             }`,
@@ -703,6 +704,7 @@ export default function kilo(pi: ExtensionAPI): void {
           }
         } catch (error) {
           reportFailure(
+            "kilo_warning",
             `[kilo] Failed to persist refreshed models: ${
               error instanceof Error ? error.message : String(error)
             }`,
@@ -717,6 +719,7 @@ export default function kilo(pi: ExtensionAPI): void {
         // aborted promise from the generation it superseded.
         if (!context.signal?.aborted) {
           reportFailure(
+            "kilo_warning",
             `[kilo] refreshModels fetch failed: ${
               error instanceof Error ? error.message : String(error)
             }`,

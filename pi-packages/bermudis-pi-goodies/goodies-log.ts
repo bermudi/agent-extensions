@@ -1,12 +1,13 @@
-// Shared capped failure log for the goodies package (~/.pi/agent/goodies.log).
+// Shared structured log for the goodies package (~/.pi/agent/goodies.log).
 //
 // Why not console: pi's TUI owns the terminal and, in interactive mode,
 // intercepts neither stdout nor stderr — anything an extension prints lands
 // raw on the current frame and is wiped by the next repaint. That reads as
 // an error message flashing too fast to read or screenshot, and it leaves no
-// trace in any log. So anything that must outlive the moment is appended
-// here; console output is reserved for headless modes, where there is no TUI
-// to corrupt.
+// trace anywhere. So everything durable goes here instead: JSONL, one event
+// per line, filterable with jq (`select(.type == "summary_request")`), and
+// console output is reserved for headless modes, where there is no TUI to
+// corrupt.
 
 import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -29,9 +30,20 @@ export function setGoodiesLogPathForTesting(path?: string): void {
   logPath = path ?? GOODIES_LOG_DEFAULT_PATH;
 }
 
-/** Timestamped append; never throws — a broken log must not break callers. */
-export function appendGoodiesLog(line: string): void {
-  const stamped = `${new Date().toISOString()} [${process.pid}] ${line}`;
+/** Append one event as a timestamped JSONL line; never throws. */
+export function logGoodiesEvent(event: Record<string, unknown>): void {
+  const stamped = { ts: new Date().toISOString(), pid: process.pid, ...event };
+  let line: string;
+  try {
+    line = JSON.stringify(stamped);
+  } catch {
+    // Non-serializable payload — degrade to a marker instead of throwing.
+    line = JSON.stringify({
+      ts: stamped.ts,
+      pid: process.pid,
+      type: "unserializable",
+    });
+  }
   try {
     if (statSync(logPath).size > MAX_BYTES) {
       // Size cap without timers or rotation daemons: keep the newest tail.
@@ -41,7 +53,7 @@ export function appendGoodiesLog(line: string): void {
     // Missing/unreadable file — the append below (re)creates it.
   }
   try {
-    appendFileSync(logPath, `${stamped}\n`);
+    appendFileSync(logPath, `${line}\n`);
   } catch {
     // Unwritable destination — nothing else to do.
   }
@@ -52,9 +64,9 @@ export function appendGoodiesLog(line: string): void {
  * stderr only when headless (stdout is not a TTY). In TUI mode console
  * output is the unreadable flash described above; the file is the record.
  */
-export function reportFailure(line: string): void {
-  appendGoodiesLog(line);
+export function reportFailure(type: string, message: string): void {
+  logGoodiesEvent({ type, message });
   if (!process.stdout.isTTY) {
-    console.error(line);
+    console.error(message);
   }
 }

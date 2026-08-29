@@ -38,10 +38,7 @@ import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
-import {
-  appendGoodiesLog,
-  setGoodiesLogPathForTesting,
-} from "./goodies-log.ts";
+import { logGoodiesEvent, setGoodiesLogPathForTesting } from "./goodies-log.ts";
 import {
   findSummaryModel,
   getSummaryModel,
@@ -389,7 +386,6 @@ export function __clearSummaryCache(): void {
   summaryCache.clear();
   pendingSummaries.clear();
   summaryRequestQueue.length = 0;
-  summaryFailuresLogged.clear();
   summaryFailStreak = 0;
   summaryBlockedUntil = 0;
 }
@@ -521,21 +517,28 @@ function summaryReasoning(model: Model<Api>): ThinkingLevel | undefined {
 }
 
 // Summaries are best-effort polish over the heuristic hint, but failures must
-// not be silent: log once per distinct cause so a broken provider/key/model
-// choice is debuggable instead of a black box. The backend messages embed the
-// model label so three plausible providers don't mean guessing which failed.
-const summaryFailuresLogged = new Set<string>();
-function logSummaryFailure(cmd: string, err: unknown, pauseMs?: number) {
+// not be silent: every request lands in the structured log with its outcome,
+// so request volume and a broken provider/key/model choice are queryable
+// instead of a black box. The backend messages embed the model label so three
+// plausible providers don't mean guessing which failed.
+function logSummaryFailure(
+  cmd: string,
+  err: unknown,
+  pauseMs?: number,
+  ms?: number,
+) {
   const msg = err instanceof Error ? err.message : String(err);
   const pause = pauseMs
     ? `; pausing summaries ${Math.round(pauseMs / 1000)}s`
     : "";
-  const key = `${msg}${pause}`;
-  if (summaryFailuresLogged.has(key)) return;
-  summaryFailuresLogged.add(key);
-  const detail =
-    `command summary failed (${msg})${pause}; keeping heuristic hint. ` +
-    `Command starts: ${JSON.stringify(cmd.slice(0, 60))}`;
+  logGoodiesEvent({
+    type: "summary_request",
+    outcome: "failed",
+    ...(ms === undefined ? {} : { ms }),
+    error: msg.slice(0, 300),
+    ...(pauseMs ? { pauseMs } : {}),
+    cmd: cmd.slice(0, 200),
+  });
   // TUI: widget above the editor shows the pause state and clears on
   // recovery. Headless: a short console line (no UI to attach a widget to).
   const short = msg.length > 120 ? `${msg.slice(0, 120)}…` : msg;
@@ -546,16 +549,14 @@ function logSummaryFailure(cmd: string, err: unknown, pauseMs?: number) {
       `[clean-tui] summary failed (${short})${pause}; details in ~/.pi/agent/goodies.log`,
     );
   }
-  appendGoodiesLog(detail);
 }
 
-// ── Summary log file ────────────────────────────────────────────
+// ── Summary log events ──────────────────────────────────────
 //
-// console.error is invisible in TUI mode (pi owns the terminal), so summary
-// failures also append to a small capped log file next to goodies.json and
-// pi-debug.log. Failures only — successes are noise. The implementation lives
-// in goodies-log.ts and is shared: kilo provider warnings and config-save
-// failures land in the same file, each line prefixed by its source.
+// console.error is invisible in TUI mode (pi owns the terminal), so everything
+// durable goes to the shared JSONL log (goodies-log.ts): one summary_request
+// event per attempt — success or failure — so request volume per bash call is
+// queryable, plus load/kilo/config events from the rest of the package.
 
 /** Redirect the failure log (tests point this at scratch storage). */
 export function __setSummaryLogPathForTesting(path?: string): void {
@@ -637,6 +638,7 @@ function requestSummary(cmd: string): void {
 
 function startSummaryRequest(cmd: string): void {
   pendingSummaries.add(cmd);
+  const requestStartedAt = Date.now();
   const signal = summarySessionAbort.signal;
   // Per-request controller so a timeout actually cancels the HTTP request
   // instead of only stopping the wait; chained to the session signal.
@@ -676,6 +678,12 @@ function startSummaryRequest(cmd: string): void {
       summaryFailStreak = 0;
       summaryBlockedUntil = 0;
       summaryCache.set(cmd, normalizeSummary(raw));
+      logGoodiesEvent({
+        type: "summary_request",
+        outcome: "ok",
+        ms: Date.now() - requestStartedAt,
+        cmd: cmd.slice(0, 200),
+      });
       clearSummaryPauseWidget();
       invalidateRowsForCommand(cmd);
     })
@@ -686,7 +694,7 @@ function startSummaryRequest(cmd: string): void {
       // not a provider failure — neither penalize nor log it.
       if (signal.aborted || (err as Error)?.name === "AbortError") return;
       const pauseMs = noteSummaryFailure(err);
-      logSummaryFailure(cmd, err, pauseMs);
+      logSummaryFailure(cmd, err, pauseMs, Date.now() - requestStartedAt);
     })
     .finally(() => {
       clearTimeout(timeoutTimer);
@@ -912,11 +920,11 @@ export default function cleanTui(pi: ExtensionAPI): void {
   // One line per load (pi process start, /reload) so the log answers "was the
   // feature even on, pointing at which model, and running which version"
   // without guessing — stale processes have burned us repeatedly.
-  appendGoodiesLog(
-    `clean-tui active; v${loadExtensionVersion()}; summary-model=${
-      getSummaryModel() ?? "off"
-    }`,
-  );
+  logGoodiesEvent({
+    type: "load",
+    version: loadExtensionVersion(),
+    summaryModel: getSummaryModel() ?? "off",
+  });
   const schemaTools = getBuiltInTools(process.cwd());
 
   pi.on("agent_start", (_event, ctx) => {
