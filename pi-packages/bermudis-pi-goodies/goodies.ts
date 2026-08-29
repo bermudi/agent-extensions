@@ -160,22 +160,34 @@ export function suggestSummaryModels(
   limit = 5,
 ): string[] {
   const q = value.toLowerCase();
+  if (!q) return [];
   const terms = q.split(/[\s/]+/).filter(Boolean);
   // Kebab-cased model ids miss whole-term matching when users mistype one
   // segment ("grok-4-x-typo"), so longer dash-separated fragments also count.
   const fragments = q.split(/[\s/-]+/).filter((f) => f.length >= 4);
-  if (terms.length === 0) return [];
+  // Rank, don't just filter: the first version took the first `limit`
+  // registry matches, so the obvious answer ("1min/grok-4-fast-non-reasoning"
+  // for a mistyped "1min/grok-4-fast-nonthinking") could be cut by unrelated
+  // models that merely sat earlier in the registry. Longest-common-prefix
+  // dominates — the mistyped tail of the right provider/family is the
+  // strongest signal — with substring hits as the fallback for queries that
+  // omit or garble the provider entirely.
   return registry
     .getAvailable()
-    .filter((m) => {
+    .map((m) => {
       const hay = `${m.provider}/${m.id}`.toLowerCase();
-      return (
-        terms.some((t) => hay.includes(t)) ||
-        fragments.some((f) => hay.includes(f))
-      );
+      let lcp = 0;
+      const n = Math.min(hay.length, q.length);
+      while (lcp < n && hay[lcp] === q[lcp]) lcp++;
+      let score = lcp * 10;
+      for (const t of terms) if (hay.includes(t)) score += 3;
+      for (const f of fragments) if (hay.includes(f)) score += 2;
+      return { label: `${m.provider}/${m.id}`, score };
     })
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score)
     .slice(0, limit)
-    .map((m) => `${m.provider}/${m.id}`);
+    .map((s) => s.label);
 }
 
 /** Human-facing hint shown wherever smart summaries being off matters. */

@@ -124,6 +124,30 @@ describe("summary-model registry resolution", () => {
     expect(s2).toEqual(["zai/glm-5.3"]);
     expect(suggestSummaryModels(registry, "")).toEqual([]);
   });
+
+  test("suggestions rank prefix matches above fragment-only matches", () => {
+    // Regression: suggestions were an unranked filter+slice, so the obvious
+    // answer could be cut by unrelated models that sat earlier in the
+    // registry — "1min/grok-4-fast-nonthinking" (a typo for
+    // 1min/grok-4-fast-non-reasoning) surfaced opencode/openrouter models
+    // that merely shared the fragments "grok"/"fast".
+    const catalog = [
+      makeTestModel("opencode", "grok-4.5"),
+      makeTestModel("opencode", "grok-4.6"),
+      makeTestModel("openrouter", "anthropic/claude-opus-4.7-fast"),
+      makeTestModel("1min", "grok-4-fast-non-reasoning"),
+    ];
+    const typoRegistry: SummaryModelRegistry = {
+      find: () => undefined,
+      getAvailable: () => catalog,
+    };
+    const s = suggestSummaryModels(
+      typoRegistry,
+      "1min/grok-4-fast-nonthinking",
+    );
+    expect(s[0]).toBe("1min/grok-4-fast-non-reasoning");
+    expect(s).toContain("opencode/grok-4.5");
+  });
 });
 
 describe("/goodies summary-model handler", () => {
