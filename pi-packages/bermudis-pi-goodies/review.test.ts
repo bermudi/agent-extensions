@@ -55,6 +55,35 @@ describe("parsePrReference", () => {
       parsePrReference("https://github.com/owner/repo/issues/123"),
     ).toBeNull();
   });
+
+  test("malformed PR number with trailing letters is rejected (numeric prefix bug)", () => {
+    // Regression: the URL regex matched a numeric prefix, so /pull/123abc
+    // silently resolved as PR 123. The trailing anchor ([/?#]|$) now rejects
+    // any reference where the digits aren't followed by /, ?, #, or end.
+    expect(
+      parsePrReference("https://github.com/owner/repo/pull/123abc"),
+    ).toBeNull();
+    expect(
+      parsePrReference("https://github.com/owner/repo/pull/42xyz"),
+    ).toBeNull();
+    expect(parsePrReference("github.com/owner/repo/pull/999foo")).toBeNull();
+  });
+
+  test("PR number followed by a subpath, query, or fragment is accepted", () => {
+    // The anchor must still allow legitimate suffixes: /files, ?diff=1, #diff.
+    expect(
+      parsePrReference("https://github.com/owner/repo/pull/123/files"),
+    ).toEqual({ prNumber: 123, repo: "owner/repo" });
+    expect(
+      parsePrReference("https://github.com/owner/repo/pull/123?diff=1"),
+    ).toEqual({ prNumber: 123, repo: "owner/repo" });
+    expect(
+      parsePrReference("https://github.com/owner/repo/pull/123#discussion"),
+    ).toEqual({ prNumber: 123, repo: "owner/repo" });
+    expect(parsePrReference("https://github.com/owner/repo/pull/123/")).toEqual(
+      { prNumber: 123, repo: "owner/repo" },
+    );
+  });
 });
 
 describe("tokenizeArgs", () => {

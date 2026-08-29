@@ -64,7 +64,28 @@ type Config = Partial<Record<FeatureName, boolean>> & {
 function loadConfig(): Config {
   try {
     const raw = readFileSync(CONFIG_PATH, "utf-8");
-    return JSON.parse(raw) as Config;
+    const parsed: unknown = JSON.parse(raw);
+    // Valid JSON is not necessarily a config object: null, true, "x", 42, or
+    // [] all parse cleanly but would crash later code (config[name] on null,
+    // delete on a string index, etc.). Reject anything that isn't a plain
+    // object so this path logs config_error and returns defaults, the same as
+    // a syntax error — a non-object root is just as unusable.
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      throw new TypeError(
+        `goodies.json root must be a JSON object, got ${
+          parsed === null
+            ? "null"
+            : Array.isArray(parsed)
+              ? "array"
+              : typeof parsed
+        }`,
+      );
+    }
+    return parsed as Config;
   } catch (err) {
     // A corrupt goodies.json must not silently reset every feature to its
     // default — that would hide the problem (the user wonders why all their

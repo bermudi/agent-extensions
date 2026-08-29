@@ -544,6 +544,29 @@ function summaryReasoning(model: Model<Api>): ThinkingLevel | undefined {
 // so request volume and a broken provider/key/model choice are queryable
 // instead of a black box. The backend messages embed the model label so three
 // plausible providers don't mean guessing which failed.
+
+/**
+ * Produce a log-safe reference to a shell command without persisting its raw
+ * text. The raw command can carry inline tokens, passwords, private URLs, and
+ * personal data — `cmd.slice(0, 200)` leaked all of that into the durable
+ * goodies.log for every request, successful or failed. Instead we record a
+ * short non-reversible digest (FNV-1a, 32-bit, hex) plus the command length:
+ * the digest lets log entries for the same command be correlated, and the
+ * length hints at scale, but neither reveals the content.
+ */
+function redactCommandForLog(cmd: string): { digest: string; len: number } {
+  // FNV-1a 32-bit: cheap, non-cryptographic, good enough for log correlation.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < cmd.length; i++) {
+    hash ^= cmd.charCodeAt(i);
+    // Math.imul keeps the 32-bit multiply semantics on the full int range.
+    hash = Math.imul(hash, 0x01000193);
+  }
+  // Force unsigned 32-bit and pad to 8 hex chars.
+  const digest = (hash >>> 0).toString(16).padStart(8, "0");
+  return { digest, len: cmd.length };
+}
+
 function logSummaryFailure(
   cmd: string,
   err: unknown,
@@ -560,7 +583,7 @@ function logSummaryFailure(
     ...(ms === undefined ? {} : { ms }),
     error: msg.slice(0, 300),
     ...(pauseMs ? { pauseMs } : {}),
-    cmd: cmd.slice(0, 200),
+    ...redactCommandForLog(cmd),
   });
   // TUI: widget above the editor shows the pause state and clears on
   // recovery. Headless: a short console line (no UI to attach a widget to).
@@ -705,7 +728,7 @@ function startSummaryRequest(cmd: string): void {
         type: "summary_request",
         outcome: "ok",
         ms: Date.now() - requestStartedAt,
-        cmd: cmd.slice(0, 200),
+        ...redactCommandForLog(cmd),
       });
       clearSummaryPauseWidget();
       invalidateRowsForCommand(cmd);
@@ -827,7 +850,11 @@ function formatReadHeader(args: any, theme: any): string {
 function formatReadBullet(entry: Entry, theme: any): string {
   const args = entry.args;
   const path = shortenPath(args.path || "...");
-  let line = `  ${theme.fg("muted", "•")} ${theme.fg("accent", path)}`;
+  // Failed calls get red text so a single failure is visible inside a grouped
+  // burst without poisoning the whole box's background (see renderCall: the
+  // grouped box never takes the error color, whichever call failed).
+  const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
+  let line = `  ${theme.fg("muted", "•")} ${accent(path)}`;
   if (args.offset !== undefined || args.limit !== undefined) {
     const start = args.offset ?? 1;
     const end = args.limit !== undefined ? start + args.limit - 1 : "";
@@ -905,30 +932,35 @@ function formatWriteBullet(entry: Entry, theme: any): string {
   const path = shortenPath(entry.args.path || "...");
   const lines = entry.args.content ? entry.args.content.split("\n").length : 0;
   const info = lines ? theme.fg("muted", ` (${lines} lines)`) : "";
-  return `  ${theme.fg("muted", "•")} ${theme.fg("accent", path)}${info}`;
+  const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
+  return `  ${theme.fg("muted", "•")} ${accent(path)}${info}`;
 }
 
 function formatEditBullet(entry: Entry, theme: any): string {
   const path = shortenPath(entry.args.path || "...");
-  return `  ${theme.fg("muted", "•")} ${theme.fg("accent", path)}`;
+  const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
+  return `  ${theme.fg("muted", "•")} ${accent(path)}`;
 }
 
 function formatFindBullet(entry: Entry, theme: any): string {
   const pat = entry.args.pattern || "";
   const path = shortenPath(entry.args.path || ".");
-  return `  ${theme.fg("muted", "•")} ${theme.fg("accent", pat)}${theme.fg("toolOutput", ` in ${path}`)}`;
+  const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
+  return `  ${theme.fg("muted", "•")} ${accent(pat)}${theme.fg("toolOutput", ` in ${path}`)}`;
 }
 
 function formatGrepBullet(entry: Entry, theme: any): string {
   const pat = entry.args.pattern || "";
   const path = shortenPath(entry.args.path || ".");
   const glob = entry.args.glob ? ` (${entry.args.glob})` : "";
-  return `  ${theme.fg("muted", "•")} ${theme.fg("accent", `/${pat}/`)}${theme.fg("toolOutput", ` in ${path}${glob}`)}`;
+  const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
+  return `  ${theme.fg("muted", "•")} ${accent(`/${pat}/`)}${theme.fg("toolOutput", ` in ${path}${glob}`)}`;
 }
 
 function formatLsBullet(entry: Entry, theme: any): string {
   const path = shortenPath(entry.args.path || ".");
-  return `  ${theme.fg("muted", "•")} ${theme.fg("accent", path)}`;
+  const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
+  return `  ${theme.fg("muted", "•")} ${accent(path)}`;
 }
 
 /** Extension version from the package manifest, for the load line. */

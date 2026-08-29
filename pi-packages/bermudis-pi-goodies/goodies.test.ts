@@ -117,6 +117,32 @@ describe("goodies feature toggles", () => {
     setGoodiesLogPathForTesting(undefined);
   });
 
+  test("non-object config roots (null/true/number/array) log and fall back to defaults", () => {
+    // Regression: valid JSON such as null, true, 42, or [] parsed cleanly and
+    // bypassed the catch — but later code dereferences config[name] (and
+    // delete config[...]) which crashes on null/primitives, or silently
+    // misbehaves on arrays. A non-object root is just as unusable as a syntax
+    // error, so it must log config_error and return defaults.
+    for (const raw of ["null", "true", "42", '"hello"', "[]"]) {
+      const logDir = mkdtempSync(join(tmpdir(), "goodies-log-"));
+      const logPath = join(logDir, "goodies.log");
+      setGoodiesLogPathForTesting(logPath);
+
+      writeFileSync(CONFIG_PATH, raw);
+      __setConfigPathForTesting(CONFIG_PATH);
+
+      // Defaults: all features enabled, no crash.
+      expect(isEnabled("clean-tui")).toBe(true);
+      expect(isEnabled("kilo")).toBe(true);
+
+      const log = readFileSync(logPath, "utf-8");
+      expect(log).toContain("config_error");
+      expect(log).toContain("failed to load config");
+
+      setGoodiesLogPathForTesting(undefined);
+    }
+  });
+
   test("missing config file (ENOENT) stays silent and returns defaults", () => {
     // First run: no goodies.json yet. This is expected, not a failure —
     // loadConfig must NOT log a config_error for ENOENT.

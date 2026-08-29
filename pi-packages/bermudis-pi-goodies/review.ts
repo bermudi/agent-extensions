@@ -444,8 +444,14 @@ export function parsePrReference(ref: string): {
 
   // Try to extract from GitHub URL
   // Formats: https://github.com/owner/repo/pull/123
-  //          github.com/owner/repo/pull/123
-  const urlMatch = trimmed.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  //          github.com/owner/repo/pull/123/files#diff-abc
+  //          github.com/owner/repo/pull/123?diff=1
+  // The trailing anchor ([/?#]|$) rejects malformed references such as
+  // /pull/123abc — without it the regex matched a numeric prefix and silently
+  // resolved "123abc" as PR 123.
+  const urlMatch = trimmed.match(
+    /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:[/?#]|$)/,
+  );
   if (urlMatch) {
     const num = parseInt(urlMatch[3], 10);
     if (num > 0) {

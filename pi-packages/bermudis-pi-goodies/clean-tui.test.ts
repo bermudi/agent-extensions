@@ -716,7 +716,15 @@ describe("clean-tui AI summary", () => {
       expect(f.error).toContain("HTTP 429 (kilo/x)");
       expect(typeof f.ts).toBe("string");
     }
-    expect(failures[0].cmd).not.toBe(failures[1].cmd);
+    expect(failures[0].cmd).toBeUndefined(); // raw command is never logged
+    expect(failures[0].digest).not.toBe(failures[1].digest); // distinct cmds
+    // The raw command text must not appear anywhere in the log — it can carry
+    // inline tokens, passwords, and private URLs. "MIGRATION-LOG" is a real
+    // sentinel from this test's heredoc, so this would fail against the old
+    // cmd.slice(0,200) logging.
+    const rawLog = readFileSync(logPath, "utf-8");
+    expect(rawLog).not.toContain("MIGRATION-LOG");
+    expect(rawLog).not.toContain("First reboot verification");
     // Console stays short (pi's TUI prints stderr inline — a full error body
     // once plastered a screen-width JSON blob across the transcript); the
     // file carries the detail.
@@ -1062,7 +1070,12 @@ describe("clean-tui AI summary", () => {
     expect(events).toHaveLength(1);
     expect(events[0].outcome).toBe("ok");
     expect(typeof events[0].ms).toBe("number");
-    expect(events[0].cmd).toContain("MIGRATION-LOG");
+    // The raw command is redacted from the log: only a digest + length are
+    // recorded, never the command text (which can carry secrets).
+    expect(events[0].cmd).toBeUndefined();
+    expect(typeof events[0].digest).toBe("string");
+    expect(typeof events[0].len).toBe("number");
+    expect(readFileSync(logPath, "utf-8")).not.toContain("MIGRATION-LOG");
   });
 
   test("reasoning-only models get their lowest effort, not the API default", async () => {
@@ -1569,6 +1582,61 @@ describe("clean-tui massive commands", () => {
         a.lastCallComponent as unknown as { bgFn?: (s: string) => string }
       ).bgFn?.("probe");
       expect(bg).toBe("<toolSuccessBg>probe");
+    }
+  });
+
+  test("a failed grouped non-bash bullet renders its text in the error color", () => {
+    // Regression: formatReadBullet/formatWriteBullet/formatEditBullet/
+    // formatFindBullet/formatGrepBullet/formatLsBullet all ignored
+    // entry.isError, so a failed grouped call appeared successful — its bullet
+    // text stayed the normal accent color. Only formatBashBullet inspected
+    // isError. Now every grouped bullet marks failures in red on the bullet
+    // itself (the box background stays success, per the test above).
+    const colorTheme: Theme = {
+      fg: (c, t) => `<${c}>${t}`,
+      bg: (c, t) => `<${c}>${t}`,
+      bold: (t) => t,
+    };
+    const cases: Array<{
+      tool: string;
+      args: Record<string, string>;
+      probe: string;
+    }> = [
+      {
+        tool: "read",
+        args: { path: "/tmp/missing.ts" },
+        probe: "/tmp/missing.ts",
+      },
+      {
+        tool: "write",
+        args: { path: "/tmp/readonly.ts", content: "x" },
+        probe: "/tmp/readonly.ts",
+      },
+      {
+        tool: "edit",
+        args: { path: "/tmp/missing.ts" },
+        probe: "/tmp/missing.ts",
+      },
+      { tool: "find", args: { pattern: "*.ts", path: "." }, probe: "*.ts" },
+      { tool: "grep", args: { pattern: "foo", path: "." }, probe: "/foo/" },
+      { tool: "ls", args: { path: "." }, probe: "." },
+    ];
+    for (const { tool, args, probe } of cases) {
+      const h = new PiHarness({ theme: colorTheme });
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const a = h.row(tool, `a-${tool}`);
+      const b = h.row(tool, `b-${tool}`);
+      a.setArgs(args);
+      b.setArgs(args);
+      a.setResult({ content: ["boom"], isError: true });
+      b.setResult({ content: ["ok"] });
+      const text = textOf(a.lastCallComponent);
+      // The failed bullet's main text is wrapped in <error>; the successful
+      // one's is wrapped in <accent>. Both appear in the same grouped header.
+      expect(text).toContain(`<error>${probe}`);
+      expect(text).toContain(`<accent>${probe}`);
     }
   });
 
