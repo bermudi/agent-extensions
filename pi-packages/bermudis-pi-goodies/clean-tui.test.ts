@@ -11,6 +11,7 @@ import cleanTui, {
   __setSummaryRequestTimeoutForTesting,
   __setSummarySwapMaxAgeForTesting,
   __setSummaryUiForTesting,
+  convertSummaryResponse,
   setCleanTuiActive,
 } from "./clean-tui";
 import { PiHarness, type Theme } from "pi-harness";
@@ -850,6 +851,56 @@ describe("clean-tui AI summary", () => {
     expect(logged.filter((l) => l.includes("timed out"))).toHaveLength(1);
   });
 
+  test("a per-request AbortError frees the slot without logging a failure", async () => {
+    // Regression: the old guard `if (!signal.aborted && err.name !==
+    // "AbortError") pendingSummaries.delete(cmd)` skipped the delete when the
+    // error was an AbortError but the SESSION was not aborted (a per-request
+    // abort/timeout that raced the provider promise). The command stayed in
+    // pendingSummaries forever, permanently burning a concurrency slot with
+    // zero log output. The fix: always delete unless the session itself was
+    // aborted (session_start clears via .clear()).
+    const logPath = useScratchSummaryLog();
+    __setSummaryBackoffForTesting(0, 0);
+    cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
+    let firstCall = true;
+    scriptedBackend(() => {
+      if (firstCall) {
+        firstCall = false;
+        // Simulate a per-request abort: the provider rejects with AbortError
+        // (as pi-ai does when stopReason === "aborted"), NOT a session switch.
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        return Promise.reject(err);
+      }
+      return "Recovered after abort";
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "aborted");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 30));
+    // The slot must have been freed — a re-render retries and the summary
+    // lands. If the slot was burned, the second call never fires and the
+    // text stays as the raw command.
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(textOf(row.lastCallComponent)).toContain("Recovered after abort");
+    // An AbortError from a per-request abort is NOT a provider failure —
+    // it must not appear in the structured log.
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const failures = events.filter(
+      (e) => e.type === "summary_request" && e.outcome === "failed",
+    );
+    expect(failures).toHaveLength(0);
+  });
+
   test("replayed history never requests summaries", async () => {
     // Startup/-c//resume replays fire no events until a live run begins;
     // render-side requests must stay suppressed during that window too.
@@ -1562,5 +1613,160 @@ describe("clean-tui massive commands", () => {
     expect(text).toContain("bash ×2");
     expect(text).toContain("(+23 lines)");
     expect(text).not.toContain("detail line 5");
+  });
+});
+
+describe("convertSummaryResponse — production error conversion", () => {
+  // Every failure test in the suite throws from a test seam (scriptedBackend),
+  // so the backoff/log/widget edifice is tested against error shapes no
+  // production path is verified to emit. This table test exercises the actual
+  // production code (convertSummaryResponse, extracted from summarizeViaProvider)
+  // that converts pi-ai response stopReasons into the Error shapes the rest of
+  // the pipeline consumes.
+
+  const LABEL = "kilo/grok-4-fast";
+
+  test("stopReason 'aborted' throws AbortError (not a provider failure)", () => {
+    expect(() =>
+      convertSummaryResponse({ stopReason: "aborted", content: [] }, LABEL),
+    ).toThrow("summary request aborted");
+    try {
+      convertSummaryResponse({ stopReason: "aborted", content: [] }, LABEL);
+    } catch (err) {
+      expect((err as Error).name).toBe("AbortError");
+    }
+  });
+
+  test("stopReason 'error' with errorMessage throws error containing message + label", () => {
+    expect(() =>
+      convertSummaryResponse(
+        {
+          stopReason: "error",
+          errorMessage: "HTTP 429 Too Many Requests",
+          content: [],
+        },
+        LABEL,
+      ),
+    ).toThrow("HTTP 429 Too Many Requests (kilo/grok-4-fast)");
+  });
+
+  test("stopReason 'error' without errorMessage falls back to 'request failed'", () => {
+    expect(() =>
+      convertSummaryResponse({ stopReason: "error", content: [] }, LABEL),
+    ).toThrow(`request failed (${LABEL})`);
+  });
+
+  test("errorMessage is truncated to SUMMARY_ERROR_SNIPPET_CHARS (200)", () => {
+    const longMsg = "X".repeat(500);
+    try {
+      convertSummaryResponse(
+        { stopReason: "error", errorMessage: longMsg, content: [] },
+        LABEL,
+      );
+      throw new Error("should have thrown");
+    } catch (err) {
+      const msg = (err as Error).message;
+      // The error body is truncated to 200 chars before the label suffix.
+      const body = msg.slice(0, msg.indexOf(` (${LABEL})`));
+      expect(body.length).toBe(200);
+      expect(body).toBe("X".repeat(200));
+    }
+  });
+
+  test("stopReason 'stop' with text content returns the joined text", () => {
+    expect(
+      convertSummaryResponse(
+        {
+          stopReason: "stop",
+          content: [
+            { type: "text", text: "Appends reboot log" },
+            { type: "text", text: "to migration file" },
+          ],
+        },
+        LABEL,
+      ),
+    ).toBe("Appends reboot log\nto migration file");
+  });
+
+  test("stopReason 'stop' with empty content throws empty-summary error", () => {
+    expect(() =>
+      convertSummaryResponse({ stopReason: "stop", content: [] }, LABEL),
+    ).toThrow(
+      `empty summary — is ${LABEL} a thinking model that cannot disable thinking?`,
+    );
+  });
+
+  test("stopReason 'stop' with whitespace-only content throws empty-summary error", () => {
+    expect(() =>
+      convertSummaryResponse(
+        {
+          stopReason: "stop",
+          content: [{ type: "text", text: "   \n  \t  " }],
+        },
+        LABEL,
+      ),
+    ).toThrow(
+      `empty summary — is ${LABEL} a thinking model that cannot disable thinking?`,
+    );
+  });
+
+  test("stopReason 'stop' with only non-text blocks (thinking) throws empty-summary error", () => {
+    // A reasoning model that burns the whole budget on thinking emits no text
+    // content — the exact failure the empty-summary error diagnoses.
+    expect(() =>
+      convertSummaryResponse(
+        {
+          stopReason: "stop",
+          content: [
+            { type: "thinking", text: "reasoning about the command..." },
+          ],
+        },
+        LABEL,
+      ),
+    ).toThrow(
+      `empty summary — is ${LABEL} a thinking model that cannot disable thinking?`,
+    );
+  });
+
+  test("stopReason 'length' with text content returns text (not an error)", () => {
+    // "length" means the model hit max_tokens — the partial text is still
+    // usable for a summary. Only "aborted" and "error" are failure stopReasons.
+    expect(
+      convertSummaryResponse(
+        {
+          stopReason: "length",
+          content: [{ type: "text", text: "Runs the test" }],
+        },
+        LABEL,
+      ),
+    ).toBe("Runs the test");
+  });
+
+  test("stopReason 'toolUse' with text content returns text", () => {
+    expect(
+      convertSummaryResponse(
+        {
+          stopReason: "toolUse",
+          content: [{ type: "text", text: "Partial answer" }],
+        },
+        LABEL,
+      ),
+    ).toBe("Partial answer");
+  });
+
+  test("text content with mixed text and non-text blocks returns only the text parts", () => {
+    expect(
+      convertSummaryResponse(
+        {
+          stopReason: "stop",
+          content: [
+            { type: "thinking", text: "internal reasoning" },
+            { type: "text", text: "Cleans the build" },
+            { type: "toolCall", text: "ignored" },
+          ],
+        },
+        LABEL,
+      ),
+    ).toBe("Cleans the build");
   });
 });

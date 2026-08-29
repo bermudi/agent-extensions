@@ -101,4 +101,94 @@ describe("detectLegacyTool", () => {
     allowed("echo $VAR");
     allowed("echo ${VAR}");
   });
+
+  // ── Defeat vectors ──────────────────────────────────────────────
+  // Each of these was a real bypass of the block before the lexer was
+  // hardened. They are the exact patterns the user called out.
+
+  it("blocks backslash-escaped commands (\\rm)", () => {
+    blocked(
+      "\\rm -rf /",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "\\python script.py",
+      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
+    );
+  });
+
+  it("blocks commands inside brace groups ({ rm; })", () => {
+    blocked(
+      "{ rm -rf /; }",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "{ rm file; }",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+  });
+
+  it("blocks sudo with option arguments (sudo -u root rm)", () => {
+    blocked(
+      "sudo -u root rm -rf /",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "sudo -g wheel rm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "sudo -u root -g wheel rm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+  });
+
+  it("blocks command substitutions in unquoted heredoc bodies", () => {
+    blocked(
+      "cat <<EOF\n$(rm -rf /)\nEOF",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "cat <<EOF\n$(python evil.py)\nEOF",
+      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
+    );
+    blocked(
+      "cat <<EOF\n`rm file`\nEOF",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+  });
+
+  it("still allows quoted heredoc bodies with $(rm) (no execution)", () => {
+    allowed("cat <<'EOF'\n$(rm file)\nEOF");
+    allowed('cat <<"EOF"\n$(rm file)\nEOF');
+  });
+
+  it("allows sudo running non-blocked commands with option arguments", () => {
+    allowed("sudo -u root echo hello");
+    allowed("sudo -g wheel ls -la");
+    allowed("sudo -u root -g wheel cat file");
+  });
+
+  it("allows brace groups with non-blocked commands", () => {
+    allowed("{ echo hello; }");
+    allowed("{ ls -la; }");
+  });
+
+  it("allows backslash-escaped non-blocked commands", () => {
+    allowed("\\echo hello");
+    allowed("\\ls -la");
+  });
+
+  it("blocks nested command substitutions in unquoted heredocs", () => {
+    blocked(
+      "cat <<EOF\n$(echo $(rm file))\nEOF",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+  });
+
+  it("allows $(rm) inside single quotes within unquoted heredoc bodies", () => {
+    // In an unquoted heredoc, single quotes still quote — $(rm) inside
+    // single quotes does NOT execute.
+    allowed("cat <<EOF\necho '$(rm file)'\nEOF");
+  });
 });

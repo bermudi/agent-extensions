@@ -5,16 +5,18 @@
  * Example: if clean-tui freezes pi, run `/goodies disable clean-tui` and keep
  * kilo, provider-balance, etc.
  *
- * State persists to ~/.pi/agent/goodies.json. Changes take effect immediately
- * for most features; some (like clean-tui's tool overrides) may need a
- * `/reload` or new session to fully detach.
+ * State persists to ~/.pi/agent/goodies.json. Toggling a feature writes the
+ * config but does NOT unload/reload the extension — every feature is registered
+ * at load time, so a toggle needs `/reload` or a new session to take effect.
+ * The only exception is `summary-model`, which is read at request time.
  */
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { reportFailure } from "./goodies-log.ts";
+import { writeJsonFileAtomic, describeError } from "./json-file.ts";
 
 let CONFIG_PATH = join(homedir(), ".pi", "agent", "goodies.json");
 
@@ -63,21 +65,32 @@ function loadConfig(): Config {
   try {
     const raw = readFileSync(CONFIG_PATH, "utf-8");
     return JSON.parse(raw) as Config;
-  } catch {
+  } catch (err) {
+    // A corrupt goodies.json must not silently reset every feature to its
+    // default — that would hide the problem (the user wonders why all their
+    // toggles reverted) and overwrite the corrupt file on the next save,
+    // destroying the evidence. Log it so the cause is queryable.
+    if (!(
+      err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT"
+    )) {
+      reportFailure(
+        "config_error",
+        `goodies: failed to load config from ${CONFIG_PATH}: ${describeError(
+          err,
+        )} — using defaults`,
+      );
+    }
     return {};
   }
 }
 
 function saveConfig(config: Config): void {
   try {
-    mkdirSync(join(homedir(), ".pi", "agent"), { recursive: true });
-    writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+    writeJsonFileAtomic(CONFIG_PATH, config);
   } catch (err) {
     reportFailure(
       "config_error",
-      `goodies: failed to save config: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `goodies: failed to save config: ${describeError(err)}`,
     );
   }
 }
@@ -246,9 +259,7 @@ export default function goodies(pi: ExtensionAPI): void {
         setEnabled(name, enabled);
         ctx.ui.notify(
           `${name} ${enabled ? "enabled" : "disabled"}. ` +
-            (name === "clean-tui" || name === "prefer-tools"
-              ? "Run /reload or start a new session for tool overrides to fully detach."
-              : "Takes effect immediately."),
+            `Run /reload or start a new session for it to take effect.`,
           "info",
         );
         return;

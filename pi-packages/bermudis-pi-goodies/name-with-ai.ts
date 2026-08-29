@@ -19,6 +19,7 @@ import {
   convertToLlm,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
+import { describeError, extractTextParts } from "./json-file.ts";
 
 const NAMING_PROMPT = [
   "You are a session naming engine. Given a user's message, produce a short, descriptive session name.",
@@ -37,37 +38,7 @@ function extractLastAssistantText(
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]!;
     if (msg.role !== "assistant") continue;
-    if (typeof msg.content === "string") return msg.content;
-    if (Array.isArray(msg.content)) {
-      const parts: string[] = [];
-      for (const block of msg.content) {
-        if (
-          typeof block === "object" &&
-          block !== null &&
-          "type" in block &&
-          block.type === "text" &&
-          "text" in block
-        )
-          parts.push((block as { text?: string }).text ?? "");
-      }
-      return parts.join("\n").trim();
-    }
-  }
-  return "";
-}
-
-function extractText(content: unknown): string {
-  if (content == null) return "";
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter(
-        (b): b is { type: string; text?: string } =>
-          typeof b === "object" && b !== null,
-      )
-      .map((b) => (b.type === "text" ? (b.text ?? "") : ""))
-      .filter(Boolean)
-      .join("\n");
+    return extractTextParts(msg.content).join("\n").trim();
   }
   return "";
 }
@@ -110,7 +81,7 @@ export default function nameWithAiExtension(pi: ExtensionAPI) {
       }
 
       const msgContent = (firstUser.message as { content?: unknown }).content;
-      const prompt = extractText(msgContent);
+      const prompt = extractTextParts(msgContent).filter(Boolean).join("\n");
       if (!prompt) {
         ctx.ui.notify(
           "First message is empty — can't generate a name",
@@ -186,10 +157,7 @@ export default function nameWithAiExtension(pi: ExtensionAPI) {
 
         abortController.signal.removeEventListener("abort", abortHandler);
       } catch (err) {
-        ctx.ui.notify(
-          `Naming failed: ${err instanceof Error ? err.message : String(err)}`,
-          "error",
-        );
+        ctx.ui.notify(`Naming failed: ${describeError(err)}`, "error");
       } finally {
         if (ctx.signal) ctx.signal.removeEventListener("abort", onCtxAbort);
         ctx.ui.setStatus("name-with-ai", undefined);

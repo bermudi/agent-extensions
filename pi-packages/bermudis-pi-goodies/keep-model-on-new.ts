@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { describeError } from "./json-file.ts";
 
 interface ModelIdentity {
   provider: string;
@@ -86,7 +87,7 @@ export default function keepModelOnNew(
         ctx.ui.notify(message, "warning");
       }
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = describeError(error);
       if (!ctx.hasUI)
         console.warn(
           `[keep-model-on-new] Failed to restore ${previous.provider}/${previous.id}: ${detail}`,

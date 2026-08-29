@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import type {
   ExtensionAPI,
   ProviderConfig,
@@ -14,6 +14,36 @@ import kilo, {
   thinkingLevelMapFromVariants,
   type OpenRouterModel,
 } from "./kilo.ts";
+import { setGoodiesLogPathForTesting } from "./goodies-log";
+import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// Every kilo test that triggers reportFailure (directly or via refreshModels)
+// must redirect the log — otherwise a regression writes into the real
+// ~/.pi/agent/goodies.log.
+let scratchLogDir: string;
+let scratchLogPath: string;
+
+beforeEach(() => {
+  scratchLogDir = mkdtempSync(join(tmpdir(), "kilo-log-test-"));
+  scratchLogPath = join(scratchLogDir, "goodies.log");
+  setGoodiesLogPathForTesting(scratchLogPath);
+});
+
+afterEach(() => {
+  setGoodiesLogPathForTesting(undefined);
+  rmSync(scratchLogDir, { recursive: true, force: true });
+});
+
+function readLogLines(): Record<string, unknown>[] {
+  if (!existsSync(scratchLogPath)) return [];
+  return readFileSync(scratchLogPath, "utf-8")
+    .trim()
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l) as Record<string, unknown>);
+}
 
 function captureKiloProvider(): ProviderConfig {
   let config: ProviderConfig | undefined;
@@ -119,16 +149,21 @@ describe("catalog refresh", () => {
     }
   });
 
-  test("does not warn when picker cancellation aborts a refresh", async () => {
+  test("does not report a failure when picker cancellation aborts a refresh", async () => {
+    // The code reports via reportFailure (log file + console.error in headless
+    // mode), NOT console.warn. The old test spied console.warn and could never
+    // fail — reportFailure never calls it. This test asserts on the actual
+    // reporting path: no log entry and no console.error when the signal is
+    // aborted.
     const originalFetch = globalThis.fetch;
-    const originalWarn = console.warn;
-    const warnings: unknown[][] = [];
+    const originalErr = console.error;
+    const errors: string[] = [];
     let rejectFetch: ((error: Error) => void) | undefined;
     globalThis.fetch = (() =>
       new Promise<Response>((_resolve, reject) => {
         rejectFetch = reject;
       })) as typeof fetch;
-    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
 
     try {
       const provider = captureKiloProvider();
@@ -151,10 +186,54 @@ describe("catalog refresh", () => {
       rejectFetch?.(new Error("This operation was aborted"));
       await refresh;
 
-      expect(warnings).toEqual([]);
+      // No log entry: reportFailure was not called because the signal was
+      // aborted (the guard at `if (!context.signal?.aborted)`).
+      const kiloWarnings = readLogLines().filter(
+        (e) => e.type === "kilo_warning",
+      );
+      expect(kiloWarnings).toHaveLength(0);
+      // No console.error either.
+      expect(errors.filter((e) => e.includes("[kilo]"))).toHaveLength(0);
     } finally {
       globalThis.fetch = originalFetch;
-      console.warn = originalWarn;
+      console.error = originalErr;
+    }
+  });
+
+  test("a non-aborted fetch failure IS reported to the log", async () => {
+    // Complement to the abort test: when the signal is NOT aborted, a fetch
+    // failure must produce a kilo_warning log entry. This verifies the test
+    // can actually detect a regression (if the abort guard were removed, the
+    // abort test above would fail because this path would fire).
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response("Internal Server Error", { status: 500 })) as typeof fetch;
+
+    try {
+      const provider = captureKiloProvider();
+      const refreshModels = provider.refreshModels;
+      if (!refreshModels)
+        throw new Error("Kilo refresh hook was not registered");
+
+      const context = {
+        credential: { type: "api_key", key: "test-key" },
+        stored: undefined,
+        publish: async () => true,
+        allowNetwork: true,
+        force: true,
+      } as unknown as Parameters<typeof refreshModels>[0];
+
+      await refreshModels(context);
+
+      const kiloWarnings = readLogLines().filter(
+        (e) => e.type === "kilo_warning",
+      );
+      expect(kiloWarnings.length).toBeGreaterThanOrEqual(1);
+      expect(String(kiloWarnings[0].message)).toContain(
+        "refreshModels fetch failed",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 

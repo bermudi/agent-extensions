@@ -28,6 +28,7 @@ import type {
   ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
 import { reportFailure } from "./goodies-log.ts";
+import { describeError, timeoutSignal } from "./json-file.ts";
 
 // =============================================================================
 // Constants
@@ -145,8 +146,7 @@ export function abortableSleep(
 
 /** Combine the login callback signal with a per-request timeout ceiling. */
 function loginAbortSignal(signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(LOGIN_REQUEST_TIMEOUT_MS);
-  return signal ? AbortSignal.any([timeout, signal]) : timeout;
+  return timeoutSignal(LOGIN_REQUEST_TIMEOUT_MS, signal);
 }
 
 async function initiateDeviceAuth(
@@ -565,8 +565,7 @@ function storedModelToConfig(model: Model<Api>): ProviderModelConfig | null {
 
 /** Combine the fetch ceiling timeout with an optional caller signal. */
 function modelsAbortSignal(signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(MODELS_FETCH_TIMEOUT_MS);
-  return signal ? AbortSignal.any([timeout, signal]) : timeout;
+  return timeoutSignal(MODELS_FETCH_TIMEOUT_MS, signal);
 }
 
 async function fetchKiloModels(options?: {
@@ -671,9 +670,7 @@ export default function kilo(pi: ExtensionAPI): void {
         } catch (error) {
           reportFailure(
             "kilo_warning",
-            `[kilo] Failed to restore cached models: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+            `[kilo] Failed to restore cached models: ${describeError(error)}`,
           );
         }
       }
@@ -705,9 +702,9 @@ export default function kilo(pi: ExtensionAPI): void {
         } catch (error) {
           reportFailure(
             "kilo_warning",
-            `[kilo] Failed to persist refreshed models: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+            `[kilo] Failed to persist refreshed models: ${describeError(
+              error,
+            )}`,
           );
         }
         lastFullCatalog = models;
@@ -720,9 +717,7 @@ export default function kilo(pi: ExtensionAPI): void {
         if (!context.signal?.aborted) {
           reportFailure(
             "kilo_warning",
-            `[kilo] refreshModels fetch failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+            `[kilo] refreshModels fetch failed: ${describeError(error)}`,
           );
         }
         return lastFullCatalog ?? KILO_FREE_MODELS;

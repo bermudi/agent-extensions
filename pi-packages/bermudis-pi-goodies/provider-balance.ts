@@ -20,7 +20,11 @@ import {
   unlinkSync,
 } from "node:fs";
 import { join } from "node:path";
-import { writeJsonFileAtomic } from "./json-file.ts";
+import {
+  writeJsonFileAtomic,
+  describeError,
+  timeoutSignal,
+} from "./json-file.ts";
 
 const KILO_API_BASE = process.env.KILO_API_URL || "https://api.kilo.ai";
 const KILO_BALANCE_ENDPOINT = `${KILO_API_BASE}/api/profile/balance`;
@@ -463,13 +467,12 @@ async function fetchKiloBalance(
   token: string,
   signal: AbortSignal,
 ): Promise<Balance> {
-  const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
   const response = await fetch(KILO_BALANCE_ENDPOINT, {
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
-    signal: AbortSignal.any([timeout, signal]),
+    signal: timeoutSignal(BALANCE_FETCH_TIMEOUT_MS, signal),
   });
   if (!response.ok) {
     throw new Error(`Kilo balance request failed: ${response.status}`);
@@ -486,13 +489,12 @@ async function fetchOpenRouterBalance(
   token: string,
   signal: AbortSignal,
 ): Promise<Balance> {
-  const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
   const response = await fetch(OPENROUTER_CREDITS_ENDPOINT, {
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/json",
     },
-    signal: AbortSignal.any([timeout, signal]),
+    signal: timeoutSignal(BALANCE_FETCH_TIMEOUT_MS, signal),
   });
   if (!response.ok) {
     throw new Error(`OpenRouter balance request failed: ${response.status}`);
@@ -510,13 +512,12 @@ async function fetchZaiQuotaAt(
   token: string,
   signal: AbortSignal,
 ): Promise<Balance> {
-  const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
   const response = await fetch(endpoint, {
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/json",
     },
-    signal: AbortSignal.any([timeout, signal]),
+    signal: timeoutSignal(BALANCE_FETCH_TIMEOUT_MS, signal),
   });
   if (!response.ok) {
     throw new Error(`Z.ai quota request failed: ${response.status}`);
@@ -552,7 +553,6 @@ async function fetchCodexQuota(
     throw new Error("Codex access token did not contain an account ID");
   }
 
-  const timeout = AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS);
   const response = await fetch(CODEX_USAGE_ENDPOINT, {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -561,7 +561,7 @@ async function fetchCodexQuota(
       originator: "pi",
       "chatgpt-account-id": accountId,
     },
-    signal: AbortSignal.any([timeout, signal]),
+    signal: timeoutSignal(BALANCE_FETCH_TIMEOUT_MS, signal),
   });
   if (!response.ok) {
     throw new Error(`Codex quota request failed: ${response.status}`);
@@ -1254,8 +1254,12 @@ export default function providerBalance(
         clearBalance();
         return;
       }
-      identityPending = true;
-      requestRender?.();
+      // Keep the already-displayed balance visible during the post-fetch
+      // identity re-check — setting identityPending here would hide a verified
+      // balance for the duration of two redundant keychain lookups, causing a
+      // flicker proportional to keychain latency. The re-check only needs to
+      // clear the display if it FAILS (handled below); a passing check just
+      // commits the fresh balance on top of the old one.
       let currentToken: string | undefined;
       let confirmedToken: string | undefined;
       try {
@@ -1316,7 +1320,7 @@ export default function providerBalance(
       // so expose failures to other extensions without producing terminal output.
       pi.events.emit("provider-balance:refresh-error", {
         provider: providerId,
-        message: error instanceof Error ? error.message : String(error),
+        message: describeError(error),
       });
     } finally {
       if (generation === refreshGeneration) {
@@ -1404,7 +1408,7 @@ export default function providerBalance(
   });
 
   pi.on("input", (event, ctx) => {
-    const match = /^\/(login|logout)(?:\s+(\S+))?/.exec(event.text.trim());
+    const match = /^\/(login|logout)(?:\s+(\S+))?$/.exec(event.text.trim());
     if (!match) return;
     const provider = match[2] ?? ctx.model?.provider;
     if (!provider || provider !== ctx.model?.provider) return;

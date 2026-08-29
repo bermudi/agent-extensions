@@ -8,53 +8,11 @@
  * ```
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { execSync, spawn } from "node:child_process";
-import { platform } from "node:os";
-
-// ── Clipboard ─────────────────────────────────────────────────────────
-
-function copyToClipboard(text: string): void {
-  const p = platform();
-  try {
-    if (p === "darwin") {
-      execSync("pbcopy", { input: text, timeout: 5000 });
-      return;
-    }
-    if (p === "win32") {
-      execSync("clip", { input: text, timeout: 5000 });
-      return;
-    }
-    // Linux — Wayland
-    if (process.env.WAYLAND_DISPLAY) {
-      const proc = spawn("wl-copy", [], {
-        stdio: ["pipe", "ignore", "ignore"],
-      });
-      proc.stdin.on("error", () => {});
-      proc.stdin.write(text);
-      proc.stdin.end();
-      proc.unref();
-      return;
-    }
-    // Linux — X11
-    if (process.env.DISPLAY) {
-      try {
-        execSync("xclip -selection clipboard", { input: text, timeout: 5000 });
-      } catch {
-        execSync("xsel --clipboard --input", { input: text, timeout: 5000 });
-      }
-      return;
-    }
-  } catch {
-    // OSC 52 fallback
-    const encoded = Buffer.from(text).toString("base64");
-    if (encoded.length <= 100_000) {
-      process.stdout.write(`\x1b]52;c;${encoded}\x07`);
-      return;
-    }
-  }
-  throw new Error("No clipboard available");
-}
+import {
+  copyToClipboard,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
+import { describeError, extractTextParts } from "./json-file.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -71,10 +29,7 @@ function getLastAssistantText(entries: any[]): string | undefined {
       (!msg.content || msg.content.length === 0)
     )
       continue;
-    let text = "";
-    for (const block of msg.content ?? []) {
-      if (block.type === "text") text += block.text;
-    }
+    const text = extractTextParts(msg.content).join("\n");
     return text.trim() || undefined;
   }
   return undefined;
@@ -126,7 +81,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
 
-      const entries = ctx.sessionManager.getEntries();
+      const entries = ctx.sessionManager.getBranch();
       const text = getLastAssistantText(entries);
 
       if (!text) {
@@ -144,13 +99,10 @@ export default function (pi: ExtensionAPI) {
       const wrapped = wrapInCodeBlock(tag, text);
 
       try {
-        copyToClipboard(wrapped);
+        await copyToClipboard(wrapped);
         ctx.ui.notify(`Copied with model \`${tag}\``, "info");
       } catch (err) {
-        ctx.ui.notify(
-          `Failed to copy: ${err instanceof Error ? err.message : err}`,
-          "error",
-        );
+        ctx.ui.notify(`Failed to copy: ${describeError(err)}`, "error");
       }
     },
   });

@@ -17,23 +17,10 @@ import {
   type ExtensionAPI,
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import { describeError, extractTextParts } from "./json-file.ts";
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null;
-
-/** Extract `text` content blocks from a message body (string or block array). */
-const extractTextParts = (content: unknown): string[] => {
-  if (typeof content === "string") return [content];
-  if (!Array.isArray(content)) return [];
-  const parts: string[] = [];
-  for (const block of content) {
-    if (!isRecord(block)) continue;
-    if (block.type === "text" && typeof block.text === "string") {
-      parts.push(block.text);
-    }
-  }
-  return parts;
-};
 
 /** Extract `thinking` content blocks from an assistant message body. */
 const extractThinkingParts = (content: unknown): string[] => {
@@ -150,10 +137,7 @@ export default function (pi: ExtensionAPI) {
       try {
         await copyToClipboard(text);
       } catch (err) {
-        ctx.ui.notify(
-          `Failed to copy: ${err instanceof Error ? err.message : String(err)}`,
-          "error",
-        );
+        ctx.ui.notify(`Failed to copy: ${describeError(err)}`, "error");
         return;
       }
 

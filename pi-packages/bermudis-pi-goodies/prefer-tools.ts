@@ -56,18 +56,23 @@ function matchCommand(name: string): string | undefined {
 }
 
 function readWord(s: string, i: number): { word: string; next: number } {
-  const start = i;
+  // Build the word char by char so backslash escapes strip the backslash:
+  // `\rm` → `rm`, `foo\ bar` → `foo bar`. The old slice-based version kept
+  // the backslash in the word, so `\rm` evaded matchCommand.
+  let word = "";
   while (i < s.length) {
     const c = s[i];
     if (c === " " || c === "\t" || c === "\n" || c === "\r") break;
     if (c === "\\" && i + 1 < s.length) {
+      word += s[i + 1];
       i += 2;
       continue;
     }
     if (WORD_STOP.includes(c)) break;
+    word += c;
     i++;
   }
-  return { word: s.slice(start, i), next: i };
+  return { word, next: i };
 }
 
 function readQuote(
@@ -249,17 +254,71 @@ function readOperator(s: string, i: number): Op | null {
 function readHeredocDelimiter(
   s: string,
   i: number,
-): { delimiter: string; next: number } | null {
+): { delimiter: string; next: number; quoted: boolean } | null {
   while (i < s.length && (s[i] === " " || s[i] === "\t")) i++;
   if (i >= s.length) return null;
   const c = s[i];
   if (c === "'" || c === '"') {
     const end = readQuote(s, i, c, c === '"');
-    return { delimiter: s.slice(i + 1, end - 1), next: end };
+    return { delimiter: s.slice(i + 1, end - 1), next: end, quoted: true };
   }
   const { word, next } = readWord(s, i);
   if (word.length === 0) return null;
-  return { delimiter: word, next };
+  return { delimiter: word, next, quoted: false };
+}
+
+/**
+ * Scan a single heredoc-body line for command substitutions (`$(...)` and
+ * backticks) outside of quotes. In an unquoted heredoc these execute, so a
+ * `$(rm)` inside the body is a real bypass. Returns the matched rule's
+ * reason if a blocked tool is found, undefined otherwise.
+ */
+function scanHeredocLineForCommandSubs(line: string): string | undefined {
+  let i = 0;
+  let quote: '"' | "'" | null = null;
+  while (i < line.length) {
+    const c = line[i];
+    if (quote) {
+      if (c === "\\" && quote === '"' && i + 1 < line.length) {
+        i += 2;
+        continue;
+      }
+      if (c === quote) {
+        quote = null;
+        i++;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      i++;
+      continue;
+    }
+    if (c === "\\" && i + 1 < line.length) {
+      i += 2;
+      continue;
+    }
+    if (line.startsWith("$(", i)) {
+      const end = skipBalancedParens(line, i, 2);
+      const inner = line.slice(i + 2, end - 1);
+      const reason = detectLegacyTool(inner);
+      if (reason) return reason;
+      i = end;
+      continue;
+    }
+    if (c === "`") {
+      const end = readQuote(line, i, "`", true);
+      const inner = line.slice(i + 1, end - 1);
+      const reason = detectLegacyTool(inner);
+      if (reason) return reason;
+      i = end;
+      continue;
+    }
+    i++;
+  }
+  return undefined;
 }
 
 function skipHeredocBody(
@@ -267,7 +326,8 @@ function skipHeredocBody(
   i: number,
   delimiter: string,
   indented: boolean,
-): number {
+  quoted: boolean,
+): { next: number; reason?: string } {
   let pos = i;
   while (pos <= s.length) {
     const nl = s.indexOf("\n", pos);
@@ -275,32 +335,71 @@ function skipHeredocBody(
     let line = s.slice(pos, end);
     if (indented) line = line.replace(/^\t+/, "");
     if (line === delimiter) {
-      return nl === -1 ? s.length : nl + 1;
+      return { next: nl === -1 ? s.length : nl + 1 };
+    }
+    // In unquoted heredocs, command substitutions execute — scan for
+    // blocked tools inside $(...) and backticks.
+    if (!quoted) {
+      const reason = scanHeredocLineForCommandSubs(line);
+      if (reason) return { next: end, reason };
     }
     if (nl === -1) break;
     pos = nl + 1;
   }
-  return s.length;
+  return { next: s.length };
 }
+
+/** sudo options that consume the next word as their argument. */
+const SUDO_OPTS_WITH_ARG = new Set([
+  "-C",
+  "-D",
+  "-g",
+  "-p",
+  "-R",
+  "-r",
+  "-t",
+  "-U",
+  "-u",
+  "--close-from",
+  "--chdir",
+  "--group",
+  "--prompt",
+  "--chroot",
+  "--role",
+  "--type",
+  "--other-user",
+  "--user",
+]);
 
 export function detectLegacyTool(command: string): string | undefined {
   let i = 0;
   let commandPos = true;
   let sudoNext = false;
+  let skipNextWord = false;
   let redirectTarget = false;
   let heredoc: {
     delimiter: string;
     indented: boolean;
+    quoted: boolean;
     pending: boolean;
   } | null = null;
 
   while (i < command.length) {
     if (heredoc && !heredoc.pending) {
-      i = skipHeredocBody(command, i, heredoc.delimiter, heredoc.indented);
+      const result = skipHeredocBody(
+        command,
+        i,
+        heredoc.delimiter,
+        heredoc.indented,
+        heredoc.quoted,
+      );
+      if (result.reason) return result.reason;
+      i = result.next;
       heredoc = null;
       commandPos = true;
       redirectTarget = false;
       sudoNext = false;
+      skipNextWord = false;
       continue;
     }
 
@@ -319,6 +418,7 @@ export function detectLegacyTool(command: string): string | undefined {
       }
       redirectTarget = false;
       sudoNext = false;
+      skipNextWord = false;
       i++;
       continue;
     }
@@ -331,6 +431,7 @@ export function detectLegacyTool(command: string): string | undefined {
       commandPos = true;
       redirectTarget = false;
       sudoNext = false;
+      skipNextWord = false;
       continue;
     }
 
@@ -341,22 +442,49 @@ export function detectLegacyTool(command: string): string | undefined {
         commandPos = true;
         redirectTarget = false;
         sudoNext = false;
+        skipNextWord = false;
       } else if (op.type === "redirect") {
         redirectTarget = true;
         sudoNext = false;
+        skipNextWord = false;
       } else if (op.type === "heredoc") {
         const delim = readHeredocDelimiter(command, i);
         if (!delim) break;
         heredoc = {
           delimiter: delim.delimiter,
           indented: op.indented,
+          quoted: delim.quoted,
           pending: true,
         };
         i = delim.next;
         commandPos = false;
         redirectTarget = false;
         sudoNext = false;
+        skipNextWord = false;
       }
+      continue;
+    }
+
+    // Brace group opener: `{` followed by whitespace starts a group; the
+    // next word is in command position. Without this, `{ rm; }` evades
+    // detection because `{` is read as a word and `rm` lands in argument
+    // position.
+    if (c === "{" && (i + 1 >= command.length || /\s/.test(command[i + 1]))) {
+      i++;
+      commandPos = true;
+      redirectTarget = false;
+      sudoNext = false;
+      skipNextWord = false;
+      continue;
+    }
+    // Brace group closer: `}` at a word boundary (preceded by whitespace
+    // or a separator) resets command position for the next word.
+    if (c === "}" && (i === 0 || /\s|[;&|()]/.test(command[i - 1]))) {
+      i++;
+      commandPos = true;
+      redirectTarget = false;
+      sudoNext = false;
+      skipNextWord = false;
       continue;
     }
 
@@ -402,11 +530,23 @@ export function detectLegacyTool(command: string): string | undefined {
         continue;
       }
       if (sudoNext) {
-        if (word.startsWith("-")) continue;
+        if (word.startsWith("-")) {
+          // Options that take an argument consume the next word.
+          if (SUDO_OPTS_WITH_ARG.has(word)) skipNextWord = true;
+          continue;
+        }
+        if (skipNextWord) {
+          skipNextWord = false;
+          continue;
+        }
         const reason = matchCommand(word);
         if (reason) return reason;
         sudoNext = false;
       } else {
+        if (skipNextWord) {
+          skipNextWord = false;
+          continue;
+        }
         const reason = matchCommand(word);
         if (reason) return reason;
       }

@@ -6,6 +6,38 @@ export function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Combine a per-request timeout ceiling with an optional caller signal.
+ * Used by every balance/model fetch so a hung endpoint can't stall the UI.
+ */
+export function timeoutSignal(ms: number, signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  return signal ? AbortSignal.any([timeout, signal]) : timeout;
+}
+
+/**
+ * Extract `text` content blocks from a message body (string or block array).
+ * Returns the raw parts; callers join with the separator they need.
+ */
+export function extractTextParts(content: unknown): string[] {
+  if (typeof content === "string") return [content];
+  if (!Array.isArray(content)) return [];
+  const parts: string[] = [];
+  for (const block of content) {
+    if (
+      typeof block === "object" &&
+      block !== null &&
+      "type" in block &&
+      (block as { type: string }).type === "text" &&
+      "text" in block
+    ) {
+      const text = (block as { text?: string }).text;
+      if (typeof text === "string") parts.push(text);
+    }
+  }
+  return parts;
+}
+
 /** Write JSON atomically without exposing a partially written config file. */
 export function writeJsonFileAtomic(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });

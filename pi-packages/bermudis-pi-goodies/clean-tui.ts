@@ -39,6 +39,7 @@ import { readFileSync } from "node:fs";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import { logGoodiesEvent, setGoodiesLogPathForTesting } from "./goodies-log.ts";
+import { describeError } from "./json-file.ts";
 import {
   findSummaryModel,
   getSummaryModel,
@@ -472,8 +473,30 @@ async function summarizeViaProvider(
       reasoning: summaryReasoning(found),
     },
   );
-  // pi-ai encodes request failures in the returned message rather than
-  // throwing; convert so the shared failure/backoff path sees them.
+  return convertSummaryResponse(response, label);
+}
+
+/**
+ * Convert a pi-ai completion response into a summary string or throw the
+ * error shape the shared backoff/log/widget path expects. Extracted from
+ * summarizeViaProvider so the production error-conversion logic — the code
+ * that turns stopReason "aborted"/"error"/empty-content into the Error
+ * shapes every failure test depends on — is testable without mocking the
+ * wire layer.
+ *
+ * - "aborted" → AbortError (per-request abort, not a provider failure)
+ * - "error"   → Error with the provider's errorMessage (truncated) + label
+ * - empty text content → Error diagnosing a thinking-model that ate the budget
+ * - anything else → the joined text content
+ */
+export function convertSummaryResponse(
+  response: {
+    stopReason: string;
+    errorMessage?: string;
+    content: Array<{ type: string; text?: string }>;
+  },
+  label: string,
+): string {
   if (response.stopReason === "aborted") {
     const err = new Error("summary request aborted");
     err.name = "AbortError";
@@ -491,7 +514,7 @@ async function summarizeViaProvider(
     throw new Error(
       `empty summary — is ${label} a thinking model that cannot disable thinking?`,
     );
-  return text; // normalized by the consumer, not here
+  return text;
 }
 
 function activeBackend(): SummaryBackend {
@@ -527,7 +550,7 @@ function logSummaryFailure(
   pauseMs?: number,
   ms?: number,
 ) {
-  const msg = err instanceof Error ? err.message : String(err);
+  const msg = describeError(err);
   const pause = pauseMs
     ? `; pausing summaries ${Math.round(pauseMs / 1000)}s`
     : "";
@@ -688,8 +711,13 @@ function startSummaryRequest(cmd: string): void {
       invalidateRowsForCommand(cmd);
     })
     .catch((err) => {
-      if (!signal.aborted && (err as Error)?.name !== "AbortError")
-        pendingSummaries.delete(cmd);
+      // Always free the slot when the request settled, unless the session
+      // itself was aborted (session_start clears pendingSummaries via .clear()).
+      // The previous guard only deleted on !signal.aborted && !AbortError —
+      // a per-request AbortError (not a session switch) left the command in
+      // pendingSummaries forever, permanently burning a concurrency slot
+      // with zero log output.
+      if (!signal.aborted) pendingSummaries.delete(cmd);
       // Switching sessions aborts in-flight summaries deliberately: that is
       // not a provider failure — neither penalize nor log it.
       if (signal.aborted || (err as Error)?.name === "AbortError") return;
@@ -1131,7 +1159,10 @@ export default function cleanTui(pi: ExtensionAPI): void {
       for (const e of entries) {
         if (!e.result) {
           details.push(
-            theme.fg("warning", `— ${shortenPath(e.args.path)}: pending`),
+            theme.fg(
+              "warning",
+              `— ${shortenPath(e.args.path || "...")}: pending`,
+            ),
           );
           continue;
         }
@@ -1143,7 +1174,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
           .map((l) => theme.fg("toolOutput", l))
           .join("\n");
         const remaining = txt.split("\n").length - 12;
-        let block = `\n${theme.fg("muted", `— ${shortenPath(e.args.path)}`)}:\n${preview}`;
+        let block = `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}:\n${preview}`;
         if (remaining > 0)
           block += `\n${theme.fg("muted", `... ${remaining} more lines`)}`;
         details.push(block);
@@ -1243,7 +1274,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
         .filter((e) => e.result && resultText(e.result as any))
         .map(
           (e) =>
-            `\n${theme.fg("muted", `— ${shortenPath(e.args.path)}`)}: ${theme.fg("error", resultText(e.result as any)!)}`,
+            `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}: ${theme.fg("error", resultText(e.result as any)!)}`,
         )
         .join("");
     },
@@ -1274,7 +1305,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
         .map((e) => {
           const txt = e.result ? resultText(e.result as any) : undefined;
           return txt
-            ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path)}`)}:\n${theme.fg("toolOutput", txt.slice(0, 600))}`
+            ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}:\n${theme.fg("toolOutput", txt.slice(0, 600))}`
             : "";
         })
         .join("");

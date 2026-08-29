@@ -265,6 +265,84 @@ describe("auth transition", () => {
     // Exactly 10 polling lookups, plus the initial session_start refresh.
     expect(apiKeyCalls - refreshCallsAtStart).toBe(10);
   });
+
+  test("anchored /login regex does not match '/logins are bad' (prefix-match bug)", async () => {
+    // Regression: the old regex /^\/(login|logout)(?:\s+(\S+))?/ matched the
+    // prefix of "/logins are bad", arming a spurious auth-transition poller
+    // that triggered keychain polls for a command that isn't /login.
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: ExtensionContext) => unknown
+    >();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const cleared: unknown[] = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = ((timer: unknown) => {
+      cleared.push(timer);
+    }) as typeof globalThis.clearTimeout;
+
+    providerBalance(
+      {
+        on(event, handler) {
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: ExtensionContext) => unknown,
+          );
+        },
+        events: {
+          emit() {},
+          on() {
+            return () => {};
+          },
+        },
+      } as unknown as ExtensionAPI,
+      { setTimeout, clearTimeout, random: () => 0.5 },
+    );
+
+    let apiKeyCalls = 0;
+    const ctx = {
+      mode: "tui",
+      model: { provider: "kilo" },
+      isIdle: () => false,
+      ui: { setFooter() {} },
+      sessionManager: { getBranch: () => [] },
+      modelRegistry: {
+        isUsingOAuth: () => false,
+        getApiKeyForProvider: async () => {
+          apiKeyCalls++;
+          throw new Error("keychain unavailable");
+        },
+      },
+    } as unknown as ExtensionContext;
+
+    const start = handlers.get("session_start");
+    const input = handlers.get("input");
+    if (!start || !input) throw new Error("missing lifecycle handlers");
+
+    start({}, ctx);
+    await Promise.resolve();
+    const timersBeforeInput = scheduled.length;
+    const keyCallsBeforeInput = apiKeyCalls;
+
+    // "/logins are bad" must NOT match — it's not a /login command.
+    input({ text: "/logins are bad" }, ctx);
+    await Promise.resolve();
+
+    // No new timer was scheduled (no auth-transition poller armed).
+    expect(scheduled.length).toBe(timersBeforeInput);
+    // No additional keychain lookups were triggered.
+    expect(apiKeyCalls).toBe(keyCallsBeforeInput);
+
+    // Sanity: a real "/login kilo" DOES arm the poller.
+    input({ text: "/login kilo" }, ctx);
+    await Promise.resolve();
+    expect(scheduled.length).toBeGreaterThan(timersBeforeInput);
+  });
 });
 
 describe("turn_end cadence", () => {

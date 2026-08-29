@@ -44,6 +44,7 @@ import {
 } from "@earendil-works/pi-tui";
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { describeError } from "./json-file.ts";
 
 // State to track fresh session review (where we branched from).
 // Module-level state means only one review can be active at a time.
@@ -421,26 +422,108 @@ async function hasPendingChanges(pi: ExtensionAPI): Promise<boolean> {
 }
 
 /**
- * Parse a PR reference (URL or number) and return the PR number
+ * Parse a PR reference (URL or number) and return the PR number plus an
+ * optional "owner/repo" slug extracted from URL pastes. A bare number
+ * resolves against the current repo (gh default); a URL carries its own
+ * owner/repo, which MUST be forwarded to gh via --repo — without it,
+ * `gh pr view 123` silently resolves against whatever repo the cwd is in,
+ * and a review tool reviewing the wrong repo's diff is its worst failure.
  */
-function parsePrReference(ref: string): number | null {
+export function parsePrReference(ref: string): {
+  prNumber: number;
+  repo?: string;
+} | null {
   const trimmed = ref.trim();
 
-  // Try as a number first
-  const num = parseInt(trimmed, 10);
-  if (!isNaN(num) && num > 0) {
-    return num;
+  // Try as a number first — reject anything that isn't purely numeric
+  // (parseInt("123abc", 10) → 123 would silently accept garbage).
+  if (/^\d+$/.test(trimmed)) {
+    const num = parseInt(trimmed, 10);
+    if (num > 0) return { prNumber: num };
   }
 
   // Try to extract from GitHub URL
   // Formats: https://github.com/owner/repo/pull/123
   //          github.com/owner/repo/pull/123
-  const urlMatch = trimmed.match(/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/);
+  const urlMatch = trimmed.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
   if (urlMatch) {
-    return parseInt(urlMatch[1], 10);
+    const num = parseInt(urlMatch[3], 10);
+    if (num > 0) {
+      // Strip trailing .git if present in the repo segment.
+      const repo = urlMatch[2].replace(/\.git$/, "");
+      return { prNumber: num, repo: `${urlMatch[1]}/${repo}` };
+    }
   }
 
   return null;
+}
+
+/**
+ * Tokenize a command argument string, respecting shell quoting rules.
+ *
+ * - Single quotes: no escaping (backslash is literal, per POSIX).
+ * - Double quotes: backslash escapes the next char.
+ * - Empty quoted strings ("") produce an empty-string token, not nothing.
+ *
+ * Extracted to module level and exported so the pure logic is testable
+ * without spinning up the review command's closure.
+ */
+export function tokenizeArgs(value: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  let hadQuote = false; // tracks whether the current token opened a quote
+
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+
+    if (quote) {
+      // Backslash escapes only inside double quotes; inside single quotes
+      // every character (including backslash) is literal (POSIX shell).
+      if (quote === '"' && char === "\\" && i + 1 < value.length) {
+        current += value[i + 1];
+        i += 1;
+        continue;
+      }
+      if (char === quote) {
+        quote = null;
+        continue;
+      }
+      current += char;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      hadQuote = true;
+      continue;
+    }
+
+    // Outside quotes, backslash escapes the next char (POSIX): `\rm` → `rm`,
+    // `foo\ bar` → `foo bar` (one token).
+    if (char === "\\" && i + 1 < value.length) {
+      current += value[i + 1];
+      i += 1;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current.length > 0 || hadQuote) {
+        tokens.push(current);
+        current = "";
+        hadQuote = false;
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current.length > 0 || hadQuote) {
+    tokens.push(current);
+  }
+
+  return tokens;
 }
 
 /**
@@ -449,14 +532,12 @@ function parsePrReference(ref: string): number | null {
 async function getPrInfo(
   pi: ExtensionAPI,
   prNumber: number,
+  repo?: string,
 ): Promise<{ baseBranch: string; title: string; headBranch: string } | null> {
-  const { stdout, code } = await pi.exec("gh", [
-    "pr",
-    "view",
-    String(prNumber),
-    "--json",
-    "baseRefName,title,headRefName",
-  ]);
+  const args = ["pr", "view", String(prNumber)];
+  if (repo) args.push("--repo", repo);
+  args.push("--json", "baseRefName,title,headRefName");
+  const { stdout, code } = await pi.exec("gh", args);
 
   if (code !== 0) return null;
 
@@ -478,12 +559,11 @@ async function getPrInfo(
 async function checkoutPr(
   pi: ExtensionAPI,
   prNumber: number,
+  repo?: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const { stdout, stderr, code } = await pi.exec("gh", [
-    "pr",
-    "checkout",
-    String(prNumber),
-  ]);
+  const args = ["pr", "checkout", String(prNumber)];
+  if (repo) args.push("--repo", repo);
+  const { stdout, stderr, code } = await pi.exec("gh", args);
 
   if (code !== 0) {
     return {
@@ -699,17 +779,18 @@ export default function reviewExtension(pi: ExtensionAPI) {
       return null;
     }
 
-    const prNumber = parsePrReference(ref);
-    if (!prNumber) {
+    const prRef = parsePrReference(ref);
+    if (!prRef) {
       ctx.ui.notify(
         "Invalid PR reference. Enter a number or GitHub PR URL.",
         "error",
       );
       return null;
     }
+    const { prNumber, repo } = prRef;
 
     ctx.ui.notify(`Fetching PR #${prNumber} info...`, "info");
-    const prInfo = await getPrInfo(pi, prNumber);
+    const prInfo = await getPrInfo(pi, prNumber, repo);
 
     if (!prInfo) {
       ctx.ui.notify(
@@ -726,7 +807,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
     }
 
     ctx.ui.notify(`Checking out PR #${prNumber}...`, "info");
-    const checkoutResult = await checkoutPr(pi, prNumber);
+    const checkoutResult = await checkoutPr(pi, prNumber, repo);
 
     if (!checkoutResult.success) {
       ctx.ui.notify(`Failed to checkout PR: ${checkoutResult.error}`, "error");
@@ -1293,7 +1374,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
           // Clean up state if navigation fails
           reviewOriginId = undefined;
           ctx.ui.notify(
-            `Failed to start review: ${error instanceof Error ? error.message : String(error)}`,
+            `Failed to start review: ${describeError(error)}`,
             "error",
           );
           return false;
@@ -1352,51 +1433,6 @@ export default function reviewExtension(pi: ExtensionAPI) {
     extraInstruction?: string;
     error?: string;
   };
-
-  function tokenizeArgs(value: string): string[] {
-    const tokens: string[] = [];
-    let current = "";
-    let quote: '"' | "'" | null = null;
-
-    for (let i = 0; i < value.length; i++) {
-      const char = value[i];
-
-      if (quote) {
-        if (char === "\\" && i + 1 < value.length) {
-          current += value[i + 1];
-          i += 1;
-          continue;
-        }
-        if (char === quote) {
-          quote = null;
-          continue;
-        }
-        current += char;
-        continue;
-      }
-
-      if (char === '"' || char === "'") {
-        quote = char;
-        continue;
-      }
-
-      if (/\s/.test(char)) {
-        if (current.length > 0) {
-          tokens.push(current);
-          current = "";
-        }
-        continue;
-      }
-
-      current += char;
-    }
-
-    if (current.length > 0) {
-      tokens.push(current);
-    }
-
-    return tokens;
-  }
 
   function parseArgs(args: string | undefined): ParsedReviewArgs {
     if (!args?.trim()) return { target: null };
@@ -1693,7 +1729,7 @@ Instructions:
             .catch((err) =>
               done({
                 cancelled: false,
-                error: err instanceof Error ? err.message : String(err),
+                error: describeError(err),
               }),
             );
 
@@ -1711,7 +1747,7 @@ Instructions:
     } catch (error) {
       return {
         cancelled: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: describeError(error),
       };
     }
   }
@@ -1745,10 +1781,7 @@ Instructions:
           return "cancelled";
         }
       } catch (error) {
-        ctx.ui.notify(
-          `Failed to return: ${error instanceof Error ? error.message : String(error)}`,
-          "error",
-        );
+        ctx.ui.notify(`Failed to return: ${describeError(error)}`, "error");
         return "error";
       }
 

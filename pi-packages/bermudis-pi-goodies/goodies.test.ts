@@ -12,9 +12,16 @@ import {
 } from "./goodies";
 import goodiesDefault from "./goodies";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { readFileSync, unlinkSync, existsSync, mkdtempSync } from "node:fs";
+import {
+  readFileSync,
+  unlinkSync,
+  existsSync,
+  mkdtempSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setGoodiesLogPathForTesting } from "./goodies-log";
 
 let CONFIG_PATH: string;
 
@@ -83,6 +90,70 @@ describe("goodies feature toggles", () => {
     expect(
       JSON.parse(readFileSync(CONFIG_PATH, "utf-8"))["summary-model"],
     ).toBeUndefined();
+  });
+
+  test("corrupt config logs a failure and falls back to defaults", () => {
+    // Regression: a bare catch → {} silently reset every feature with zero
+    // log output, and the next save overwrote the corrupt file, destroying
+    // the evidence. Now the error is logged via reportFailure.
+    const logDir = mkdtempSync(join(tmpdir(), "goodies-log-"));
+    const logPath = join(logDir, "goodies.log");
+    setGoodiesLogPathForTesting(logPath);
+
+    // Write a corrupt config file, then reload via __setConfigPathForTesting
+    // (which calls loadConfig internally).
+    writeFileSync(CONFIG_PATH, "{ this is not valid json,,,");
+    __setConfigPathForTesting(CONFIG_PATH);
+
+    // Defaults: all features enabled.
+    expect(isEnabled("clean-tui")).toBe(true);
+    expect(isEnabled("kilo")).toBe(true);
+
+    // The failure was logged.
+    const log = readFileSync(logPath, "utf-8");
+    expect(log).toContain("config_error");
+    expect(log).toContain("failed to load config");
+
+    setGoodiesLogPathForTesting(undefined);
+  });
+
+  test("missing config file (ENOENT) stays silent and returns defaults", () => {
+    // First run: no goodies.json yet. This is expected, not a failure —
+    // loadConfig must NOT log a config_error for ENOENT.
+    const logDir = mkdtempSync(join(tmpdir(), "goodies-log-"));
+    const logPath = join(logDir, "goodies.log");
+    setGoodiesLogPathForTesting(logPath);
+
+    // Point at a path that doesn't exist yet (no file written).
+    const missingPath = join(
+      mkdtempSync(join(tmpdir(), "goodies-missing-")),
+      "goodies.json",
+    );
+    __setConfigPathForTesting(missingPath);
+
+    expect(isEnabled("clean-tui")).toBe(true);
+
+    // No log entry — ENOENT is not a failure.
+    expect(existsSync(logPath)).toBe(false);
+
+    setGoodiesLogPathForTesting(undefined);
+  });
+
+  test("config is written atomically (temp file + rename, no partial writes)", () => {
+    // The old saveConfig used writeFileSync directly — a crash mid-write
+    // left a truncated goodies.json that the bare catch then silently reset.
+    // writeJsonFileAtomic writes to a temp file and renames, so the config
+    // is either fully old or fully new, never partial.
+    setEnabled("clean-tui", false);
+    const raw = readFileSync(CONFIG_PATH, "utf-8");
+    // The file must be valid JSON (the atomic write completed).
+    const config = JSON.parse(raw);
+    expect(config["clean-tui"]).toBe(false);
+    // No leftover temp files in the directory.
+    const dir = CONFIG_PATH.slice(0, CONFIG_PATH.lastIndexOf("/"));
+    const { readdirSync } = require("node:fs");
+    const files = readdirSync(dir);
+    expect(files).toEqual(["goodies.json"]);
   });
 });
 
