@@ -978,7 +978,7 @@ describe("clean-tui AI summary", () => {
       expect(key.toLowerCase()).not.toContain("reason");
     expect(authedFor).toEqual(["kilo/grok-4-fast-non-reasoning"]);
     expect(wire!.body.messages[0].content[0].text).toContain(
-      "Summarize this shell command in 5-8 words",
+      "Summarize this shell command in less than 13 words",
     );
     expect(wire!.body.messages[0].content[0].text).toContain(
       'cat >> "PsVita/Archive/MIGRATION-LOG.md"',

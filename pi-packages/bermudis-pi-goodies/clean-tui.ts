@@ -306,7 +306,7 @@ interface SummaryBackend {
 // summary no matter how many lines. Above that, any command qualifies —
 // single-line pipelines benefit at least as much as heredocs.
 const SUMMARY_THRESHOLD_CHARS = 80;
-// Five-to-eight words fit in a handful of tokens, but on OpenAI-compatible
+// Up to ~a dozen words fit in a handful of tokens, but on OpenAI-compatible
 // endpoints reasoning and the answer SHARE max_tokens (pi-ai: "a reasoning-
 // heavy turn can consume the whole response and emit no answer") — at the
 // old 30-token cap, gpt-oss running its API-default effort returned an empty
@@ -314,7 +314,7 @@ const SUMMARY_THRESHOLD_CHARS = 80;
 // stop at the answer's natural end, so the raised cap costs them nothing.
 const SUMMARY_MAX_TOKENS = 512;
 const SUMMARY_PROMPT =
-  "Summarize this shell command in 5-8 words, plain English, no quotes, no formatting. " +
+  "Summarize this shell command in less than 13 words, plain English, no quotes, no formatting. " +
   'Examples: "cat >> file << \'EOF\' with 20 lines of log" -> "Appends reboot log to migration file". ' +
   "Command:\n";
 // Provider error bodies are not under our control and flow into console
