@@ -1024,552 +1024,381 @@ export default function cleanTui(pi: ExtensionAPI): void {
     }
   });
 
+  // ── Shared burst-tool skeleton ─────────────────────────────────
+  // Every burst tool (read/bash/write/edit/find/grep/ls) shares one render
+  // skeleton: upsert → burst → leader/follower split → grouped box or solo
+  // box. Per-tool behavior is a spec of formatters. This deletes ~450 lines of
+  // copy-paste and, more importantly, makes the divergence class impossible:
+  // the "one failed row paints the whole burst red" bug was fixed twice for
+  // bash (b80a14d, then the isGrouped?false rule) but the other six tools still
+  // shipped `isGrouped ? entries.some(e => e.isError)` — the shared skeleton
+  // carries the single correct rule for all of them.
+  type BurstToolSpec = {
+    name: string;
+    description: any;
+    parameters: any;
+    /** Bullet line for one entry inside a grouped header. */
+    bullet: (entry: Entry, theme: any) => string;
+    /** Extra lines appended to the grouped header when expanded (or ""). */
+    groupedDetails: (entries: Entry[], theme: any) => string;
+    /** Solo (ungrouped) header line, without expanded output. */
+    soloHeader: (args: any, theme: any) => string;
+    /** Extra lines appended to the solo header when expanded (or ""). */
+    soloExpanded: (entry: Entry, args: any, theme: any) => string;
+    /** Hook run right after upsertEntry (bash: request a summary). */
+    onUpsert?: (entry: Entry, args: any, ctx: any) => void;
+  };
+
+  function registerBurstTool(spec: BurstToolSpec): void {
+    pi.registerTool({
+      name: spec.name,
+      label: spec.name,
+      description: spec.description,
+      parameters: spec.parameters,
+      renderShell: "self",
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
+        const tool = (getBuiltInTools(ctx.cwd) as any)[spec.name];
+        return tool.execute(toolCallId, params, signal, onUpdate);
+      },
+      renderCall(args, theme, ctx: any) {
+        const entry = upsertEntry(
+          ctx.toolCallId,
+          spec.name,
+          args,
+          ctx.invalidate,
+        );
+        spec.onUpsert?.(entry, args, ctx);
+        const burst = getBurstForId(ctx.toolCallId);
+        const isGrouped = burst && burst.entries.length > 1;
+        const isLeader =
+          isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
+        // The burst box is shared by every call in the group, so its background
+        // never takes the error color — a failure (the leader included) is
+        // marked on its own bullet instead. Pending does aggregate: the box
+        // stays in its running state until every call in the burst has landed.
+        // (b80a14d "follow the leader" painted the whole block red whenever the
+        // first call itself failed; this rule — formerly only on bash — now
+        // applies to every burst tool.)
+        const pending = isGrouped
+          ? burst.entries.some((e) => !e.result)
+          : !entry.result;
+        const isError = isGrouped ? false : !!entry.isError;
+
+        if (isGrouped && !isLeader) {
+          // Refresh the leader's header/count. Single hop: a leader's renderCall
+          // never invalidates anything, so this cannot loop.
+          const lead = invalidateById.get(burst.entries[0].toolCallId);
+          if (lead) lead();
+          return new Container();
+        }
+
+        if (isGrouped && isLeader) {
+          let header = `${theme.fg("toolTitle", theme.bold(spec.name))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
+          header += `\n${burst.entries.map((e) => spec.bullet(e, theme)).join("\n")}`;
+          if (ctx.expanded) {
+            const details = spec.groupedDetails(burst.entries, theme);
+            if (details) header += details;
+          }
+          return makeBox(theme, pending, isError, header);
+        }
+
+        // solo
+        let line = spec.soloHeader(args, theme);
+        if (ctx.expanded) {
+          const extra = spec.soloExpanded(entry, args, theme);
+          if (extra) line += `\n${extra}`;
+        }
+        return makeBox(theme, pending, isError, line);
+      },
+      renderResult(result: any, _opts: any, _theme: any, ctx: any) {
+        recordResult(entryById.get(ctx.toolCallId), result, ctx);
+        // All visual work is done in renderCall (unified box); keep the result
+        // slot empty. Images are rendered by Pi's ToolExecutionComponent image
+        // layer even when we return empty here.
+        return new Container();
+      },
+    });
+  }
+
   // ── read ──────────────────────────────────────────────────────
-  pi.registerTool({
+  registerBurstTool({
     name: "read",
-    label: "read",
     description: schemaTools.read.description,
     parameters: schemaTools.read.parameters,
-    renderShell: "self",
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).read.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
-    },
-    renderCall(args, theme, ctx: any) {
-      const entry = upsertEntry(ctx.toolCallId, "read", args, ctx.invalidate);
-      const burst = getBurstForId(ctx.toolCallId);
-      const isGrouped = burst && burst.entries.length > 1;
-      const isLeader =
-        isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
-      const pending = isGrouped
-        ? burst.entries.some((e) => !e.result)
-        : !entry.result;
-      const isError = isGrouped
-        ? burst.entries.some((e) => e.isError)
-        : !!entry.isError;
-
-      if (isGrouped && !isLeader) {
-        // Refresh the leader's header/count. Single hop: a leader's renderCall
-        // never invalidates anything, so this cannot loop.
-        const lead = invalidateById.get(burst.entries[0].toolCallId);
-        if (lead) lead();
-        return new Container();
-      }
-
-      if (isGrouped && isLeader) {
-        const count = burst.entries.length;
-        let header = `${theme.fg("toolTitle", theme.bold("read"))} ${theme.fg("muted", `×${count}`)}`;
-        const bullets = burst.entries
-          .map((e) => formatReadBullet(e, theme))
-          .join("\n");
-        header += `\n${bullets}`;
-        if (ctx.expanded) {
-          const details: string[] = [];
-          for (const e of burst.entries) {
-            if (!e.result) {
-              details.push(
-                theme.fg("warning", `— ${shortenPath(e.args.path)}: pending`),
-              );
-              continue;
-            }
-            const txt = resultText(e.result as any);
-            if (!txt) continue;
-            const preview = txt
-              .split("\n")
-              .slice(0, 12)
-              .map((l) => theme.fg("toolOutput", l))
-              .join("\n");
-            const remaining = txt.split("\n").length - 12;
-            let block = `\n${theme.fg("muted", `— ${shortenPath(e.args.path)}`)}:\n${preview}`;
-            if (remaining > 0)
-              block += `\n${theme.fg("muted", `... ${remaining} more lines`)}`;
-            details.push(block);
-          }
-          if (details.length) header += `\n${details.join("\n")}`;
+    bullet: formatReadBullet,
+    groupedDetails(entries, theme) {
+      const details: string[] = [];
+      for (const e of entries) {
+        if (!e.result) {
+          details.push(
+            theme.fg("warning", `— ${shortenPath(e.args.path)}: pending`),
+          );
+          continue;
         }
-        return makeBox(theme, pending, isError, header);
+        const txt = resultText(e.result as any);
+        if (!txt) continue;
+        const preview = txt
+          .split("\n")
+          .slice(0, 12)
+          .map((l) => theme.fg("toolOutput", l))
+          .join("\n");
+        const remaining = txt.split("\n").length - 12;
+        let block = `\n${theme.fg("muted", `— ${shortenPath(e.args.path)}`)}:\n${preview}`;
+        if (remaining > 0)
+          block += `\n${theme.fg("muted", `... ${remaining} more lines`)}`;
+        details.push(block);
       }
-
-      // solo
-      let line = `${theme.fg("toolTitle", theme.bold("read"))} ${formatReadHeader(args, theme)}`;
-      if (ctx.expanded && entry.result) {
-        const txt = resultText(entry.result as any);
-        if (txt) {
-          const preview = txt
+      return details.length ? `\n${details.join("\n")}` : "";
+    },
+    soloHeader(args, theme) {
+      return `${theme.fg("toolTitle", theme.bold("read"))} ${formatReadHeader(args, theme)}`;
+    },
+    soloExpanded(entry, _args, theme) {
+      if (!entry.result) return "";
+      const txt = resultText(entry.result as any);
+      return txt
+        ? txt
             .split("\n")
             .map((l) => theme.fg("toolOutput", l))
-            .join("\n");
-          line += `\n${preview}`;
-        }
-      }
-      return makeBox(theme, pending, isError, line);
-    },
-    renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      recordResult(entryById.get(ctx.toolCallId), result, ctx);
-      // All visual work is done in renderCall (unified box); keep result slot empty
-      // Images are rendered by Pi's ToolExecutionComponent image layer even when we return empty here
-      return new Container();
+            .join("\n")
+        : "";
     },
   });
 
   // ── bash ──────────────────────────────────────────────────────
-  pi.registerTool({
+  registerBurstTool({
     name: "bash",
-    label: "bash",
     description: schemaTools.bash.description,
     parameters: schemaTools.bash.parameters,
-    renderShell: "self",
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).bash.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
-    },
-    renderCall(args, theme, ctx: any) {
-      // Upsert before requestSummary so the stamp sees this row's entry.
-      const entry = upsertEntry(ctx.toolCallId, "bash", args, ctx.invalidate);
+    bullet: formatBashBullet,
+    onUpsert(_entry, args, ctx) {
+      // Upsert happened just above, so the stamp sees this row's entry.
       // Request only when args are COMPLETE: pi re-renders each row as the
       // JSON args stream in, and every partial command longer than the
       // threshold used to fire its own request — truncated, undisplayable,
       // and queue-blocking. The complete command's request then landed so
       // late the freshness window had closed: bursts summarized their first
-      // row only. argsComplete is undefined in the test harness → request.
+      // row only. argsComplete is true in the test harness → request.
       if (ctx.argsComplete !== false && args.command)
         requestSummary(args.command);
-      const burst = getBurstForId(ctx.toolCallId);
-      const isGrouped = burst && burst.entries.length > 1;
-      const isLeader =
-        isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
-      // The burst box is shared by every call in the group, so its background
-      // never takes the error color — a failure (the leader included) is
-      // marked on its own bullet instead (formatBashBullet). "Follow the
-      // leader's status" (b80a14d) still painted the whole block red whenever
-      // the first call itself was the one that failed. Pending does
-      // aggregate: the box stays in its running state until every call in
-      // the burst has landed.
-      const pending = isGrouped
-        ? burst.entries.some((e) => !e.result)
-        : !entry.result;
-      const isError = isGrouped ? false : !!entry.isError;
-
-      if (isGrouped && !isLeader) {
-        // Refresh the leader's header/count. Single hop: a leader's renderCall
-        // never invalidates anything, so this cannot loop.
-        const lead = invalidateById.get(burst.entries[0].toolCallId);
-        if (lead) lead();
-        return new Container();
-      }
-
-      if (isGrouped && isLeader) {
-        const count = burst.entries.length;
-        let header = `${theme.fg("toolTitle", theme.bold("bash"))} ${theme.fg("muted", `×${count}`)}`;
-        header += `\n${burst.entries.map((e) => formatBashBullet(e, theme)).join("\n")}`;
-        if (ctx.expanded) {
-          const details: string[] = [];
-          for (const e of burst.entries) {
-            if (!e.result) {
-              details.push(
-                theme.fg(
-                  "warning",
-                  `— $ ${formatBashCommand(e.args.command || "...", theme, 40)}: pending`,
-                ),
-              );
-              continue;
-            }
-            const txt = resultText(e.result as any)?.trim();
-            if (!txt) continue;
-            const preview = txt
-              .split("\n")
-              .slice(0, 12)
-              .map((l) => theme.fg("toolOutput", l))
-              .join("\n");
-            details.push(
-              `\n${theme.fg("muted", `— $ ${formatBashCommand(e.args.command || "...", theme, 40)}`)}:\n${preview}`,
-            );
-          }
-          if (details.length) header += `\n${details.join("\n")}`;
+    },
+    groupedDetails(entries, theme) {
+      const details: string[] = [];
+      for (const e of entries) {
+        if (!e.result) {
+          details.push(
+            theme.fg(
+              "warning",
+              `— $ ${formatBashCommand(e.args.command || "...", theme, 40)}: pending`,
+            ),
+          );
+          continue;
         }
-        return makeBox(theme, pending, isError, header);
+        const txt = resultText(e.result as any)?.trim();
+        if (!txt) continue;
+        const preview = txt
+          .split("\n")
+          .slice(0, 12)
+          .map((l) => theme.fg("toolOutput", l))
+          .join("\n");
+        details.push(
+          `\n${theme.fg("muted", `— $ ${formatBashCommand(e.args.command || "...", theme, 40)}`)}:\n${preview}`,
+        );
       }
-
+      return details.length ? `\n${details.join("\n")}` : "";
+    },
+    soloHeader(args, theme) {
       const suffix = args.timeout
         ? theme.fg("muted", ` (timeout ${args.timeout}s)`)
         : "";
-      let line = `${theme.fg("toolTitle", theme.bold("$"))} ${formatBashHeader(args, theme)}${suffix}`;
-      if (ctx.expanded && args.command && args.command.includes("\n")) {
-        // Header only showed the first line — reveal the full command.
-        line += `\n${theme.fg("toolOutput", args.command)}`;
-      }
-      if (ctx.expanded && entry.result) {
+      return `${theme.fg("toolTitle", theme.bold("$"))} ${formatBashHeader(args, theme)}${suffix}`;
+    },
+    soloExpanded(entry, args, theme) {
+      const parts: string[] = [];
+      // Header only showed the first line — reveal the full command.
+      if (args.command && args.command.includes("\n"))
+        parts.push(theme.fg("toolOutput", args.command));
+      if (entry.result) {
         const txt = resultText(entry.result as any)?.trim();
         if (txt)
-          line += `\n${txt
-            .split("\n")
-            .map((l: string) => theme.fg("toolOutput", l))
-            .join("\n")}`;
+          parts.push(
+            txt
+              .split("\n")
+              .map((l: string) => theme.fg("toolOutput", l))
+              .join("\n"),
+          );
       }
-      return makeBox(theme, pending, isError, line);
-    },
-    renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      recordResult(entryById.get(ctx.toolCallId), result, ctx);
-      return new Container();
+      return parts.join("\n");
     },
   });
 
   // ── write ─────────────────────────────────────────────────────
-  pi.registerTool({
+  registerBurstTool({
     name: "write",
-    label: "write",
     description: schemaTools.write.description,
     parameters: schemaTools.write.parameters,
-    renderShell: "self",
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).write.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
+    bullet: formatWriteBullet,
+    groupedDetails(entries, theme) {
+      return entries
+        .filter((e) => e.result && resultText(e.result as any))
+        .map(
+          (e) =>
+            `\n${theme.fg("muted", `— ${shortenPath(e.args.path)}`)}: ${theme.fg("error", resultText(e.result as any)!)}`,
+        )
+        .join("");
     },
-    renderCall(args, theme, ctx: any) {
-      const entry = upsertEntry(ctx.toolCallId, "write", args, ctx.invalidate);
-      const burst = getBurstForId(ctx.toolCallId);
-      const isGrouped = burst && burst.entries.length > 1;
-      const isLeader =
-        isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
-      const pending = isGrouped
-        ? burst.entries.some((e) => !e.result)
-        : !entry.result;
-      const isError = isGrouped
-        ? burst.entries.some((e) => e.isError)
-        : !!entry.isError;
-      if (isGrouped && !isLeader) {
-        // Refresh the leader's header/count. Single hop: a leader's renderCall
-        // never invalidates anything, so this cannot loop.
-        const lead = invalidateById.get(burst.entries[0].toolCallId);
-        if (lead) lead();
-        return new Container();
-      }
-      if (isGrouped && isLeader) {
-        let header = `${theme.fg("toolTitle", theme.bold("write"))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
-        header += `\n${burst.entries.map((e) => formatWriteBullet(e, theme)).join("\n")}`;
-        if (ctx.expanded) {
-          const details = burst.entries
-            .filter((e) => e.result && resultText(e.result as any))
-            .map(
-              (e) =>
-                `\n${theme.fg("muted", `— ${shortenPath(e.args.path)}`)}: ${theme.fg("error", resultText(e.result as any)!)}`,
-            )
-            .join("");
-          if (details) header += details;
-        }
-        return makeBox(theme, pending, isError, header);
-      }
+    soloHeader(args, theme) {
       const path = shortenPath(args.path || "");
       const display = path
         ? theme.fg("accent", path)
         : theme.fg("toolOutput", "...");
       const lines = args.content ? args.content.split("\n").length : 0;
       const info = lines > 0 ? theme.fg("muted", ` (${lines} lines)`) : "";
-      let line = `${theme.fg("toolTitle", theme.bold("write"))} ${display}${info}`;
-      if (ctx.expanded && entry.result) {
-        const txt = resultText(entry.result as any);
-        if (txt) line += `\n${theme.fg("error", txt)}`;
-      }
-      return makeBox(theme, pending, isError, line);
+      return `${theme.fg("toolTitle", theme.bold("write"))} ${display}${info}`;
     },
-    renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      recordResult(entryById.get(ctx.toolCallId), result, ctx);
-      return new Container();
+    soloExpanded(entry, _args, theme) {
+      if (!entry.result) return "";
+      const txt = resultText(entry.result as any);
+      return txt ? theme.fg("error", txt) : "";
     },
   });
 
   // ── edit ──────────────────────────────────────────────────────
-  pi.registerTool({
+  registerBurstTool({
     name: "edit",
-    label: "edit",
     description: schemaTools.edit.description,
     parameters: schemaTools.edit.parameters,
-    renderShell: "self",
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).edit.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
+    bullet: formatEditBullet,
+    groupedDetails(entries, theme) {
+      return entries
+        .map((e) => {
+          const txt = e.result ? resultText(e.result as any) : undefined;
+          return txt
+            ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path)}`)}:\n${theme.fg("toolOutput", txt.slice(0, 600))}`
+            : "";
+        })
+        .join("");
     },
-    renderCall(args, theme, ctx: any) {
-      const entry = upsertEntry(ctx.toolCallId, "edit", args, ctx.invalidate);
-      const burst = getBurstForId(ctx.toolCallId);
-      const isGrouped = burst && burst.entries.length > 1;
-      const isLeader =
-        isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
-      const pending = isGrouped
-        ? burst.entries.some((e) => !e.result)
-        : !entry.result;
-      const isError = isGrouped
-        ? burst.entries.some((e) => e.isError)
-        : !!entry.isError;
-      if (isGrouped && !isLeader) {
-        // Refresh the leader's header/count. Single hop: a leader's renderCall
-        // never invalidates anything, so this cannot loop.
-        const lead = invalidateById.get(burst.entries[0].toolCallId);
-        if (lead) lead();
-        return new Container();
-      }
-      if (isGrouped && isLeader) {
-        let header = `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
-        header += `\n${burst.entries.map((e) => formatEditBullet(e, theme)).join("\n")}`;
-        if (ctx.expanded) {
-          const details = burst.entries
-            .map((e) => {
-              const txt = e.result ? resultText(e.result as any) : undefined;
-              return txt
-                ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path)}`)}:\n${theme.fg("toolOutput", txt.slice(0, 600))}`
-                : "";
-            })
-            .join("");
-          if (details) header += details;
-        }
-        return makeBox(theme, pending, isError, header);
-      }
-      let line = `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", shortenPath(args.path || "..."))}`;
-      if (ctx.expanded && entry.result) {
-        const txt = resultText(entry.result as any);
-        if (txt) line += `\n${theme.fg("toolOutput", txt)}`;
-      }
-      return makeBox(theme, pending, isError, line);
+    soloHeader(args, theme) {
+      return `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", shortenPath(args.path || "..."))}`;
     },
-    renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      recordResult(entryById.get(ctx.toolCallId), result, ctx);
-      return new Container();
+    soloExpanded(entry, _args, theme) {
+      if (!entry.result) return "";
+      const txt = resultText(entry.result as any);
+      return txt ? theme.fg("toolOutput", txt) : "";
     },
   });
 
   // ── find ──────────────────────────────────────────────────────
-  pi.registerTool({
+  registerBurstTool({
     name: "find",
-    label: "find",
     description: schemaTools.find.description,
     parameters: schemaTools.find.parameters,
-    renderShell: "self",
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).find.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
+    bullet: formatFindBullet,
+    groupedDetails(entries, theme) {
+      return entries
+        .map((e) => {
+          const txt = e.result
+            ? resultText(e.result as any)?.trim()
+            : undefined;
+          return txt
+            ? `\n${theme.fg("muted", `— ${e.args.pattern}`)}:\n${txt
+                .split("\n")
+                .slice(0, 10)
+                .map((l) => theme.fg("toolOutput", l))
+                .join("\n")}`
+            : "";
+        })
+        .join("");
     },
-    renderCall(args, theme, ctx: any) {
-      const entry = upsertEntry(ctx.toolCallId, "find", args, ctx.invalidate);
-      const burst = getBurstForId(ctx.toolCallId);
-      const isGrouped = burst && burst.entries.length > 1;
-      const isLeader =
-        isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
-      const pending = isGrouped
-        ? burst.entries.some((e) => !e.result)
-        : !entry.result;
-      const isError = isGrouped
-        ? burst.entries.some((e) => e.isError)
-        : !!entry.isError;
-      if (isGrouped && !isLeader) {
-        // Refresh the leader's header/count. Single hop: a leader's renderCall
-        // never invalidates anything, so this cannot loop.
-        const lead = invalidateById.get(burst.entries[0].toolCallId);
-        if (lead) lead();
-        return new Container();
-      }
-      if (isGrouped && isLeader) {
-        let header = `${theme.fg("toolTitle", theme.bold("find"))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
-        header += `\n${burst.entries.map((e) => formatFindBullet(e, theme)).join("\n")}`;
-        if (ctx.expanded) {
-          const details = burst.entries
-            .map((e) => {
-              const txt = e.result
-                ? resultText(e.result as any)?.trim()
-                : undefined;
-              return txt
-                ? `\n${theme.fg("muted", `— ${e.args.pattern}`)}:\n${txt
-                    .split("\n")
-                    .slice(0, 10)
-                    .map((l) => theme.fg("toolOutput", l))
-                    .join("\n")}`
-                : "";
-            })
-            .join("");
-          if (details) header += details;
-        }
-        return makeBox(theme, pending, isError, header);
-      }
-      let line = `${theme.fg("toolTitle", theme.bold("find"))} ${theme.fg("accent", args.pattern || "")}${theme.fg("toolOutput", ` in ${shortenPath(args.path || ".")}`)}`;
-      if (ctx.expanded && entry.result) {
-        const txt = resultText(entry.result as any)?.trim();
-        if (txt)
-          line += `\n${txt
+    soloHeader(args, theme) {
+      return `${theme.fg("toolTitle", theme.bold("find"))} ${theme.fg("accent", args.pattern || "")}${theme.fg("toolOutput", ` in ${shortenPath(args.path || ".")}`)}`;
+    },
+    soloExpanded(entry, _args, theme) {
+      if (!entry.result) return "";
+      const txt = resultText(entry.result as any)?.trim();
+      return txt
+        ? txt
             .split("\n")
             .map((l) => theme.fg("toolOutput", l))
-            .join("\n")}`;
-      }
-      return makeBox(theme, pending, isError, line);
-    },
-    renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      recordResult(entryById.get(ctx.toolCallId), result, ctx);
-      return new Container();
+            .join("\n")
+        : "";
     },
   });
 
   // ── grep ──────────────────────────────────────────────────────
-  pi.registerTool({
+  registerBurstTool({
     name: "grep",
-    label: "grep",
     description: schemaTools.grep.description,
     parameters: schemaTools.grep.parameters,
-    renderShell: "self",
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).grep.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
+    bullet: formatGrepBullet,
+    groupedDetails(entries, theme) {
+      return entries
+        .map((e) => {
+          const txt = e.result
+            ? resultText(e.result as any)?.trim()
+            : undefined;
+          return txt
+            ? `\n${theme.fg("muted", `— /${e.args.pattern}/`)}:\n${txt
+                .split("\n")
+                .slice(0, 10)
+                .map((l) => theme.fg("toolOutput", l))
+                .join("\n")}`
+            : "";
+        })
+        .join("");
     },
-    renderCall(args, theme, ctx: any) {
-      const entry = upsertEntry(ctx.toolCallId, "grep", args, ctx.invalidate);
-      const burst = getBurstForId(ctx.toolCallId);
-      const isGrouped = burst && burst.entries.length > 1;
-      const isLeader =
-        isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
-      const pending = isGrouped
-        ? burst.entries.some((e) => !e.result)
-        : !entry.result;
-      const isError = isGrouped
-        ? burst.entries.some((e) => e.isError)
-        : !!entry.isError;
-      if (isGrouped && !isLeader) {
-        // Refresh the leader's header/count. Single hop: a leader's renderCall
-        // never invalidates anything, so this cannot loop.
-        const lead = invalidateById.get(burst.entries[0].toolCallId);
-        if (lead) lead();
-        return new Container();
-      }
-      if (isGrouped && isLeader) {
-        let header = `${theme.fg("toolTitle", theme.bold("grep"))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
-        header += `\n${burst.entries.map((e) => formatGrepBullet(e, theme)).join("\n")}`;
-        if (ctx.expanded) {
-          const details = burst.entries
-            .map((e) => {
-              const txt = e.result
-                ? resultText(e.result as any)?.trim()
-                : undefined;
-              return txt
-                ? `\n${theme.fg("muted", `— /${e.args.pattern}/`)}:\n${txt
-                    .split("\n")
-                    .slice(0, 10)
-                    .map((l) => theme.fg("toolOutput", l))
-                    .join("\n")}`
-                : "";
-            })
-            .join("");
-          if (details) header += details;
-        }
-        return makeBox(theme, pending, isError, header);
-      }
+    soloHeader(args, theme) {
       let line = `${theme.fg("toolTitle", theme.bold("grep"))} ${theme.fg("accent", `/${args.pattern || ""}/`)}${theme.fg("toolOutput", ` in ${shortenPath(args.path || ".")}`)}`;
       if (args.glob) line += theme.fg("toolOutput", ` (${args.glob})`);
-      if (ctx.expanded && entry.result) {
-        const txt = resultText(entry.result as any)?.trim();
-        if (txt)
-          line += `\n${txt
+      return line;
+    },
+    soloExpanded(entry, _args, theme) {
+      if (!entry.result) return "";
+      const txt = resultText(entry.result as any)?.trim();
+      return txt
+        ? txt
             .split("\n")
             .map((l) => theme.fg("toolOutput", l))
-            .join("\n")}`;
-      }
-      return makeBox(theme, pending, isError, line);
-    },
-    renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      recordResult(entryById.get(ctx.toolCallId), result, ctx);
-      return new Container();
+            .join("\n")
+        : "";
     },
   });
 
   // ── ls ────────────────────────────────────────────────────────
-  pi.registerTool({
+  registerBurstTool({
     name: "ls",
-    label: "ls",
     description: schemaTools.ls.description,
     parameters: schemaTools.ls.parameters,
-    renderShell: "self",
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getBuiltInTools(ctx.cwd).ls.execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-      );
+    bullet: formatLsBullet,
+    groupedDetails(entries, theme) {
+      return entries
+        .map((e) => {
+          const txt = e.result
+            ? resultText(e.result as any)?.trim()
+            : undefined;
+          return txt
+            ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path || ".")}`)}:\n${txt
+                .split("\n")
+                .slice(0, 10)
+                .map((l) => theme.fg("toolOutput", l))
+                .join("\n")}`
+            : "";
+        })
+        .join("");
     },
-    renderCall(args, theme, ctx: any) {
-      const entry = upsertEntry(ctx.toolCallId, "ls", args, ctx.invalidate);
-      const burst = getBurstForId(ctx.toolCallId);
-      const isGrouped = burst && burst.entries.length > 1;
-      const isLeader =
-        isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
-      const pending = isGrouped
-        ? burst.entries.some((e) => !e.result)
-        : !entry.result;
-      const isError = isGrouped
-        ? burst.entries.some((e) => e.isError)
-        : !!entry.isError;
-      if (isGrouped && !isLeader) {
-        // Refresh the leader's header/count. Single hop: a leader's renderCall
-        // never invalidates anything, so this cannot loop.
-        const lead = invalidateById.get(burst.entries[0].toolCallId);
-        if (lead) lead();
-        return new Container();
-      }
-      if (isGrouped && isLeader) {
-        let header = `${theme.fg("toolTitle", theme.bold("ls"))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
-        header += `\n${burst.entries.map((e) => formatLsBullet(e, theme)).join("\n")}`;
-        if (ctx.expanded) {
-          const details = burst.entries
-            .map((e) => {
-              const txt = e.result
-                ? resultText(e.result as any)?.trim()
-                : undefined;
-              return txt
-                ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path || ".")}`)}:\n${txt
-                    .split("\n")
-                    .slice(0, 10)
-                    .map((l) => theme.fg("toolOutput", l))
-                    .join("\n")}`
-                : "";
-            })
-            .join("");
-          if (details) header += details;
-        }
-        return makeBox(theme, pending, isError, header);
-      }
-      let line = `${theme.fg("toolTitle", theme.bold("ls"))} ${theme.fg("accent", shortenPath(args.path || "."))}`;
-      if (ctx.expanded && entry.result) {
-        const txt = resultText(entry.result as any)?.trim();
-        if (txt)
-          line += `\n${txt
+    soloHeader(args, theme) {
+      return `${theme.fg("toolTitle", theme.bold("ls"))} ${theme.fg("accent", shortenPath(args.path || "."))}`;
+    },
+    soloExpanded(entry, _args, theme) {
+      if (!entry.result) return "";
+      const txt = resultText(entry.result as any)?.trim();
+      return txt
+        ? txt
             .split("\n")
             .map((l) => theme.fg("toolOutput", l))
-            .join("\n")}`;
-      }
-      return makeBox(theme, pending, isError, line);
-    },
-    renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      recordResult(entryById.get(ctx.toolCallId), result, ctx);
-      return new Container();
+            .join("\n")
+        : "";
     },
   });
 }

@@ -1480,6 +1480,47 @@ describe("clean-tui massive commands", () => {
     expect(textOf(box)).toContain("skills add -g content-retrieval");
   });
 
+  test("a failed leader does not paint the whole burst red (every non-bash tool)", () => {
+    // The "one failed row paints the whole burst red" bug was fixed twice for
+    // bash but the other six tools still shipped `isGrouped ? entries.some(e =>
+    // e.isError)`. After extracting the shared skeleton, every burst tool
+    // carries the single correct rule: the grouped box never takes the error
+    // color, whichever call failed. This guards against the divergence class
+    // regressing for any tool.
+    const taggingTheme: Theme = {
+      fg: (_c, t) => t,
+      bg: (c, t) => `<${c}>${t}`,
+      bold: (t) => t,
+    };
+    const cases: Array<{ tool: string; args: Record<string, string> }> = [
+      { tool: "read", args: { path: "/tmp/a.ts" } },
+      { tool: "write", args: { path: "/tmp/a.ts", content: "x" } },
+      { tool: "edit", args: { path: "/tmp/a.ts" } },
+      { tool: "find", args: { pattern: "*.ts", path: "." } },
+      { tool: "grep", args: { pattern: "foo", path: "." } },
+      { tool: "ls", args: { path: "." } },
+    ];
+    for (const { tool, args } of cases) {
+      const h = new PiHarness({ theme: taggingTheme });
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const a = h.row(tool, `a-${tool}`);
+      const b = h.row(tool, `b-${tool}`);
+      a.setArgs(args);
+      b.setArgs(args);
+      a.setResult({ content: ["boom"], isError: true });
+      b.setResult({ content: ["ok"] });
+      // Grouping must hold (else the failed solo row would go toolErrorBg) AND
+      // the box must not take the error color (the bug being guarded against).
+      expect(textOf(a.lastCallComponent)).toContain(`${tool} ×2`);
+      const bg = (
+        a.lastCallComponent as unknown as { bgFn?: (s: string) => string }
+      ).bgFn?.("probe");
+      expect(bg).toBe("<toolSuccessBg>probe");
+    }
+  });
+
   test("burst box stays pending until every call in the burst lands", () => {
     const taggingTheme: Theme = {
       fg: (_c, t) => t,
