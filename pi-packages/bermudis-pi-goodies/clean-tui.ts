@@ -399,8 +399,7 @@ function normalizeSummary(text: string): string {
   return text
     .replace(/^["']|["']$/g, "")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, SUMMARY_THRESHOLD_CHARS);
+    .trim();
 }
 
 // Normalization happens here — in the consumer — rather than inside a
@@ -881,10 +880,9 @@ function formatBashCommand(cmd: string, theme: any, cap: number): string {
   return out;
 }
 
-// Display width a bullet's command text may occupy before ellipsizing.
-// Matches the summary floor: a command that qualified for summarization is
-// exactly the kind that needs the full 80 columns here too.
-const BASH_BULLET_WIDTH = SUMMARY_THRESHOLD_CHARS;
+// Display width a bullet's command text may occupy before ellipsizing:
+// 99 characters plus the ellipsis itself.
+const BASH_BULLET_WIDTH = 100;
 
 function formatBashHeader(args: any, theme: any): string {
   const cmd = args.command || "...";
@@ -894,15 +892,13 @@ function formatBashHeader(args: any, theme: any): string {
   if (isSummarizable(cmd) && summaryCache.has(cmd)) {
     return theme.fg("accent", summaryCache.get(cmd)!);
   }
-  // Cap must match BASH_BULLET_WIDTH, not exceed it: when a summary lands it
-  // replaces this text, and summaries are capped at SUMMARY_THRESHOLD_CHARS.
-  // A larger raw cap means the raw header can wrap where the summary won't,
-  // so the swap shrinks total line count mid-run — and pi-tui answers any
-  // drop below its high-water mark with a full clear-screen + scrollback wipe
-  // (clearOnShrink), i.e. a visible full-screen flash per summarized command
-  // (reproduced in panes narrower than ~124 cols; see clean-tui.test.ts
-  // "summary swap is height-neutral at 110 columns"). Equal caps keep the
-  // swap height-neutral wherever 80 columns fit.
+  // The raw cap is the flicker guard: summaries render uncapped, so a
+  // landing summary can grow this line but never shrink it — pi-tui answers
+  // only the shrink direction with a full clear-screen + scrollback wipe
+  // (clearOnShrink), i.e. the visible full-screen flash per summarized
+  // command (the 0.11.x regression; see clean-tui.test.ts "summary swap is
+  // height-neutral at 110 columns"). Wherever the capped raw line fits on
+  // one terminal row, the swap keeps or adds rows.
   return formatBashCommand(cmd, theme, BASH_BULLET_WIDTH);
 }
 
@@ -919,7 +915,7 @@ function formatBashBullet(entry: Entry, theme: any): string {
   const nl = cmd.indexOf("\n");
   let head = nl === -1 ? cmd : cmd.slice(0, nl);
   if (head.length > BASH_BULLET_WIDTH)
-    head = head.slice(0, BASH_BULLET_WIDTH) + "…";
+    head = head.slice(0, BASH_BULLET_WIDTH - 1) + "…";
   let out = `  ${bullet}${accent(head)}`;
   if (nl !== -1) {
     const extra = cmd.split("\n").length - 1;
@@ -1102,7 +1098,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
     /** Extra lines appended to the grouped header when expanded (or ""). */
     groupedDetails: (entries: Entry[], theme: any) => string;
     /** Solo (ungrouped) header line, without expanded output. */
-    soloHeader: (args: any, theme: any) => string;
+    soloHeader: (args: any, theme: any, ctx: any) => string;
     /** Extra lines appended to the solo header when expanded (or ""). */
     soloExpanded: (entry: Entry, args: any, theme: any) => string;
     /** Hook run right after upsertEntry (bash: request a summary). */
@@ -1163,7 +1159,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
         }
 
         // solo
-        let line = spec.soloHeader(args, theme);
+        let line = spec.soloHeader(args, theme, ctx);
         if (ctx.expanded) {
           const extra = spec.soloExpanded(entry, args, theme);
           if (extra) line += `\n${extra}`;
@@ -1248,50 +1244,48 @@ export default function cleanTui(pi: ExtensionAPI): void {
     groupedDetails(entries, theme) {
       const details: string[] = [];
       for (const e of entries) {
+        // Expanded details show each call's full command, uncapped — same
+        // rule as the solo expanded header. Output appends when present;
+        // empty output still reveals the command it came from.
+        const cmd = theme.fg("accent", e.args.command || "...");
         if (!e.result) {
-          details.push(
-            theme.fg(
-              "warning",
-              `— $ ${formatBashCommand(e.args.command || "...", theme, 40)}: pending`,
-            ),
-          );
+          details.push(theme.fg("warning", `— $ ${cmd}: pending`));
           continue;
         }
         const txt = resultText(e.result as any)?.trim();
-        if (!txt) continue;
+        if (!txt) {
+          details.push(`\n${theme.fg("muted", `— $ ${cmd}`)}`);
+          continue;
+        }
         const preview = txt
           .split("\n")
           .slice(0, 12)
           .map((l) => theme.fg("toolOutput", l))
           .join("\n");
-        details.push(
-          `\n${theme.fg("muted", `— $ ${formatBashCommand(e.args.command || "...", theme, 40)}`)}:\n${preview}`,
-        );
+        details.push(`\n${theme.fg("muted", `— $ ${cmd}`)}:\n${preview}`);
       }
       return details.length ? `\n${details.join("\n")}` : "";
     },
-    soloHeader(args, theme) {
+    soloHeader(args, theme, ctx) {
       const suffix = args.timeout
         ? theme.fg("muted", ` (timeout ${args.timeout}s)`)
         : "";
+      // Expanded shows the raw truth: the full command, uncapped — the
+      // summary and the (+N lines) hint are compact-view aids, and the whole
+      // point of ctrl+o is to reveal what actually ran.
+      if (ctx?.expanded)
+        return `${theme.fg("toolTitle", theme.bold("$"))} ${theme.fg("accent", args.command || "...")}${suffix}`;
       return `${theme.fg("toolTitle", theme.bold("$"))} ${formatBashHeader(args, theme)}${suffix}`;
     },
-    soloExpanded(entry, args, theme) {
-      const parts: string[] = [];
-      // Header only showed the first line — reveal the full command.
-      if (args.command && args.command.includes("\n"))
-        parts.push(theme.fg("toolOutput", args.command));
-      if (entry.result) {
-        const txt = resultText(entry.result as any)?.trim();
-        if (txt)
-          parts.push(
-            txt
-              .split("\n")
-              .map((l: string) => theme.fg("toolOutput", l))
-              .join("\n"),
-          );
-      }
-      return parts.join("\n");
+    soloExpanded(entry, _args, theme) {
+      // The expanded header carries the full command; this adds the output.
+      if (!entry.result) return "";
+      const txt = resultText(entry.result as any)?.trim();
+      if (!txt) return "";
+      return txt
+        .split("\n")
+        .map((l: string) => theme.fg("toolOutput", l))
+        .join("\n");
     },
   });
 

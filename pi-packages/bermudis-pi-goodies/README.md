@@ -11,7 +11,7 @@ extensions. One entry point, eleven independent features.
 | `zed`              | `/z`                          | Open Zed editor on the current working directory.                                                                                               |
 | `prefer-tools`     | hook (no command)             | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`.                                    |
 | `keep-model-on-new` | hook (no command)            | Keep the active model when `/new` starts a fresh session instead of reverting to pi's saved default model.                                    |
-| `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: back-to-back same-tool calls with no prose in between share one block (e.g. `read ×2`); visible text (assistant prose or a typed user message) always breaks the block, so textless tool-only messages chain. Images stay visible without expanding, expand a row with ctrl+o to see results/diffs. Long bash commands get an AI-generated summary once you pick a model with `/goodies summary-model <provider/model>` (see "Smart summaries" below). While enabled, also flips `@bermudi/pi-codex`'s `apply_patch`/`web_search` into the same burst style. |
+| `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: back-to-back same-tool calls with no prose in between share one block (e.g. `read ×2`); visible text (assistant prose or a typed user message) always breaks the block, so textless tool-only messages chain. Images stay visible without expanding, expand a row with ctrl+o to see the full command and results/diffs. Long bash commands get an AI-generated summary once you pick a model with `/goodies summary-model <provider/model>` (see "Smart summaries" below) — expanding a row swaps the summary back out for the raw command. While enabled, also flips `@bermudi/pi-codex`'s `apply_patch`/`web_search` into the same burst style. |
 | `review`           | `/review`, `/end-review`      | Code review workflow: review uncommitted changes, a branch, a commit, a GitHub PR, or folders. Prioritized findings with actionable follow-ups. |
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
 | `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
@@ -100,9 +100,11 @@ which reads as a full-screen flash:
 
 clean-tui therefore follows two rules in its render paths:
 
-- **Height-neutral swaps:** text that may be replaced by a summary later is
-  capped at the same width as summaries (`BASH_BULLET_WIDTH`), so an
-  arriving summary never collapses a wrapped line (rule 1).
+- **Grow-only swaps:** the raw command text a summary may later replace is
+  capped at 99 characters plus an ellipsis (`BASH_BULLET_WIDTH`); summaries
+  render uncapped. A landing summary can add a wrapped line — a cheap tail
+  update — but never collapses one (rule 1) wherever the raw line fits on a
+  single terminal row.
 - **Tail-only refresh:** when a summary lands, only rows that are still
   executing, or that finished while their summary was in flight (bounded by
   a ~10s freshness window), are re-rendered — at landing such rows sit at

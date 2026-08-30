@@ -523,8 +523,9 @@ describe("clean-tui AI summary", () => {
     // so an arriving summary collapsed a 2-line wrapped header to 1 line.
     // Total transcript height dropping below pi-tui's high-water mark
     // triggers clearOnShrink: a full clear-screen + scrollback wipe — a
-    // visible flash per summarized command while the agent works. Equal
-    // caps (header uses BASH_BULLET_WIDTH) keep the swap height-neutral.
+    // visible flash per summarized command while the agent works. The
+    // width-capped raw header (BASH_BULLET_WIDTH) keeps the swap from ever
+    // shrinking: summaries render uncapped and can only add rows.
     scriptedBackend(() => "Typechecks the extension sources");
     enableSummariesForTest();
     const h = new PiHarness();
@@ -573,6 +574,36 @@ describe("clean-tui AI summary", () => {
     expect(textOf(row.lastCallComponent)).not.toContain("&& bun run");
   });
 
+  test("expanding swaps the summary out for the full raw command", async () => {
+    // The compact header shows the AI summary INSTEAD of the command, so on
+    // its own it hides what actually ran. ctrl+o must reveal the full raw
+    // command — the summary yields while the row is expanded and returns on
+    // collapse (observed: ctrl+o showed output only, command still hidden).
+    scriptedBackend(() => "Runs pi with a restricted tool set");
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const cmd = "echo " + "x".repeat(90); // >80: summarizable, single line
+    const row = h.row("bash", "expand-swap");
+    row.setArgs({ command: cmd });
+    row.setResult({ content: [{ type: "text", text: "ran fine" }] });
+    await new Promise((r) => setTimeout(r, 20));
+    const collapsed = textOf(row.lastCallComponent);
+    expect(collapsed).toContain("Runs pi with a restricted tool set");
+    expect(collapsed).not.toContain(cmd);
+    row.setExpanded(true);
+    const expanded = textOf(row.lastCallComponent);
+    expect(expanded).toContain(cmd);
+    expect(expanded).not.toContain("Runs pi with a restricted tool set");
+    // Collapsing restores the compact summary view.
+    row.setExpanded(false);
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Runs pi with a restricted tool set",
+    );
+  });
+
   test("summaries never swap rows that finished long before the landing", async () => {
     // The 0.11.x flicker regression: invalidating finished rows far above the
     // viewport (replayed history, old rows) triggers pi's fullRender(true) —
@@ -612,7 +643,7 @@ describe("clean-tui AI summary", () => {
     );
   });
 
-  test("summary is normalized to one line and capped at 80 chars", async () => {
+  test("summary is normalized to one line and not capped", async () => {
     scriptedBackend(
       () =>
         '"Runs GLM model  with four   reasoning levels and shows token usage plus verbose error diagnostics"',
@@ -629,18 +660,19 @@ describe("clean-tui AI summary", () => {
     expect(text).toContain("Runs GLM model with four");
     expect(text).not.toContain('"');
     expect(text).not.toContain("  "); // collapsed whitespace
-    expect(text.length).toBeLessThanOrEqual(120); // 80-char summary cap
+    expect(text).toContain("verbose error diagnostics"); // uncapped: tail survives
+    expect(text.length).toBeGreaterThan(80);
   });
 
-  test("bash bullets keep up to 80 chars of the command", () => {
+  test("bash bullets keep up to 100 chars of the command", () => {
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
 
     // A real burst: both rows render as bullets under one "bash ×2" header.
-    // 80-char command fits whole; 85-char command ellipsizes at 80 columns.
-    const cmdA = "echo " + "a".repeat(74); // 79 chars — fits whole
-    const cmdB = "echo " + "b".repeat(80); // 85 chars — ellipsizes at 80
+    // 100-char command fits whole; 105-char command ellipsizes to 99 + "…".
+    const cmdA = "echo " + "a".repeat(95); // 100 chars — fits whole
+    const cmdB = "echo " + "b".repeat(100); // 105 chars — 99 chars + ellipsis
     const a = h.row("bash", "a");
     a.setArgs({ command: cmdA });
     const b = h.row("bash", "b");
@@ -649,8 +681,8 @@ describe("clean-tui AI summary", () => {
     a.setResult({ content: ["ok"] });
 
     const text = textOf(a.lastCallComponent);
-    expect(text).toContain("a".repeat(74));
-    expect(text).toContain("b".repeat(75) + "…");
+    expect(text).toContain("a".repeat(95));
+    expect(text).toContain("b".repeat(94) + "…");
   });
 
   test("unset summary-model means off: zero requests, zero noise", async () => {
@@ -1512,6 +1544,48 @@ describe("clean-tui massive commands", () => {
     const text = textOf(row.lastCallComponent);
     expect(text).toContain("detail line 19"); // full command visible
     expect(text).toContain("done"); // output still shown
+  });
+
+  test("expanding reveals a long single-line command the collapsed header ellipsizes", () => {
+    // Regression: soloExpanded only revealed the full command for MULTI-line
+    // commands. A single-line command past the bullet cap was ellipsized in
+    // the header and never rendered anywhere — ctrl+o showed only the output
+    // (observed on `timeout 30 pi -p -- --no-session --tools read,...`).
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const cmd =
+      "timeout 30 pi -p -- --no-session --tools read,find,grep,ls --message explain the wiki verification loop in detail";
+    expect(cmd.length).toBeGreaterThan(100); // past the bullet cap (BASH_BULLET_WIDTH)
+    const row = h.row("bash", "longline");
+    row.setArgs({ command: cmd });
+    row.setResult({ content: [{ type: "text", text: "output line" }] });
+
+    const collapsed = textOf(row.lastCallComponent);
+    expect(collapsed).toContain("…"); // capped first view
+    expect(collapsed).not.toContain(cmd); // tail hidden
+
+    row.setExpanded(true);
+    const expanded = textOf(row.lastCallComponent);
+    expect(expanded).toContain(cmd); // full command, uncapped
+    expect(expanded).toContain("output line");
+  });
+
+  test("expanded grouped details reveal each call's full command", () => {
+    // The details block capped commands at 40 chars — a grouped burst's
+    // expanded view still never showed the actual commands.
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const cmd = "echo " + "y".repeat(120) + "-tail-marker";
+    const a = h.row("bash", "a");
+    const b = h.row("bash", "b");
+    a.setArgs({ command: cmd });
+    b.setArgs({ command: "echo hi" });
+    a.setResult({ content: [{ type: "text", text: "one" }] });
+    b.setResult({ content: [{ type: "text", text: "two" }] });
+    a.setExpanded(true);
+    expect(textOf(a.lastCallComponent)).toContain(cmd);
   });
 
   test("a failed leader does not paint the whole burst box red", () => {
