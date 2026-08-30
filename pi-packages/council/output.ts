@@ -74,7 +74,7 @@ export class CouncilOutput {
     await ensurePrivateDirectory(root);
     const ignorePath = join(root, ".gitignore");
     await rejectSymlink(ignorePath);
-    await writeFile(ignorePath, "*\n!.gitignore\n", {
+    await writeFile(ignorePath, "*\n", {
       mode: 0o600,
     });
     await chmod(ignorePath, 0o600);

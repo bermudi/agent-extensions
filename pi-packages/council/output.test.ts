@@ -33,7 +33,7 @@ describe("CouncilOutput", () => {
     expect((await stat(output.designPath)).mode & 0o777).toBe(0o600);
     expect(
       await readFile(join(cwd, ".pi", "council", ".gitignore"), "utf8"),
-    ).toBe("*\n!.gitignore\n");
+    ).toBe("*\n");
   });
 
   test("refuses symlinked output directories and files", async () => {
