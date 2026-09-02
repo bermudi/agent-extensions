@@ -32,6 +32,7 @@ type FeatureName =
   | "zed"
   | "prefer-tools"
   | "keep-model"
+  | "model-thinking"
   | "clean-tui"
   | "review"
   | "kilo"
@@ -45,6 +46,7 @@ const FEATURES: FeatureName[] = [
   "zed",
   "prefer-tools",
   "keep-model",
+  "model-thinking",
   "clean-tui",
   "review",
   "kilo",

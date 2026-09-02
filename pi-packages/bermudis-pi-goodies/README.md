@@ -1,7 +1,7 @@
 # bermudis-pi-goodies
 
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
-extensions. One entry point, eleven independent features.
+extensions. One entry point, twelve independent features.
 
 | Feature            | Command / hook                | What it does                                                                                                                                    |
 | ------------------ | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -11,6 +11,7 @@ extensions. One entry point, eleven independent features.
 | `zed`              | `/z`                          | Open Zed editor on the current working directory.                                                                                               |
 | `prefer-tools`     | hook (no command)             | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`.                                    |
 | `keep-model-on-new` | hook (no command)            | Keep the active model when `/new` starts a fresh session instead of reverting to pi's saved default model.                                    |
+| `model-thinking`   | `/model-thinking`             | Per-model default thinking levels: save the current level as this model's default and get it back on every switch to that model, instead of pi's global default. |
 | `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: back-to-back same-tool calls with no prose in between share one block (e.g. `read ×2`); visible text (assistant prose or a typed user message) always breaks the block, so textless tool-only messages chain. Images stay visible without expanding, expand a row with ctrl+o to see the full command and results/diffs. Long bash commands get an AI-generated summary once you pick a model with `/goodies summary-model <provider/model>` (see "Smart summaries" below) — expanding a row swaps the summary back out for the raw command. While enabled, also flips `@bermudi/pi-codex`'s `apply_patch`/`web_search` into the same burst style. |
 | `review`           | `/review`, `/end-review`      | Code review workflow: review uncommitted changes, a branch, a commit, a GitHub PR, or folders. Prioritized findings with actionable follow-ups. |
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
@@ -23,7 +24,7 @@ extensions. One entry point, eleven independent features.
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.14.0
+pi install npm:bermudis-pi-goodies@0.15.0
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
@@ -124,26 +125,64 @@ To catch a flash red-handed, run `PI_DEBUG_REDRAW=1 pi`, reproduce, then
 with its reason (`clearOnShrink`, `firstChanged < viewportTop`, resize, …).
 Note the log is append-only across sessions; check timestamps.
 
-## Per-model thinking levels (retired in favor of Pi 0.84.3)
+## Per-model default thinking levels
 
-This package previously shipped a `model-thinking` module with a `/levels`
-command and an extension-owned sidecar at
-`~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json`. It existed
-because Pi's `/scoped-models` screen rewrote `enabledModels` with bare model
-ids (wiping any `:level` suffix) and because every `setThinkingLevel()` call
-persisted as the global default.
+Pi's `/thinking` is session-scoped: picking a level applies for now, and
+Ctrl+S persists only the **global** default (`defaultThinkingLevel`), which
+pi then applies on every model switch that has no entry in the native
+`modelThinkingLevels` map — a map reachable only through the generic
+`/settings` screen. If you want `glm → high` but `grok → low` and switch
+between them all day, the global default fights you on every switch.
 
-Pi [0.84.3](https://github.com/earendil-works/pi/releases/tag/v0.84.3) fixed
-both: in-session model and thinking changes are now ephemeral by default
-(persist only via `/settings` or Ctrl+S, [#5263](https://github.com/earendil-works/pi/issues/5263)),
-and Pi added a native per-model thinking-level override keyed by
-`provider/modelId`, stored in `settings.json` `modelThinkingLevels` and
-edited via `/settings` → "Default thinking level per model". That is exactly
-what `model-thinking` provided, so the module is retired.
+`model-thinking` is the missing per-model save:
 
-If you had levels in the old sidecar
-(`~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json`), re-enter them
-via `/settings` → "Default thinking level per model".
+```text
+/model-thinking            save the CURRENT level as this model's default
+/model-thinking high       save (and apply now) an explicit level
+/model-thinking off        drop this model's default (back to pi's behavior)
+/model-thinking list       show every saved default
+```
+
+Saved levels apply whenever the model becomes active — `/model` picker,
+`/model <name>`, Ctrl+P cycling, `/new`, and startup. Switching to a model
+with no saved entry leaves pi's own choice untouched (native per-model map →
+global default), so the feature is strictly additive. It composes with
+`keep-model-on-new` automatically: after `/new` restores the model, its own
+default thinking level lands with it (a `Thinking: max → high` toast
+confirms).
+
+Priority and escape hatches:
+
+- A scoped-model pin (`enabledModels` / `--models "provider/id:high"`)
+  outranks the sidecar. Pi applies pins when cycling and at startup but not
+  on full-picker selection — that gap is patched too, so a pin holds on
+  every path.
+- `--thinking <level>` or `--model x:<level>` at launch suppress the saved
+  default for that session; explicit CLI intent wins.
+- Resumed/forked sessions keep the level stored in the session file
+  (`pi --continue` included), unless a bare `--model x` explicitly picks a
+  model for the resumed session.
+
+Levels persist in the extension-owned sidecar at
+`~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json` — the same path
+and shape this package's pre-0.7.0 `model-thinking` module used, so entries
+saved then revive untouched (the old `thinking-default.json` sibling is
+obsolete and ignored). The file is read fresh on every apply, so a level
+saved in one pi session takes effect in the others immediately. Nothing is
+auto-recorded: a level becomes a default only when you run the command,
+which is why in-session `/thinking` changes stay as ephemeral as pi intends.
+
+### History: why this module left and came back
+
+The pre-0.7.0 module auto-recorded every `/thinking` change per model,
+which required classifying pi-internal re-clamp events from user intent
+(branch reconstruction, expected-level checklists, timer races) — 1156 lines
+and the source of every bug it ever had. It was retired for Pi 0.84.3's
+native per-model overrides, but the native map never got a quick setter and
+0.84.3's new `/thinking` made the *global* default more assertive on every
+switch. This module is the same idea rebuilt around explicit saves: no
+event classification, no `/levels` dialog, no lock file — just a sidecar,
+a command, and two event hooks.
 
 ## Provider and balance details
 

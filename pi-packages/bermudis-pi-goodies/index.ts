@@ -9,24 +9,26 @@
  *   - zed              /z                open Zed on cwd
  *   - prefer-tools     hook              block legacy tools (use trash/rg/fd/uv)
  *   - keep-model       hook              preserve the active model across /new
+ *   - model-thinking   /model-thinking   per-model default thinking levels, applied on switch
  *   - clean-tui        tool overrides    collapse built-in tool output; keep a one-line call header, hide results/diffs until expanded
  *   - review           /review, /end-review  code review workflow (uncommitted, branch, commit, PR, folder)
  *   - kilo             provider          access Kilo Gateway models
  *   - provider-balance footer            show Kilo credits or Codex quota in the footer
  *   - tps              hook              notify tokens/sec and usage at each agent turn end
  *
- * Per-model thinking levels were previously provided here by a `model-thinking`
- * module with a `/levels` command and an extension-owned sidecar. Pi 0.84.3
- * added native per-model thinking-level overrides (settings.json
- * `modelThinkingLevels`, edited via `/settings` → "Default thinking level per
- * model") and made in-session model/thinking changes ephemeral by default, so
- * that module is retired.
+ * Per-model thinking levels were previously provided by a `model-thinking`
+ * module with a `/levels` command and an extension-owned sidecar, retired in
+ * 0.7.0 for pi 0.84.3's native per-model overrides. The native map is only
+ * editable through /settings and the new /thinking persists a global default
+ * only, so a slimmer `model-thinking` module is back: explicit saves to the
+ * same sidecar path (old entries revive), applied on every model switch.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import copyTrajectory from "./copy-trajectory.ts";
 import copyWithModel from "./copy-with-model.ts";
 import kilo from "./kilo.ts";
 import keepModelOnNew from "./keep-model-on-new.ts";
+import modelThinking from "./model-thinking.ts";
 import cleanTui from "./clean-tui.ts";
 import review from "./review.ts";
 import providerBalance from "./provider-balance.ts";
@@ -48,6 +50,7 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   if (isEnabled("zed")) zed(pi);
   if (isEnabled("prefer-tools")) preferTools(pi);
   if (isEnabled("keep-model")) keepModelOnNew(pi);
+  if (isEnabled("model-thinking")) modelThinking(pi);
   if (isEnabled("clean-tui")) cleanTui(pi);
   else setCleanTuiActive(false); // clear the pi-codex integration flag on /reload
   if (isEnabled("review")) review(pi);
