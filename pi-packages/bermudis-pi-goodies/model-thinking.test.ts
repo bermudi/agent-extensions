@@ -10,7 +10,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import modelThinking, {
-  cliModelSelection,
+  explicitCliModelSelection,
   explicitCliThinking,
   parseStoredLevels,
 } from "./model-thinking.ts";
@@ -185,24 +185,36 @@ describe("explicitCliThinking", () => {
   });
 });
 
-describe("cliModelSelection", () => {
-  test("returns provider/id for a bare --model", () => {
-    expect(cliModelSelection(["--model", "zai/glm-5.3"])).toEqual({
-      provider: "zai",
-      id: "glm-5.3",
-    });
-  });
-
-  test("strips a :level suffix and reports the last --model", () => {
+describe("explicitCliModelSelection", () => {
+  test("accepts provider/id, bare names, and --provider combos", () => {
+    expect(explicitCliModelSelection(["--model", "zai/glm-5.3"])).toBe(true);
+    expect(explicitCliModelSelection(["--model", "glm"])).toBe(true);
     expect(
-      cliModelSelection(["--model", "zai/a:high", "--model", "zai/b:low"]),
-    ).toEqual({ provider: "zai", id: "b" });
+      explicitCliModelSelection(["--provider", "zai", "--model", "glm"]),
+    ).toBe(true);
   });
 
-  test("undefined for no --model, bare names, or trailing flags", () => {
-    expect(cliModelSelection([])).toBeUndefined();
-    expect(cliModelSelection(["--model", "glm-5.3"])).toBeUndefined();
-    expect(cliModelSelection(["--model"])).toBeUndefined();
+  test("a :level suffix is thinking intent, not a bare selection", () => {
+    expect(explicitCliModelSelection(["--model", "zai/glm-5.3:low"])).toBe(
+      false,
+    );
+  });
+
+  test("the last --model wins", () => {
+    expect(
+      explicitCliModelSelection(["--model", "zai/a:high", "--model", "zai/b"]),
+    ).toBe(true);
+    expect(
+      explicitCliModelSelection(["--model", "zai/a", "--model", "zai/b:low"]),
+    ).toBe(false);
+  });
+
+  test("no --model, a trailing --model, or flags after -- do not count", () => {
+    expect(explicitCliModelSelection([])).toBe(false);
+    expect(explicitCliModelSelection(["--model"])).toBe(false);
+    expect(explicitCliModelSelection(["--", "--model", "zai/glm-5.3"])).toBe(
+      false,
+    );
   });
 });
 
@@ -337,13 +349,9 @@ describe("session_start", () => {
     expect(pi.thinkingLevel).toBe("low");
   });
 
-  test("resumed session with a bare --model applies that model's default", async () => {
+  test("resumed session with a bare --model name applies that model's default", async () => {
     const glm = makeModel("zai", "glm-5.3");
-    const pi = new PiHarness(levelsPath, [
-      "--continue",
-      "--model",
-      "zai/glm-5.3",
-    ]);
+    const pi = new PiHarness(levelsPath, ["--continue", "--model", "glm"]);
     pi.load();
     await pi.runCommand("high", glm);
     pi.thinkingLevel = "low";
@@ -447,21 +455,49 @@ describe("/model-thinking command", () => {
     expect(pi.notifications.at(-1)?.message).toContain("Usage");
   });
 
-  test("off removes a saved default", async () => {
+  test("explicit level persists before it applies: a failed write leaves the session untouched", async () => {
+    const glm = makeModel("zai", "glm-5.3");
+    const { writeFileSync } = await import("node:fs");
+    // The sidecar's parent directory is a regular file, so the atomic
+    // writer's mkdirSync fails and the save errors out.
+    writeFileSync(join(scratchDir, "not-a-dir"), "");
+    const blockedPath = join(scratchDir, "not-a-dir", "levels.json");
+    const pi = new PiHarness(blockedPath);
+    pi.load();
+    pi.thinkingLevel = "medium";
+    await pi.runCommand("high", glm);
+    expect(pi.thinkingLevel).toBe("medium"); // never applied
+    expect(pi.notifications.at(-1)?.type).toBe("warning");
+    expect(pi.notifications.at(-1)?.message).toContain("Could not save");
+  });
+
+  test("off is a saveable level, not the removal verb", async () => {
+    const glm = makeModel("zai", "glm-5.3");
+    const pi = new PiHarness(levelsPath);
+    pi.load();
+    pi.thinkingLevel = "medium";
+    await pi.runCommand("off", glm);
+    expect(pi.thinkingLevel).toBe("off");
+    expect(JSON.parse(readFileSync(levelsPath, "utf8"))).toEqual({
+      "zai/glm-5.3": "off",
+    });
+  });
+
+  test("unset removes a saved default", async () => {
     const glm = makeModel("zai", "glm-5.3");
     const pi = new PiHarness(levelsPath);
     pi.load();
     await pi.runCommand("high", glm);
-    await pi.runCommand("off", glm);
+    await pi.runCommand("unset", glm);
     expect(pi.notifications.at(-1)?.message).toContain("removed");
     expect(JSON.parse(readFileSync(levelsPath, "utf8"))).toEqual({});
   });
 
-  test("off on an unsaved model is a no-op notice", async () => {
+  test("unset on an unsaved model is a no-op notice", async () => {
     const glm = makeModel("zai", "glm-5.3");
     const pi = new PiHarness(levelsPath);
     pi.load();
-    await pi.runCommand("off", glm);
+    await pi.runCommand("unset", glm);
     expect(pi.notifications.at(-1)?.message).toContain(
       "No thinking default saved",
     );
@@ -526,11 +562,16 @@ describe("/model-thinking command", () => {
       ?.getArgumentCompletions?.("") as { value: string }[];
     expect(completions.map((c) => c.value)).toContain("high");
     expect(completions.map((c) => c.value)).toContain("list");
+    expect(completions.map((c) => c.value)).toContain("unset");
     expect(completions.map((c) => c.value)).toContain("off");
     const filtered = pi.commands
       .get("model-thinking")
       ?.getArgumentCompletions?.("hi") as { value: string }[];
     expect(filtered.map((c) => c.value)).toEqual(["high"]);
+    const un = pi.commands
+      .get("model-thinking")
+      ?.getArgumentCompletions?.("un") as { value: string }[];
+    expect(un.map((c) => c.value)).toEqual(["unset"]);
   });
 });
 

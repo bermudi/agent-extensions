@@ -10,7 +10,7 @@
  *
  *   /model-thinking            save the current level as this model's default
  *   /model-thinking <level>    save (and apply now) an explicit level
- *   /model-thinking off        drop this model's default (fall back to pi's)
+ *   /model-thinking unset       drop this model's default (fall back to pi's)
  *   /model-thinking list       show every saved default
  *
  * Saved levels apply whenever the model becomes active: /model picker,
@@ -31,9 +31,10 @@
  * Resumed and forked sessions keep the level restored from the session
  * file — pi --continue and the startup-picker resume also emit
  * session_start "startup" but carry conversation entries, which
- * distinguishes them from a fresh session — unless a bare --model
- * explicitly picked a model for the resumed session, in which case that
- * model's default applies.
+ * distinguishes them from a fresh session — unless an explicit
+ * `--model` without a :level suffix (bare name or provider/id) picked a
+ * model for the resumed session, in which case that model's default
+ * applies.
  *
  * Storage: ~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json —
  * the same path and shape the pre-0.7.0 model-thinking module used, so
@@ -155,16 +156,19 @@ export function writeStoredLevel(
 }
 
 /**
- * Mirrors pi's parseArgs semantics for the flag that expresses explicit
+ * Mirrors pi's parseArgs semantics for the flags that express explicit
  * thinking intent: the last --model wins, --thinking counts only when its
- * value is a valid level, and a trailing flag without a value token sets
- * nothing. `--thinking=high` and `--model=x` are not parsed by pi either.
+ * value is a valid level, a trailing flag without a value token sets
+ * nothing, and neither `--thinking=high` nor `--model=x` (equals form) is
+ * parsed by pi at all. Flag parsing stops at `--`, exactly as pi does —
+ * tokens after it are prompt text, not flags.
  */
 export function explicitCliThinking(cliArgs: string[]): boolean {
   let model: string | undefined;
   let thinking: string | undefined;
   for (let index = 0; index < cliArgs.length; index++) {
     const arg = cliArgs[index];
+    if (arg === "--") break;
     if (arg === "--model" && index + 1 < cliArgs.length) {
       model = cliArgs[++index];
     } else if (arg === "--thinking" && index + 1 < cliArgs.length) {
@@ -186,29 +190,29 @@ export function explicitCliThinking(cliArgs: string[]): boolean {
 }
 
 /**
- * The last bare --model value (no :level suffix), or undefined. A bare
- * --model means the user explicitly chose a model for the session — even
- * when resuming via pi --continue — so that model's saved default should
- * apply instead of the resumed session's restored level.
+ * Whether the CLI explicitly selected a model WITHOUT a :level suffix —
+ * any of `--model glm`, `--model zai/glm`, or `--provider zai --model glm`.
+ * That means the user chose a model for this session — even when resuming
+ * via pi --continue — so the model's saved default should apply instead of
+ * the resumed session's restored level. A :level suffix is thinking intent
+ * and is handled by explicitCliThinking instead. The selection is never
+ * compared against the active model: pi resolves patterns fuzzily, and
+ * whichever model it lands on should get its own default.
  */
-export function cliModelSelection(
-  cliArgs: string[],
-): { provider: string; id: string } | undefined {
+export function explicitCliModelSelection(cliArgs: string[]): boolean {
   let model: string | undefined;
   for (let index = 0; index < cliArgs.length; index++) {
     const arg = cliArgs[index];
+    if (arg === "--") break;
     if (arg === "--model" && index + 1 < cliArgs.length) {
       model = cliArgs[++index];
     }
   }
-  if (model === undefined) return undefined;
+  if (model === undefined) return false;
   const colon = model.lastIndexOf(":");
-  if (colon > 0 && THINKING_LEVELS.has(model.slice(colon + 1))) {
-    model = model.slice(0, colon);
-  }
-  const slash = model.indexOf("/");
-  if (slash <= 0 || slash === model.length - 1) return undefined;
-  return { provider: model.slice(0, slash), id: model.slice(slash + 1) };
+  return !(
+    colon > 0 && THINKING_LEVELS.has(model.slice(colon + 1) as StoredLevel)
+  );
 }
 
 /**
@@ -310,8 +314,8 @@ export default function modelThinking(
   pi.registerCommand("model-thinking", {
     description: "Per-model default thinking level (applied on model switch)",
     getArgumentCompletions: (prefix) => {
-      // "off" already leads THINKING_LEVEL_ORDER.
-      const words = ["list", ...THINKING_LEVEL_ORDER];
+      // "off" already leads THINKING_LEVEL_ORDER; it is a saveable level.
+      const words = ["list", "unset", ...THINKING_LEVEL_ORDER];
       const query = prefix.trim().toLowerCase();
       return words
         .filter((word) => word.startsWith(query))
@@ -352,7 +356,7 @@ export default function modelThinking(
         return;
       }
 
-      if (parts[0] === "off" || parts[0] === "clear") {
+      if (parts[0] === "unset") {
         try {
           if (readStoredLevels(levelsPath)[key] === undefined) {
             ctx.ui.notify(`No thinking default saved for ${key}`, "info");
@@ -371,7 +375,7 @@ export default function modelThinking(
           return;
         }
         ctx.ui.notify(
-          `${key} thinking default removed — falls back to pi's global default`,
+          `${key} thinking default removed — falls back to pi's own default`,
           "info",
         );
         return;
@@ -385,7 +389,7 @@ export default function modelThinking(
         const requested = parts[0].toLowerCase();
         if (!THINKING_LEVELS.has(requested)) {
           ctx.ui.notify(
-            `Unknown level "${parts[0]}". Usage: /model-thinking [off|minimal|low|medium|high|xhigh|max|list]`,
+            `Unknown level "${parts[0]}". Usage: /model-thinking [off|minimal|low|medium|high|xhigh|max|unset|list]`,
             "warning",
           );
           return;
@@ -399,9 +403,10 @@ export default function modelThinking(
           return;
         }
         level = requested as StoredLevel;
-        setLevel(pi, ctx, level, true);
       }
 
+      // Persist before applying: a failed write must not leave the session
+      // already switched to a level that is not on disk.
       try {
         writeStoredLevel(key, level, levelsPath);
       } catch (error) {
@@ -415,6 +420,7 @@ export default function modelThinking(
         );
         return;
       }
+      if (parts.length > 0) setLevel(pi, ctx, level, true);
       ctx.ui.notify(`${key} thinking default: ${level}`, "info");
     },
   });
@@ -438,12 +444,13 @@ export default function modelThinking(
     // Explicit CLI thinking intent wins for the launched session.
     if (event.reason === "startup" && explicitCliThinking(cliArgs)) return;
     // pi --continue and startup-picker resumes emit reason "startup" but
-    // carry a restored conversation: keep its level, unless a bare
-    // --model explicitly chose a model for the resumed session.
+    // carry a restored conversation: keep its level, unless an explicit
+    // --model (without a :level suffix) chose a model for the resumed
+    // session.
     if (
       event.reason === "startup" &&
       hasConversationEntries(ctx.sessionManager) &&
-      cliModelSelection(cliArgs) === undefined
+      !explicitCliModelSelection(cliArgs)
     ) {
       return;
     }

@@ -138,8 +138,8 @@ between them all day, the global default fights you on every switch.
 
 ```text
 /model-thinking            save the CURRENT level as this model's default
-/model-thinking high       save (and apply now) an explicit level
-/model-thinking off        drop this model's default (back to pi's behavior)
+/model-thinking high       save (and apply now) an explicit level (off included)
+/model-thinking unset      drop this model's default (back to pi's own default)
 /model-thinking list       show every saved default
 ```
 
@@ -160,8 +160,8 @@ Priority and escape hatches:
 - `--thinking <level>` or `--model x:<level>` at launch suppress the saved
   default for that session; explicit CLI intent wins.
 - Resumed/forked sessions keep the level stored in the session file
-  (`pi --continue` included), unless a bare `--model x` explicitly picks a
-  model for the resumed session.
+  (`pi --continue` included), unless `--model` without a `:level` suffix
+  (bare name or `provider/id`) explicitly picks a model for the resumed session.
 
 Levels persist in the extension-owned sidecar at
 `~/.pi/agent/data/bermudis-pi-goodies/thinking-levels.json` — the same path
