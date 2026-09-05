@@ -12,7 +12,7 @@ extensions. One entry point, twelve independent features.
 | `prefer-tools`     | hook (no command)             | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`.                                    |
 | `keep-model-on-new` | hook (no command)            | Keep the active model when `/new` starts a fresh session instead of reverting to pi's saved default model.                                    |
 | `model-thinking`   | `/model-thinking`             | Per-model default thinking levels: save the current level as this model's default and get it back on every switch to that model, instead of pi's global default. |
-| `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: back-to-back same-tool calls with no prose in between share one block (e.g. `read ×2`); visible text (assistant prose or a typed user message) always breaks the block, so textless tool-only messages chain. Images stay visible without expanding, expand a row with ctrl+o to see the full command and results/diffs. Long bash commands get an AI-generated summary once you pick a model with `/goodies summary-model <provider/model>` (see "Smart summaries" below) — expanding a row swaps the summary back out for the raw command. While enabled, also flips `@bermudi/pi-codex`'s `apply_patch`/`web_search` into the same burst style. |
+| `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: back-to-back same-tool calls share one block (e.g. `read ×2`) until a boundary — visible text (assistant prose or a typed user message) or a thinking block (even an empty one, as OpenAI emits between tool calls) — so reasoning-per-call models render one block per call. Images stay visible without expanding, expand a row with ctrl+o to see the full command and results/diffs. Long bash commands get an AI-generated summary once you pick a model with `/goodies summary-model <provider/model>` (see "Smart summaries" below) — expanding a row swaps the summary back out for the raw command. While enabled, also flips `@bermudi/pi-codex`'s `apply_patch`/`web_search` into the same burst style. |
 | `review`           | `/review`, `/end-review`      | Code review workflow: review uncommitted changes, a branch, a commit, a GitHub PR, or folders. Prioritized findings with actionable follow-ups. |
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
 | `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
@@ -24,7 +24,7 @@ extensions. One entry point, twelve independent features.
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.15.0
+pi install npm:bermudis-pi-goodies@0.15.1
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
