@@ -12,10 +12,16 @@
  * this boundary every same-tool call of an entire agent run accumulates into
  * one mega-block rendered at the first call's position.
  *
- * Textless assistant messages (only thinking + tool calls — the shape models
- * emit when they call tools one at a time) do NOT close the burst: no prose
- * separates their calls from the previous ones, so back-to-back same-tool
- * calls chain into one block until real text appears. Typed user messages
+ * A thinking block closes the burst as well: models interleave reasoning
+ * between tool calls (the OpenAI Responses API emits a reasoning item before
+ * every call; interleaved thinking does the same), and a merged burst would
+ * render the later call inside the box above the thinking row it follows.
+ * The block counts even when its text is empty — OpenAI models often return
+ * no actual reasoning data, but the reasoning item still marks the step.
+ *
+ * Messages carrying only tool calls (no prose, no thinking block) do NOT
+ * close the burst: nothing separates their calls from the previous ones, so
+ * back-to-back same-tool calls chain into one block. Typed user messages
  * count as prose too.
  *
  * Images are respected: a read that returns an image is never grouped, stays
@@ -120,10 +126,10 @@ type Entry = {
   toolName: string;
   args: any;
   /**
-   * Visible-prose boundary: live entries count up (bumped when visible text
-   * appears — assistant text block or typed user message); replayed entries
-   * count down (one per prose boundary in the restored branch). NaN = unknown
-   * lineage — never groups. Calls with no prose between them share a segment.
+   * Boundary counter: live entries count up (bumped when a boundary block
+   * appears — visible text or a thinking block); replayed entries count down
+   * (one per boundary in the restored branch). NaN = unknown lineage — never
+   * groups. Calls with no boundary between them share a segment.
    */
   seg: number;
   /** Position in `entries`; stable because entries are append-only. */
@@ -147,8 +153,14 @@ type Entry = {
 };
 
 let liveSeg = 0;
-/** Whether the assistant message currently streaming has shown visible text. */
-let curAssistantTextSeen = false;
+/**
+ * Boundary blocks (visible text / thinking) already counted for the assistant
+ * message currently streaming. Blocks are stable object references across a
+ * message's message_update events (pi-ai accumulates the partial in place),
+ * so the Set bumps exactly once per block, in content order — covering
+ * reasoning items interleaved between tool calls of one message.
+ */
+let curAssistantBoundaries = new Set<object>();
 // True while pi is replaying persisted history (startup with -c/--continue,
 // /resume, /fork). During replay no events fire, so segment boundaries are
 // rebuilt from the session branch instead (see session_start).
@@ -183,9 +195,9 @@ function upsertEntry(
 }
 
 /**
- * A message shows visible prose when it has a non-empty text block. Thinking
- * blocks and tool calls don't count — they render as placeholders/rows, not
- * prose, and must not close a burst.
+ * A message shows visible prose when it has a non-empty text block. Used for
+ * typed user messages and replay user entries; the assistant per-block rule
+ * lives in isBurstBoundaryBlock.
  */
 function hasVisibleText(message: any): boolean {
   return (message?.content ?? []).some(
@@ -196,15 +208,43 @@ function hasVisibleText(message: any): boolean {
   );
 }
 
+/**
+ * A burst boundary block: visible prose or a thinking block. Thinking closes
+ * a burst even when its text is empty — OpenAI models materialize a reasoning
+ * item before every tool call and often return no reasoning text for it, but
+ * the block still marks a chronological step that a merged burst would hide
+ * inside the box above it.
+ */
+function isBurstBoundaryBlock(block: any): boolean {
+  if (!block || typeof block !== "object") return false;
+  if (block.type === "thinking") return true;
+  return (
+    block.type === "text" &&
+    typeof block.text === "string" &&
+    block.text.trim().length > 0
+  );
+}
+
+/** Bump the segment once for every boundary block new since the last scan. */
+function scanAssistantBoundaries(message: any): void {
+  for (const block of message?.content ?? []) {
+    if (!isBurstBoundaryBlock(block) || curAssistantBoundaries.has(block))
+      continue;
+    curAssistantBoundaries.add(block);
+    liveSeg++;
+  }
+}
+
 function shouldGroup(a: Entry, b: Entry): boolean {
-  // Grouping is by adjacency + same tool with no visible prose in between.
+  // Grouping is by adjacency + same tool with no boundary block in between.
   // A message's tools execute after its own prose and before the next message
-  // streams, so the segment counter (bumped when visible text appears) splits
-  // bursts exactly where the conversation visually splits. Textless messages
-  // never bump it, so a model calling tools one-per-message still chains into
-  // a single block. Live segments count up, replay segments count down — the
-  // two domains can never merge. NaN (unknown lineage) compares unequal to
-  // everything, so those rows render solo.
+  // streams, so the segment counter (bumped when a boundary block appears)
+  // splits bursts exactly where the conversation visually splits. Messages
+  // with no boundary block (no prose, no thinking) never bump it, so a model
+  // calling tools one-per-message still chains into a single block. Live
+  // segments count up, replay segments count down — the two domains can never
+  // merge. NaN (unknown lineage) compares unequal to everything, so those
+  // rows render solo.
   if (a.seg !== b.seg) return false;
   if (a.toolName !== b.toolName) return false;
   if (a.hasImage || b.hasImage) return false;
@@ -996,19 +1036,19 @@ export default function cleanTui(pi: ExtensionAPI): void {
         .modelRegistry;
     }
   });
-  // Visible prose is the burst boundary (see shouldGroup / hasVisibleText).
-  // Assistant text is detected during streaming — pi creates a message's tool
-  // components while that message is still streaming, and text blocks precede
-  // its tool calls, so by the time the first tool of a message registers, any
-  // prose in that message has already bumped the segment. Textless messages
-  // (thinking + tool calls only) never bump it.
+  // Boundary blocks (visible prose, thinking) are detected during streaming —
+  // pi creates a message's tool components while that message is still
+  // streaming and blocks stream in order, so by the time a tool call of a
+  // message registers, every boundary block before it has already bumped the
+  // segment. Extension events are emitted before the TUI creates those
+  // components (agent-session emits to extensions first).
   pi.on("message_start", (event, _ctx) => {
     const message = (event as any).message;
     if (!message) return;
     if (message.role === "assistant") {
+      curAssistantBoundaries = new Set();
       // Some providers deliver the complete message at start (no streaming).
-      curAssistantTextSeen = hasVisibleText(message);
-      if (curAssistantTextSeen) liveSeg++;
+      scanAssistantBoundaries(message);
     } else if (message.role === "user") {
       // A typed user message is prose; it must split the surrounding bursts.
       if (hasVisibleText(message)) liveSeg++;
@@ -1016,17 +1056,15 @@ export default function cleanTui(pi: ExtensionAPI): void {
   });
   pi.on("message_update", (event, _ctx) => {
     const message = (event as any).message;
-    if (message?.role !== "assistant" || curAssistantTextSeen) return;
-    // Scanning the accumulating content (rather than matching text_start
-    // alone) also covers providers that skip granular streaming events.
-    if (hasVisibleText(message)) {
-      curAssistantTextSeen = true;
-      liveSeg++;
-    }
+    if (message?.role !== "assistant") return;
+    // Scanning the accumulating content (rather than matching granular
+    // streaming events alone) also covers providers that skip granular
+    // events; the Set keeps each block to exactly one bump.
+    scanAssistantBoundaries(message);
   });
   pi.on("session_start", (_event, ctx) => {
     liveSeg = 0;
-    curAssistantTextSeen = false;
+    curAssistantBoundaries = new Set();
     replaying = true;
     entries.length = 0;
     entryById.clear();
@@ -1057,9 +1095,9 @@ export default function cleanTui(pi: ExtensionAPI): void {
     summarySessionAbort.abort();
     summarySessionAbort = new AbortController();
     // Replayed history fires no events: rebuild segment boundaries from the
-    // branch with one segment per prose boundary, mirroring the live rule.
-    // Textless assistant messages keep the current segment; visible text
-    // (assistant or typed user) starts a new one. Calls not present in the
+    // branch with one segment per boundary block, mirroring the live rule.
+    // Scanning content in order handles thinking interleaved between tool
+    // calls (OpenAI Responses reasoning items). Calls not present in the
     // branch (defensive) get NaN and render solo.
     replaySegByToolCallId.clear();
     const branch = ctx?.sessionManager?.getBranch?.() ?? [];
@@ -1068,8 +1106,11 @@ export default function cleanTui(pi: ExtensionAPI): void {
       const message = entry?.type === "message" ? entry.message : undefined;
       if (!message) continue;
       if (message.role === "assistant") {
-        if (hasVisibleText(message)) seg--;
         for (const block of message.content ?? []) {
+          if (isBurstBoundaryBlock(block)) {
+            seg--;
+            continue;
+          }
           if (block?.type === "toolCall" && typeof block.id === "string") {
             replaySegByToolCallId.set(block.id, seg);
           }

@@ -144,10 +144,10 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(r2.lastCallComponent)).not.toContain("×2");
   });
 
-  test("replayed textless assistant messages chain into one burst", () => {
-    // Burst boundary is visible prose, not the message edge: a model that
-    // calls one tool per assistant message (thinking + toolCall, no text)
-    // produces calls with no prose between them — same block.
+  test("replayed tool-only assistant messages chain into one burst", () => {
+    // Burst boundaries are visible prose and thinking blocks, not the message
+    // edge: messages carrying only tool calls (no text, no thinking block)
+    // produce calls with no boundary between them — same block.
     const h = freshHarness();
     h.ctx.sessionManager.branch = [
       assistantMessage({ id: "a", name: "read" }),
@@ -161,6 +161,74 @@ describe("clean-tui resume/replay", () => {
     b.setArgs({ path: "/tmp/b.ts" });
     expect(textOf(a.lastCallComponent)).toContain("read ×2");
     expect(b.lastCallComponent instanceof Container).toBe(true);
+  });
+
+  test("replayed thinking blocks between tool calls split bursts", () => {
+    // The reported bug (OpenAI models): the Responses API emits a reasoning
+    // item before every tool call, and reasoning text is often absent — the
+    // persisted block arrives empty. Each block is a boundary, so the calls
+    // no longer merge into one burst that hides the later call above the
+    // thinking row it chronologically follows.
+    const toolCall = (id: string, name: string) => ({
+      type: "toolCall",
+      id,
+      name,
+      arguments: {},
+    });
+    const withBlocks = (...blocks: unknown[]) => ({
+      type: "message",
+      message: { role: "assistant", content: blocks },
+    });
+
+    const h = freshHarness();
+    h.ctx.sessionManager.branch = [
+      withBlocks({ type: "thinking", thinking: "" }, toolCall("a", "read")),
+      withBlocks({ type: "thinking", thinking: "" }, toolCall("b", "read")),
+    ];
+    h.emit("session_start", { reason: "resume" });
+    const a = h.row("read", "a");
+    const b = h.row("read", "b");
+    a.setArgs({ path: "/tmp/a.ts" });
+    b.setArgs({ path: "/tmp/b.ts" });
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(b.lastCallComponent instanceof Container).toBe(false);
+
+    // Reasoning interleaved between the calls of ONE message splits them too
+    // (OpenAI Responses output items stream one by one into a single message).
+    const h2 = freshHarness();
+    h2.ctx.sessionManager.branch = [
+      withBlocks(
+        { type: "thinking", thinking: "" },
+        toolCall("c", "read"),
+        { type: "thinking", thinking: "" },
+        toolCall("d", "read"),
+      ),
+    ];
+    h2.emit("session_start", { reason: "resume" });
+    const c = h2.row("read", "c");
+    const d = h2.row("read", "d");
+    c.setArgs({ path: "/tmp/c.ts" });
+    d.setArgs({ path: "/tmp/d.ts" });
+    expect(textOf(c.lastCallComponent)).not.toContain("×2");
+    expect(d.lastCallComponent instanceof Container).toBe(false);
+
+    // Parallel calls after a single thinking block still group: the block is
+    // a boundary only where it actually sits between two calls.
+    const h3 = freshHarness();
+    h3.ctx.sessionManager.branch = [
+      withBlocks(
+        { type: "thinking", thinking: "planning the two reads" },
+        toolCall("e", "read"),
+        toolCall("f", "read"),
+      ),
+    ];
+    h3.emit("session_start", { reason: "resume" });
+    const e = h3.row("read", "e");
+    const f = h3.row("read", "f");
+    e.setArgs({ path: "/tmp/e.ts" });
+    f.setArgs({ path: "/tmp/f.ts" });
+    expect(textOf(e.lastCallComponent)).toContain("read ×2");
+    expect(f.lastCallComponent instanceof Container).toBe(true);
   });
 
   test("replayed prose between messages keeps their bursts apart", () => {
@@ -292,11 +360,10 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(c.lastCallComponent)).toContain("×2");
   });
 
-  test("live: back-to-back textless assistant messages chain into one burst", () => {
-    // Regression guard for the glm-5.3-flash shape: the model calls one tool
-    // per assistant message (thinking + toolCall, no prose). No text between
-    // the calls, so they belong in one block; the next message's prose ends
-    // the chain.
+  test("live: back-to-back tool-only assistant messages chain into one burst", () => {
+    // Messages carrying only tool calls — no prose, no thinking block — never
+    // bump the segment, so their calls chain into one block; the next
+    // message's prose ends the chain.
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
@@ -323,6 +390,77 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(a.lastCallComponent)).toContain("bash ×2");
     expect(textOf(a.lastCallComponent)).not.toContain("×3");
     expect(textOf(c.lastCallComponent)).not.toContain("×2");
+  });
+
+  test("live: a thinking block between tool calls splits the burst", () => {
+    // The reported bug (OpenAI models): the Responses API emits a reasoning
+    // item before every tool call, often with no reasoning text — the block
+    // arrives empty. It must still end the open burst: a merged block would
+    // render the later call inside the box above the thinking row it follows.
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    const a = h.row("bash", "a");
+    a.setArgs({ command: "echo one" });
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "" }],
+      },
+    });
+    const b = h.row("bash", "b");
+    b.setArgs({ command: "echo two" });
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(textOf(b.lastCallComponent)).not.toContain("×2");
+    expect(b.lastCallComponent instanceof Container).toBe(false);
+  });
+
+  test("live: reasoning interleaved between calls of one message splits them", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    const a = h.row("bash", "a");
+    a.setArgs({ command: "echo one" });
+    // A second reasoning item streams into the same message between the calls.
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "a", name: "bash", arguments: {} },
+          { type: "thinking", thinking: "" },
+        ],
+      },
+    });
+    const b = h.row("bash", "b");
+    b.setArgs({ command: "echo two" });
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(textOf(b.lastCallComponent)).not.toContain("×2");
+  });
+
+  test("live: parallel calls after one thinking block still group", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "planning two reads" }],
+      },
+    });
+    const a = h.row("read", "a");
+    const b = h.row("read", "b");
+    a.setArgs({ path: "/tmp/a.ts" });
+    b.setArgs({ path: "/tmp/b.ts" });
+    expect(textOf(a.lastCallComponent)).toContain("read ×2");
+    expect(b.lastCallComponent instanceof Container).toBe(true);
   });
 
   test("live: a typed user message closes the open burst", () => {
