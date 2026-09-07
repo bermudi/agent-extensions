@@ -9,6 +9,7 @@ import cleanTui, {
   __setSummaryLogPathForTesting,
   __setSummaryModelRegistryForTesting,
   __setSummaryRequestTimeoutForTesting,
+  __setSummaryRetryDelaysForTesting,
   __setSummarySwapMaxAgeForTesting,
   __setSummaryUiForTesting,
   convertSummaryResponse,
@@ -993,6 +994,9 @@ describe("clean-tui AI summary", () => {
     const logged = captureConsoleError();
     __setSummaryRequestTimeoutForTesting(30);
     cleanupFns.push(() => __setSummaryRequestTimeoutForTesting(20_000));
+    // Single attempt: this test owns the timeout machinery, not the retry.
+    __setSummaryRetryDelaysForTesting([]);
+    cleanupFns.push(() => __setSummaryRetryDelaysForTesting());
     __setSummaryBackoffForTesting(0, 0); // retry immediately after timeout
     cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
     let hang = true;
@@ -1027,6 +1031,143 @@ describe("clean-tui AI summary", () => {
     // The hung promise never settled, so nothing else may have leaked —
     // in particular no unhandled rejection from the raced loser.
     expect(logged.filter((l) => l.includes("timed out"))).toHaveLength(1);
+  });
+
+  test("a transient 5xx is retried in place and the summary lands", async () => {
+    // A one-off upstream failure (a proxy's "no response within 15s" 502)
+    // must neither drop the summary nor trip the session-wide backoff: the
+    // retry recovers inside the request, logging the intermediate attempt
+    // without pausing anything or raising the widget.
+    const logPath = useScratchSummaryLog();
+    const widgets: Array<[string, string[] | undefined]> = [];
+    __setSummaryUiForTesting({
+      hasUI: true,
+      setWidget: (key, content) => widgets.push([key, content]),
+    });
+    cleanupFns.push(() => __setSummaryUiForTesting(undefined));
+    __setSummaryRetryDelaysForTesting([1]);
+    cleanupFns.push(() => __setSummaryRetryDelaysForTesting());
+    let calls = 0;
+    scriptedBackend(() => {
+      calls++;
+      if (calls === 1)
+        throw new Error(
+          '502: {"message":"Failed to reach upstream"} (test/model)',
+        );
+      return "Recovered by the in-place retry";
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "retry");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Recovered by the in-place retry",
+    );
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const failures = events.filter(
+      (e) => e.type === "summary_request" && e.outcome === "failed",
+    );
+    expect(failures).toHaveLength(1); // the intermediate attempt only
+    expect(failures[0].attempt).toBe(1);
+    expect(failures[0].pauseMs).toBeUndefined();
+    const ok = events.find(
+      (e) => e.type === "summary_request" && e.outcome === "ok",
+    );
+    expect(ok?.attempt).toBe(2);
+    // No pause, no alarm: the widget never engages for a retried blip.
+    expect(widgets).toHaveLength(0);
+  });
+
+  test("rate limits are not retried in place — the backoff owns them", async () => {
+    // An immediate second attempt against a rate limiter is exactly what the
+    // session-wide backoff exists to prevent; 429 stays a single attempt.
+    const logPath = useScratchSummaryLog();
+    __setSummaryRetryDelaysForTesting([1]);
+    cleanupFns.push(() => __setSummaryRetryDelaysForTesting());
+    __setSummaryBackoffForTesting(0, 0);
+    cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
+    let calls = 0;
+    scriptedBackend(() => {
+      calls++;
+      throw new Error("summary request failed: HTTP 429 (test/model)");
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "rate");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(calls).toBe(1); // no in-place second attempt
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const failures = events.filter(
+      (e) => e.type === "summary_request" && e.outcome === "failed",
+    );
+    expect(failures).toHaveLength(1);
+    expect(failures[0].attempt).toBeUndefined();
+  });
+
+  test("retryable failures exhaust retries, then pause with the widget", async () => {
+    // When every attempt fails the request falls through to the existing
+    // failure path: one failed event per attempt (only the final one carries
+    // pauseMs) and the pause widget above the editor. The test ladder [40, 1]
+    // also proves the pause is progressive: the gap before attempt 2 is the
+    // first delay entry, the gap before attempt 3 the far shorter second one.
+    const logPath = useScratchSummaryLog();
+    const widgets: Array<[string, string[] | undefined]> = [];
+    __setSummaryUiForTesting({
+      hasUI: true,
+      setWidget: (key, content) => widgets.push([key, content]),
+    });
+    cleanupFns.push(() => __setSummaryUiForTesting(undefined));
+    __setSummaryRetryDelaysForTesting([40, 1]);
+    cleanupFns.push(() => __setSummaryRetryDelaysForTesting());
+    const attemptAt: number[] = [];
+    scriptedBackend(() => {
+      attemptAt.push(Date.now());
+      throw new Error("502: upstream_error (test/model)");
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "exhaust");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 80));
+    expect(attemptAt).toHaveLength(3); // initial attempt + two retries
+    const gap1 = attemptAt[1] - attemptAt[0];
+    const gap2 = attemptAt[2] - attemptAt[1];
+    expect(gap1).toBeGreaterThanOrEqual(35); // first ladder entry: 40ms
+    expect(gap2).toBeLessThan(gap1); // second entry (1ms) — progressive
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const failures = events.filter(
+      (e) => e.type === "summary_request" && e.outcome === "failed",
+    );
+    expect(failures).toHaveLength(3);
+    expect(failures[0].attempt).toBe(1); // intermediate: logged, no pause
+    expect(failures[0].pauseMs).toBeUndefined();
+    expect(failures[1].attempt).toBe(2);
+    expect(failures[1].pauseMs).toBeUndefined();
+    expect(failures[2].attempt).toBe(3); // final give-up carries the pause
+    expect(failures[2].pauseMs).toBe(30_000);
+    const shown = widgets.at(-1);
+    expect(shown?.[0]).toBe("bermudis-pi-goodies.summaries");
+    expect(shown?.[1]?.[0]).toContain("⏸ summaries paused 30s");
   });
 
   test("a per-request AbortError frees the slot without logging a failure", async () => {

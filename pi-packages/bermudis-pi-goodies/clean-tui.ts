@@ -418,6 +418,37 @@ let summaryRequestTimeoutMs = SUMMARY_REQUEST_TIMEOUT_MS;
 export function __setSummaryRequestTimeoutForTesting(ms: number): void {
   summaryRequestTimeoutMs = ms;
 }
+// Transient provider failures get up to three quick second chances before
+// the failure counts toward the session-wide backoff: upstream 5xx or
+// network blips (e.g. a proxy's "no response from upstream within 15s")
+// must neither drop the summary nor idle every summary for the 30s base
+// cooldown. The pause between retries is progressive — 1s, 5s, 10s — so a
+// still-stumbling provider gets room without making the first recovery
+// slow. Rate limits (429), other 4xx, config errors, and deterministic
+// failures (the empty-summary thinking-model diagnosis) are not retried —
+// the backoff machinery owns those, and hammering a rate limiter with
+// retries is exactly what it exists to prevent. Retries hold their
+// concurrency slot for the whole cycle; at the 20s per-attempt timeout that
+// bounds one command's cycle at ~96s, which is acceptable for background
+// polish that stays silent while it works.
+const SUMMARY_RETRY_DELAYS_MS = [1_000, 5_000, 10_000];
+let summaryRetryDelaysMs = SUMMARY_RETRY_DELAYS_MS;
+/** One delay per retry — attempts = 1 + length (undefined restores default). */
+export function __setSummaryRetryDelaysForTesting(delaysMs?: number[]): void {
+  summaryRetryDelaysMs = delaysMs ?? SUMMARY_RETRY_DELAYS_MS;
+}
+// Retryability is classified from the error message because pi-ai surfaces
+// provider failures as plain Errors ("502: {body...} (provider/model)") with
+// no status field. Word-boundary + colon-free \b5\d\d\b matches "HTTP 502"
+// and the "502: ..." shape alike, while leaving "HTTP 429" and config
+// messages unmatchable.
+const SUMMARY_RETRYABLE_ERROR_RE =
+  /\b5\d\d\b|timed? ?out|connection|econn(reset|refused|aborted)|enotfound|etimedout|eai_again|socket hang up|fetch failed/i;
+
+function isRetryableSummaryError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return SUMMARY_RETRYABLE_ERROR_RE.test(msg);
+}
 let summaryEnabled = true;
 
 export function __setSummaryEnabled(v: boolean): void {
@@ -611,6 +642,7 @@ function logSummaryFailure(
   err: unknown,
   pauseMs?: number,
   ms?: number,
+  attempt?: number,
 ) {
   const msg = describeError(err);
   const pause = pauseMs
@@ -622,6 +654,7 @@ function logSummaryFailure(
     ...(ms === undefined ? {} : { ms }),
     error: msg.slice(0, 300),
     ...(pauseMs ? { pauseMs } : {}),
+    ...(attempt && attempt > 1 ? { attempt } : {}),
     ...redactCommandForLog(cmd),
   });
   // TUI: widget above the editor shows the pause state and clears on
@@ -725,34 +758,103 @@ function startSummaryRequest(cmd: string): void {
   pendingSummaries.add(cmd);
   const requestStartedAt = Date.now();
   const signal = summarySessionAbort.signal;
-  // Per-request controller so a timeout actually cancels the HTTP request
-  // instead of only stopping the wait; chained to the session signal.
-  const controller = new AbortController();
-  const onSessionAbort = () => controller.abort();
-  if (signal.aborted) controller.abort();
-  else signal.addEventListener("abort", onSessionAbort, { once: true });
-  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timeoutTimer = setTimeout(() => {
-      controller.abort();
-      reject(
-        new Error(
-          `summary request timed out after ${
-            summaryRequestTimeoutMs < 1000
-              ? `${summaryRequestTimeoutMs}ms`
-              : `${Math.round(summaryRequestTimeoutMs / 1000)}s`
-          }`,
-        ),
-      );
-    }, summaryRequestTimeoutMs);
-  });
-  timeoutTimer?.unref?.();
-  const summarizePromise = activeBackend().summarize(cmd, controller.signal);
-  // The race below decides the outcome; the underlying promise may settle
-  // later (timeout won) — swallow its late rejection so it never becomes
-  // unhandled. Late landings are dropped; the queue retries after backoff.
-  summarizePromise.catch(() => {});
-  Promise.race([summarizePromise, timeout])
+  // One AbortController per attempt so a timeout actually cancels that
+  // attempt's HTTP request instead of only stopping the wait — and so a
+  // retry starts from a fresh, unaborted controller. Each attempt chains
+  // itself to the session signal; a session switch aborts all of them.
+  let onSessionAbort: (() => void) | undefined;
+  const summarizeOnce = (): Promise<string> => {
+    const controller = new AbortController();
+    onSessionAbort = () => controller.abort();
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", onSessionAbort, { once: true });
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutTimer = setTimeout(() => {
+        controller.abort();
+        reject(
+          new Error(
+            `summary request timed out after ${
+              summaryRequestTimeoutMs < 1000
+                ? `${summaryRequestTimeoutMs}ms`
+                : `${Math.round(summaryRequestTimeoutMs / 1000)}s`
+            }`,
+          ),
+        );
+      }, summaryRequestTimeoutMs);
+    });
+    timeoutTimer?.unref?.();
+    const summarizePromise = activeBackend().summarize(cmd, controller.signal);
+    // The race below decides the outcome; the underlying promise may settle
+    // later (timeout won) — swallow its late rejection so it never becomes
+    // unhandled. Late landings are dropped; the queue retries after backoff.
+    summarizePromise.catch(() => {});
+    return Promise.race([summarizePromise, timeout]).finally(() => {
+      clearTimeout(timeoutTimer);
+      if (onSessionAbort) signal.removeEventListener("abort", onSessionAbort);
+      onSessionAbort = undefined;
+    });
+  };
+
+  let attemptsUsed = 0;
+  const runWithRetries = async (): Promise<string> => {
+    let lastErr: unknown;
+    const maxAttempts = summaryRetryDelaysMs.length + 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      attemptsUsed = attempt;
+      if (attempt > 1) {
+        // Progressive pause: delays[0] before attempt 2, delays[1] before
+        // attempt 3, and so on. Abort-aware: a session switch during the
+        // delay must skip the next attempt (the outer catch returns
+        // silently via signal.aborted).
+        await new Promise<void>((resolve) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          const timer = setTimeout(
+            () => {
+              signal.removeEventListener("abort", onAbort);
+              resolve();
+            },
+            summaryRetryDelaysMs[attempt - 2] ?? 0,
+          );
+          timer.unref?.();
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        if (signal.aborted) throw lastErr;
+      }
+      const attemptStartedAt = Date.now();
+      try {
+        return await summarizeOnce();
+      } catch (err) {
+        lastErr = err;
+        if (
+          signal.aborted ||
+          (err as Error)?.name === "AbortError" ||
+          attempt === maxAttempts ||
+          !isRetryableSummaryError(err)
+        ) {
+          throw err;
+        }
+        // Intermediate attempt: log it (attempt-numbered) but neither pause
+        // nor alarm — the retry owns recovery; backoff and the pause widget
+        // engage only when retries are exhausted. The retry holds its
+        // concurrency slot for the whole cycle, which bounds queue waits.
+        logGoodiesEvent({
+          type: "summary_request",
+          outcome: "failed",
+          attempt,
+          ms: Date.now() - attemptStartedAt,
+          error: describeError(err).slice(0, 300),
+          ...redactCommandForLog(cmd),
+        });
+      }
+    }
+    throw lastErr;
+  };
+
+  runWithRetries()
     .then((raw) => {
       // Abort check MUST precede any shared-state mutation: a stale promise
       // settling after a session switch would otherwise delete the marker of
@@ -767,6 +869,7 @@ function startSummaryRequest(cmd: string): void {
         type: "summary_request",
         outcome: "ok",
         ms: Date.now() - requestStartedAt,
+        ...(attemptsUsed > 1 ? { attempt: attemptsUsed } : {}),
         ...redactCommandForLog(cmd),
       });
       clearSummaryPauseWidget();
@@ -784,11 +887,16 @@ function startSummaryRequest(cmd: string): void {
       // not a provider failure — neither penalize nor log it.
       if (signal.aborted || (err as Error)?.name === "AbortError") return;
       const pauseMs = noteSummaryFailure(err);
-      logSummaryFailure(cmd, err, pauseMs, Date.now() - requestStartedAt);
+      logSummaryFailure(
+        cmd,
+        err,
+        pauseMs,
+        Date.now() - requestStartedAt,
+        attemptsUsed,
+      );
     })
     .finally(() => {
-      clearTimeout(timeoutTimer);
-      signal.removeEventListener("abort", onSessionAbort);
+      if (onSessionAbort) signal.removeEventListener("abort", onSessionAbort);
       if (!signal.aborted) drainSummaryQueue();
     });
 }

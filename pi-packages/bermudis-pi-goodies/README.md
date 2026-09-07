@@ -56,9 +56,14 @@ again.
 
 While summaries are paused by a failure, a `⏸ summaries paused Ns — …`
 widget line above the editor shows the cause and clears itself on the first
-success. The log at `~/.pi/agent/goodies.log` (capped at 256 KB, oldest
+success. Transient provider failures (upstream 5xx, stalls, network blips)
+are retried in place — up to three tries with a progressive pause of 1s,
+5s, then 10s — before any of that engages, so a single blip costs nothing;
+rate limits and other 4xx go straight to the pause. The log at
+`~/.pi/agent/goodies.log` (capped at 256 KB, oldest
 lines dropped) records one structured JSONL event per summary request —
-success or failure, with duration and the command prefix — plus `load`,
+success or failure, with duration and the command prefix (retried requests
+carry an `attempt` field) — plus `load`,
 `kilo_warning`, and `config_error` events. If summaries silently stop, look
 there first; e.g. `jq -r 'select(.type == "summary_request") | .outcome'
 ~/.pi/agent/goodies.log | sort | uniq -c` gives request counts by outcome.
