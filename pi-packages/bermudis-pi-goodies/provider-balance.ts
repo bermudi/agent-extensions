@@ -47,8 +47,19 @@ const BALANCE_FETCH_TIMEOUT_MS = 5_000;
  */
 const IDLE_REFRESH_INTERVAL_MS = 60_000;
 const IDLE_REFRESH_JITTER_MS = 15_000;
-/** Refresh the footer balance every Nth turn end during a run. See turn_end handler. */
-const REFRESH_EVERY_N_TURNS = 5;
+/** Minimum time between turn_end-triggered balance refreshes. See turn_end handler. */
+const TURN_REFRESH_MIN_INTERVAL_MS = 30_000;
+/** On session start, adopt a sibling/previous session's cache entry younger
+ *  than this instead of refetching — rapid session switches then cost nothing. */
+const SESSION_START_CACHE_ADOPT_MS = 15_000;
+/** After a failed provider fetch, idle polls machine-wide back off for this
+ *  long via a shared marker in the balance cache. */
+export const FAILURE_BACKOFF_MS = 60_000;
+/** Failure markers older than this are removed by cache cleanup; readers only
+ *  ever consult them within FAILURE_BACKOFF_MS anyway. */
+const BALANCE_FAILURE_MAX_AGE_MS = 10 * 60_000;
+/** Fixed name so concurrent writers replace (not accumulate) markers. */
+const BALANCE_FAILURE_FILENAME = "failure.json";
 
 /**
  * Balance cache shared across every pi process on the machine, keyed by
@@ -61,7 +72,11 @@ const REFRESH_EVERY_N_TURNS = 5;
  *    for the new session (session_shutdown reason "resume" -> session_start
  *    reason "resume"), wiping in-memory state. Without a shared cache the new
  *    session's footer is blank/stale until its own first fetch lands, which
- *    can be agent_settled or the 5th turn_end.
+ *    can be agent_settled or a throttled turn_end.
+ *
+ * The cache also carries a per-account failure marker so idle sessions
+ * machine-wide back off a failing provider endpoint together: without it, one
+ * outage turns M idle sessions into M retrying clients per minute.
  */
 const BALANCE_CACHE_DIR = join(getAgentDir(), "cache", "provider-balances");
 /** Ignore cache entries older than this; stale balances mislead. */
@@ -400,7 +415,9 @@ export function parseZaiQuota(value: unknown): ZaiQuota | null {
   if (!Array.isArray(limits)) return null;
 
   const tokenWindows = limits.flatMap((candidate) => {
-    if (stringProperty(candidate, "type") !== "TOKENS_LIMIT") return [];
+    // Coding-plan v3 renamed TOKENS_LIMIT to CREDIT_LIMIT; fields identical.
+    const type = stringProperty(candidate, "type");
+    if (type !== "TOKENS_LIMIT" && type !== "CREDIT_LIMIT") return [];
     const unit = numericProperty(candidate, "unit");
     const number = numericProperty(candidate, "number");
     const usedPercent = parseZaiUsedPercent(candidate);
@@ -425,6 +442,7 @@ export function parseZaiQuota(value: unknown): ZaiQuota | null {
     stringProperty(data, "plan") ??
     stringProperty(data, "plan_type") ??
     stringProperty(data, "packageName") ??
+    stringProperty(data, "level") ??
     null;
   return { planName, tokenWindows };
 }
@@ -750,6 +768,32 @@ function cleanupBalanceCache(
           continue;
         }
 
+        // The per-account failure marker is metadata, not an observation:
+        // keep it while fresh, drop it once stale or malformed.
+        if (filename === BALANCE_FAILURE_FILENAME) {
+          let failedAt: number | null = null;
+          try {
+            const raw = readRegularJsonFile(path);
+            const entry = raw === null ? null : asRecord(JSON.parse(raw));
+            failedAt = numericProperty(entry, "failedAt");
+          } catch {
+            // Malformed markers fall through to deletion.
+          }
+          if (
+            failedAt !== null &&
+            failedAt > 0 &&
+            nowMs - failedAt < BALANCE_FAILURE_MAX_AGE_MS
+          ) {
+            continue;
+          }
+          try {
+            unlinkSync(path);
+          } catch {
+            // Best effort.
+          }
+          continue;
+        }
+
         try {
           const raw = readRegularJsonFile(path);
           const entry = raw === null ? null : asRecord(JSON.parse(raw));
@@ -906,6 +950,69 @@ export function writeCachedBalance(
   return true;
 }
 
+/**
+ * Timestamp of the most recent failed fetch for this account, if any. Shared
+ * machine-wide through the balance cache so idle sessions can back off a
+ * failing endpoint together instead of each burning a request timeout.
+ */
+export function readBalanceFailureAt(
+  cacheKey: string,
+  nowMs = Date.now(),
+  cacheDir = BALANCE_CACHE_DIR,
+): number | null {
+  try {
+    const path = join(
+      balanceCacheAccountDir(cacheKey, cacheDir),
+      BALANCE_FAILURE_FILENAME,
+    );
+    const raw = readRegularJsonFile(path);
+    if (raw === null) return null;
+    const entry = asRecord(JSON.parse(raw));
+    const failedAt = numericProperty(entry, "failedAt");
+    return failedAt !== null && failedAt > 0 ? failedAt : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Best effort: a missing or unwritable marker must never affect the footer. */
+export function writeBalanceFailureMarker(
+  cacheKey: string,
+  observedAtMs = Date.now(),
+  cacheDir = BALANCE_CACHE_DIR,
+): boolean {
+  try {
+    mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+    if (!isSafeDirectory(cacheDir)) return false;
+    const accountDir = balanceCacheAccountDir(cacheKey, cacheDir);
+    mkdirSync(accountDir, { recursive: true, mode: 0o700 });
+    if (!isSafeDirectory(accountDir)) return false;
+    writeJsonFileAtomic(join(accountDir, BALANCE_FAILURE_FILENAME), {
+      failedAt: observedAtMs,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A successful fetch means the endpoint recovered; let idle polls resume. */
+export function clearBalanceFailureMarker(
+  cacheKey: string,
+  cacheDir = BALANCE_CACHE_DIR,
+): void {
+  try {
+    unlinkSync(
+      join(
+        balanceCacheAccountDir(cacheKey, cacheDir),
+        BALANCE_FAILURE_FILENAME,
+      ),
+    );
+  } catch {
+    // Absent marker or unwritable cache: nothing to do.
+  }
+}
+
 type FooterSession = ConstructorParameters<typeof FooterComponent>[0];
 type FooterFactory = NonNullable<
   Parameters<ExtensionContext["ui"]["setFooter"]>[0]
@@ -1055,6 +1162,15 @@ export interface ProviderBalanceDependencies {
   clearTimeout?: typeof clearTimeout;
 }
 
+/** Tuning per refresh trigger: whether to adopt a sufficiently fresh cache
+ *  entry instead of fetching, and whether this refresh is opportunistic —
+ *  skippable when a sibling session just failed or one is already fetching.
+ *  Refreshes that anchor the footer after user activity are never skippable. */
+interface RefreshOptions {
+  maxCacheAgeMs?: number;
+  opportunistic?: boolean;
+}
+
 export default function providerBalance(
   pi: ExtensionAPI,
   dependencies: ProviderBalanceDependencies = {},
@@ -1076,6 +1192,7 @@ export default function providerBalance(
   let refreshGeneration = 0;
   let refreshInFlight = false;
   let refreshController: AbortController | undefined;
+  let lastTurnRefreshAt: number | undefined;
   let idleRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   let authTransitionTimer: ReturnType<typeof setTimeout> | undefined;
   let requestRender: (() => void) | undefined;
@@ -1145,25 +1262,26 @@ export default function providerBalance(
   function refreshForModel(
     ctx: ExtensionContext,
     model: ExtensionContext["model"],
-    maxCacheAgeMs?: number,
+    opts?: RefreshOptions,
   ): Promise<void> {
-    return refreshBalance(ctx, model?.provider, model, maxCacheAgeMs);
+    return refreshBalance(ctx, model?.provider, model, opts);
   }
 
   async function refreshBalance(
     ctx: ExtensionContext,
     provider: string | undefined,
     model: ExtensionContext["model"],
-    maxCacheAgeMs?: number,
+    opts?: RefreshOptions,
   ): Promise<void> {
-    const isIdleRefresh = maxCacheAgeMs !== undefined;
-    // An idle poll is opportunistic. It must never cancel the post-run or
-    // model-change refresh that provides the authoritative new reading.
-    if (isIdleRefresh && refreshInFlight) return;
+    const maxCacheAgeMs = opts?.maxCacheAgeMs;
+    const opportunistic = opts?.opportunistic === true;
+    // An opportunistic refresh (the idle poll) must never cancel the post-run
+    // or model-change refresh that provides the authoritative new reading.
+    if (opportunistic && refreshInFlight) return;
 
     const generation = ++refreshGeneration;
     refreshInFlight = true;
-    if (!isIdleRefresh) refreshController?.abort();
+    if (!opportunistic) refreshController?.abort();
     const controller = new AbortController();
     refreshController = controller;
 
@@ -1178,6 +1296,7 @@ export default function providerBalance(
 
     const providerId = provider;
     const adapter = providerId ? adapters[providerId] : undefined;
+    let cacheKey: string | undefined;
 
     try {
       if (!adapter || !providerId) return;
@@ -1218,15 +1337,16 @@ export default function providerBalance(
         clearBalance();
         return;
       }
-      const cacheKey = balanceCacheKey(providerId, token);
-      if (displayedCacheKey !== cacheKey) clearBalance();
-      displayedCacheKey = cacheKey;
+      const tokenCacheKey = balanceCacheKey(providerId, token);
+      cacheKey = tokenCacheKey;
+      if (displayedCacheKey !== tokenCacheKey) clearBalance();
+      displayedCacheKey = tokenCacheKey;
       identityPending = false;
 
       // Paint the freshest known value for this account immediately. The
       // credential fingerprint prevents sessions for different accounts from
       // showing or suppressing one another's readings.
-      const cached = readCachedBalanceEntry(cacheKey, now(), cacheDir);
+      const cached = readCachedBalanceEntry(tokenCacheKey, now(), cacheDir);
       if (cached && generation === refreshGeneration) {
         balance = cached.balance;
         balanceFetchedAt = cached.fetchedAt;
@@ -1235,6 +1355,18 @@ export default function providerBalance(
           maxCacheAgeMs !== undefined &&
           now() - cached.fetchedAt < maxCacheAgeMs
         ) {
+          return;
+        }
+      }
+
+      // Back off a failing endpoint: when any session's fetch failed
+      // recently, opportunistic polls skip theirs, so M idle sessions make
+      // ~1 attempt per FAILURE_BACKOFF_MS machine-wide instead of M.
+      // Authoritative refreshes (turn_end, agent_settled, model changes,
+      // session start) still retry — user activity deserves a real attempt.
+      if (opportunistic && cacheKey !== undefined) {
+        const failedAt = readBalanceFailureAt(cacheKey, now(), cacheDir);
+        if (failedAt !== null && now() - failedAt < FAILURE_BACKOFF_MS) {
           return;
         }
       }
@@ -1297,6 +1429,8 @@ export default function providerBalance(
       }
 
       identityPending = false;
+      // Recovery detected: clear the marker so sibling idle polls resume.
+      clearBalanceFailureMarker(cacheKey, cacheDir);
       const persisted = writeCachedBalance(
         cacheKey,
         nextBalance,
@@ -1315,6 +1449,11 @@ export default function providerBalance(
       }
       identityPending = false;
       clearBalance();
+      // Record the failure machine-wide so sibling sessions' idle polls back
+      // off instead of stacking their own timeouts onto the same outage.
+      if (cacheKey !== undefined) {
+        writeBalanceFailureMarker(cacheKey, now(), cacheDir);
+      }
       // This is a best-effort background refresh. Writing to stdout/stderr while
       // Pi owns the terminal corrupts the TUI (the text appears in the editor),
       // so expose failures to other extensions without producing terminal output.
@@ -1341,7 +1480,10 @@ export default function providerBalance(
         // Countdown text is derived at render time, so repaint even when the
         // cache is stale or the provider request fails.
         requestRender?.();
-        void refreshForModel(ctx, ctx.model, IDLE_REFRESH_INTERVAL_MS);
+        void refreshForModel(ctx, ctx.model, {
+          maxCacheAgeMs: IDLE_REFRESH_INTERVAL_MS,
+          opportunistic: true,
+        });
       }
       scheduleIdleRefresh();
     }, delay);
@@ -1396,7 +1538,7 @@ export default function providerBalance(
   // is both our initializer and our "user switched sessions" signal.
   // refreshBalance seeds from the shared cache first, so a session resumed
   // mid-run elsewhere shows the other instance's last reading immediately
-  // instead of going stale until agent_settled or the 5th turn_end.
+  // instead of going stale until agent_settled or the next turn_end refresh.
   pi.on("session_start", (_event, ctx) => {
     activeContext = ctx;
     activeThinkingLevel = restoredThinkingLevel(ctx);
@@ -1404,7 +1546,12 @@ export default function providerBalance(
     cleanupBalanceCache(cacheDir, now());
     if (ctx.mode === "tui") scheduleIdleRefresh();
     // Footer data is supplemental. Never hold up session readiness on network.
-    void refreshForModel(ctx, ctx.model);
+    // Adopt a seconds-old sibling/previous reading instead of refetching, so
+    // rapid session switches and staggered process starts don't stack
+    // duplicate requests for a value that cannot have changed since.
+    void refreshForModel(ctx, ctx.model, {
+      maxCacheAgeMs: SESSION_START_CACHE_ADOPT_MS,
+    });
   });
 
   pi.on("input", (event, ctx) => {
@@ -1435,13 +1582,22 @@ export default function providerBalance(
 
   // Live updates during a run. A turn is one assistant response plus its tool
   // results, so turn_end is exactly the granularity at which balance/credits
-  // change. Refresh every Nth turn instead of every turn so chatty runs don't
-  // hammer provider status endpoints; agent_settled still fires afterward and
-  // guarantees a final refresh, so runs shorter than N turns and the trailing
-  // turns past the last multiple are never left stale.
-  pi.on("turn_end", (event, ctx) => {
+  // change. Turn ends can land seconds apart in tool-heavy runs, so refresh
+  // at most once per TURN_REFRESH_MIN_INTERVAL_MS instead of on every turn —
+  // each refresh costs keychain lookups plus a provider status request, and
+  // chatty runs would hammer that endpoint. agent_settled still fires
+  // afterward and guarantees a final refresh, so the tail of a run is never
+  // left stale.
+  pi.on("turn_end", (_event, ctx) => {
     activeContext = ctx;
-    if ((event.turnIndex + 1) % REFRESH_EVERY_N_TURNS !== 0) return;
+    const timestamp = now();
+    if (
+      lastTurnRefreshAt !== undefined &&
+      timestamp - lastTurnRefreshAt < TURN_REFRESH_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
+    lastTurnRefreshAt = timestamp;
     void refreshForModel(ctx, ctx.model);
   });
 
@@ -1455,6 +1611,7 @@ export default function providerBalance(
     refreshInFlight = false;
     refreshController?.abort();
     refreshController = undefined;
+    lastTurnRefreshAt = undefined;
     if (idleRefreshTimer !== undefined) clearTimer(idleRefreshTimer);
     idleRefreshTimer = undefined;
     if (authTransitionTimer !== undefined) clearTimer(authTransitionTimer);

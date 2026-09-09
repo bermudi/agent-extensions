@@ -31,9 +31,14 @@ import providerBalance, {
   parseKiloBalance,
   parseOpenRouterCredits,
   parseZaiQuota,
+  readBalanceFailureAt,
   readCachedBalance,
+  writeBalanceFailureMarker,
   writeCachedBalance,
+  clearBalanceFailureMarker,
+  FAILURE_BACKOFF_MS,
   zaiQuotaToBalance,
+  type BalanceAdapter,
 } from "./provider-balance.ts";
 
 describe("event latency", () => {
@@ -348,26 +353,31 @@ describe("auth transition", () => {
 describe("turn_end cadence", () => {
   function setup(): {
     fire: (event: TurnEndEvent) => void;
+    advanceTime: (ms: number) => void;
     apiKeyCalls: () => number;
   } {
     const handlers = new Map<
       string,
       (event: unknown, ctx: unknown) => unknown
     >();
-    providerBalance({
-      on(event, handler) {
-        handlers.set(
-          event,
-          handler as (event: unknown, ctx: unknown) => unknown,
-        );
-      },
-      events: {
-        emit() {},
-        on() {
-          return () => {};
+    let currentTimeMs = 1_000_000;
+    providerBalance(
+      {
+        on(event, handler) {
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: unknown) => unknown,
+          );
         },
-      },
-    } as unknown as ExtensionAPI);
+        events: {
+          emit() {},
+          on() {
+            return () => {};
+          },
+        },
+      } as unknown as ExtensionAPI,
+      { now: () => currentTimeMs },
+    );
 
     const turnEnd = handlers.get("turn_end");
     if (!turnEnd) {
@@ -393,6 +403,9 @@ describe("turn_end cadence", () => {
       fire: (event: TurnEndEvent) => {
         void turnEnd(event, ctx);
       },
+      advanceTime: (ms: number) => {
+        currentTimeMs += ms;
+      },
       apiKeyCalls: () => apiKeyCalls,
     };
   }
@@ -406,21 +419,32 @@ describe("turn_end cadence", () => {
     };
   }
 
-  test("refreshes on every 5th turn end over a 20-turn run", async () => {
+  test("refreshes on the first turn end", async () => {
     const { fire, apiKeyCalls } = setup();
-    for (let i = 0; i < 20; i++) fire(turnEndAt(i));
+    fire(turnEndAt(0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    // turnIndex 4, 9, 14, 19 -> exactly 4 refresh attempts.
-    expect(apiKeyCalls()).toBe(4);
+    expect(apiKeyCalls()).toBe(1);
   });
 
-  test("does not refresh before the 5th turn", async () => {
+  test("does not refresh more than once per interval", async () => {
     const { fire, apiKeyCalls } = setup();
-    for (let i = 0; i < 4; i++) fire(turnEndAt(i));
+    for (let i = 0; i < 5; i++) fire(turnEndAt(i));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(apiKeyCalls()).toBe(0);
+    // Five turn ends inside the 30s throttle window -> one refresh attempt.
+    expect(apiKeyCalls()).toBe(1);
+  });
+
+  test("refreshes again once the interval has elapsed", async () => {
+    const { fire, advanceTime, apiKeyCalls } = setup();
+    fire(turnEndAt(0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    advanceTime(30_000);
+    fire(turnEndAt(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(apiKeyCalls()).toBe(2);
   });
 });
 
@@ -469,6 +493,47 @@ describe("parseZaiQuota", () => {
           windowSeconds: 604_800,
           resetAt: 1_800_345_600,
         },
+      ],
+    });
+  });
+
+  test("parses v3 coding-plan CREDIT_LIMIT windows", () => {
+    expect(
+      parseZaiQuota({
+        code: 200,
+        msg: "Operation successful",
+        success: true,
+        data: {
+          level: "pro",
+          limits: [
+            {
+              type: "CREDIT_LIMIT",
+              unit: 3,
+              number: 5,
+              usage: 12_000,
+              currentValue: 5_432,
+              remaining: 6_567,
+              percentage: 45,
+              nextResetTime: 1_788_987_334_000,
+            },
+            {
+              type: "CREDIT_LIMIT",
+              unit: 6,
+              number: 1,
+              usage: 60_000,
+              currentValue: 6_289,
+              remaining: 53_710,
+              percentage: 10,
+              nextResetTime: 1_789_523_069_000,
+            },
+          ],
+        },
+      }),
+    ).toEqual({
+      planName: "pro",
+      tokenWindows: [
+        { usedPercent: 45, windowSeconds: 18_000, resetAt: 1_788_987_334 },
+        { usedPercent: 10, windowSeconds: 604_800, resetAt: 1_789_523_069 },
       ],
     });
   });
@@ -997,6 +1062,30 @@ describe("shared balance cache", () => {
       ]);
     }));
 
+  test("failure markers round-trip, clear, and expire via cleanup", () =>
+    withCacheDirectory((directory) => {
+      writeBalanceFailureMarker("account-a", 1_000, directory);
+      expect(readBalanceFailureAt("account-a", 1_500, directory)).toBe(1_000);
+      expect(readBalanceFailureAt("account-b", 1_500, directory)).toBeNull();
+
+      // A successful fetch clears the marker so idle polls resume immediately.
+      clearBalanceFailureMarker("account-a", directory);
+      expect(readBalanceFailureAt("account-a", 1_500, directory)).toBeNull();
+
+      // Stale markers are dropped by the cleanup accompanying a later write;
+      // fresh ones survive next to real observations.
+      writeBalanceFailureMarker("account-a", 1_000, directory);
+      writeBalanceFailureMarker("account-b", 700_000, directory);
+      writeCachedBalance("account-a", [{ credits: 1 }], 700_000, directory);
+      expect(readBalanceFailureAt("account-a", 700_001, directory)).toBeNull();
+      expect(readBalanceFailureAt("account-b", 700_001, directory)).toBe(
+        700_000,
+      );
+      expect(readCachedBalance("account-a", 700_001, directory)).toEqual([
+        { credits: 1 },
+      ]);
+    }));
+
   test("isolates ordinary tokens but shares rotating Codex account tokens", () => {
     expect(balanceCacheKey("kilo", "token-a")).not.toBe(
       balanceCacheKey("kilo", "token-b"),
@@ -1015,5 +1104,189 @@ describe("shared balance cache", () => {
     expect(balanceCacheKey("openai-codex", token("a", "one"))).not.toBe(
       balanceCacheKey("openai-codex", token("b", "one")),
     );
+  });
+});
+
+describe("shared failure backoff and session-start adoption", () => {
+  interface Harness {
+    handlers: Map<string, (event: unknown, ctx: unknown) => unknown>;
+    scheduled: Array<{ callback: () => void; delay: number }>;
+    ctx: ExtensionContext;
+    directory: string;
+    cacheKey: string;
+    advanceTime: (ms: number) => void;
+    currentTime: () => number;
+    cleanup: () => Promise<void>;
+  }
+
+  function harness(adapter: BalanceAdapter): Harness {
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: unknown) => unknown
+    >();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
+
+    let currentTimeMs = 1_000_000;
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    providerBalance(
+      {
+        on(event, handler) {
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: unknown) => unknown,
+          );
+        },
+        events: {
+          emit() {},
+          on() {
+            return () => {};
+          },
+        },
+      } as unknown as ExtensionAPI,
+      {
+        adapters: { zai: adapter },
+        cacheDir: directory,
+        now: () => currentTimeMs,
+        random: () => 0.5,
+        setTimeout,
+        clearTimeout,
+      },
+    );
+
+    const ctx = {
+      mode: "tui",
+      model: { provider: "zai" },
+      isIdle: () => true,
+      ui: { setFooter() {} },
+      sessionManager: { getBranch: () => [] },
+      modelRegistry: {
+        isUsingOAuth: () => false,
+        getApiKeyForProvider: async () => "token",
+      },
+    } as unknown as ExtensionContext;
+
+    return {
+      handlers,
+      scheduled,
+      ctx,
+      directory,
+      cacheKey: balanceCacheKey("zai", "token"),
+      advanceTime: (ms: number) => {
+        currentTimeMs += ms;
+      },
+      currentTime: () => currentTimeMs,
+      cleanup: async () => {
+        await rm(directory, { recursive: true, force: true });
+      },
+    };
+  }
+
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  test("idle polls back off after a failure and resume after recovery", async () => {
+    let fetchCalls = 0;
+    let fail = true;
+    const {
+      handlers,
+      scheduled,
+      ctx,
+      cacheKey,
+      directory,
+      advanceTime,
+      currentTime,
+      cleanup,
+    } = harness({
+      fetch: async () => {
+        fetchCalls++;
+        if (fail) throw new Error("upstream down");
+        return [{ credits: 12.5 }];
+      },
+    });
+    try {
+      const start = handlers.get("session_start");
+      const turnEnd = handlers.get("turn_end");
+      if (!start || !turnEnd) throw new Error("missing handlers");
+
+      // Session start fetches and fails; the failure marker is written.
+      start({}, ctx);
+      await flush();
+      expect(fetchCalls).toBe(1);
+      expect(readBalanceFailureAt(cacheKey, currentTime(), directory)).toBe(
+        currentTime(),
+      );
+
+      // An idle poll inside the backoff window skips the fetch entirely.
+      scheduled[scheduled.length - 1]?.callback();
+      await flush();
+      expect(fetchCalls).toBe(1);
+
+      // turn_end is authoritative: it retries despite the fresh marker.
+      turnEnd({ turnIndex: 0 }, ctx);
+      await flush();
+      expect(fetchCalls).toBe(2);
+
+      // Once the backoff window elapses, an idle poll retries and succeeds,
+      // writing the balance and clearing the marker.
+      fail = false;
+      advanceTime(FAILURE_BACKOFF_MS + 1);
+      scheduled[scheduled.length - 1]?.callback();
+      await flush();
+      expect(fetchCalls).toBe(3);
+      expect(readCachedBalance(cacheKey, currentTime(), directory)).toEqual([
+        { credits: 12.5 },
+      ]);
+      expect(
+        readBalanceFailureAt(cacheKey, currentTime(), directory),
+      ).toBeNull();
+
+      // With a fresh cache entry the idle poll adopts it instead of fetching.
+      advanceTime(1_000);
+      scheduled[scheduled.length - 1]?.callback();
+      await flush();
+      expect(fetchCalls).toBe(3);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("session start adopts a seconds-old reading instead of refetching", async () => {
+    let fetchCalls = 0;
+    const { handlers, ctx, cacheKey, directory, currentTime, cleanup } =
+      harness({
+        fetch: async () => {
+          fetchCalls++;
+          return [{ credits: 9 }];
+        },
+      });
+    try {
+      // A sibling session (or this process's previous session) fetched 5s ago.
+      writeCachedBalance(
+        cacheKey,
+        [{ credits: 7 }],
+        currentTime() - 5_000,
+        directory,
+      );
+
+      const start = handlers.get("session_start");
+      if (!start) throw new Error("missing session_start");
+      start({}, ctx);
+      await flush();
+
+      // The fresh sibling entry is adopted; no provider request is made and
+      // the cache still holds the sibling's value.
+      expect(fetchCalls).toBe(0);
+      expect(readCachedBalance(cacheKey, currentTime(), directory)).toEqual([
+        { credits: 7 },
+      ]);
+    } finally {
+      await cleanup();
+    }
   });
 });
