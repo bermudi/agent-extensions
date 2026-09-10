@@ -97,7 +97,7 @@ model is chewing on. `/goodies thinking-summaries on` adds a live line
 above the editor while a thinking run streams:
 
 ```text
-✻ thinking · Weighing render escalation rules in pi-tui
+✻ Weighing render escalation rules in pi-tui
 ```
 
 The line updates as the reasoning moves — a summary every ~5s once the run

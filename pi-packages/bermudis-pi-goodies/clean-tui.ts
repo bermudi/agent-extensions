@@ -1061,7 +1061,7 @@ export function __setSummarySwapMaxAgeForTesting(ms: number): void {
 // same always-at-the-tail seam the pause indicator uses — and only while a
 // thinking run is actually streaming.
 const THINKING_WIDGET_KEY = "bermudis-pi-goodies.thinking";
-const THINKING_SUMMARY_PREFIX = "\u273b thinking \u00b7 ";
+const THINKING_SUMMARY_PREFIX = "\u273b ";
 // Below this the run says as much as a summary would; also keeps OpenAI's
 // empty reasoning items (no text at all) from ever costing a request.
 const THINKING_SUMMARY_MIN_CHARS = 400;
