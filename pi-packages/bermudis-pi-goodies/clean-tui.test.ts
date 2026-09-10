@@ -1897,9 +1897,9 @@ describe("clean-tui thinking summaries", () => {
 
     expect(calls).toHaveLength(1);
     const line = lastWidget(widgets, THINKING_KEY)?.[0];
-    // No "thinking" label — the line's place and style already say what
+    // No label, no marker — the line's place and style already say what
     // it is; the summary alone is the content.
-    expect(line).toBe("\u273b Weighing render safety rules");
+    expect(line).toBe("Weighing render safety rules");
   });
 
   test("sends only the tail of the thinking text", async () => {
