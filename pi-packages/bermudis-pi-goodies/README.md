@@ -12,19 +12,19 @@ extensions. One entry point, twelve independent features.
 | `prefer-tools`     | hook (no command)             | Nudge toward modern CLIs: `rg` over `grep`, `fd` over `find`, `uv` over bare `python`/`pip`/`pytest`/`mypy`.                                    |
 | `keep-model-on-new` | hook (no command)            | Keep the active model when `/new` starts a fresh session instead of reverting to pi's saved default model.                                    |
 | `model-thinking`   | `/model-thinking`             | Per-model default thinking levels: save the current level as this model's default and get it back on every switch to that model, instead of pi's global default. |
-| `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: back-to-back same-tool calls share one block (e.g. `read ×2`) until a boundary — visible text (assistant prose or a typed user message) or a thinking block (even an empty one, as OpenAI emits between tool calls) — so reasoning-per-call models render one block per call. Images stay visible without expanding, expand a row with ctrl+o to see the full command and results/diffs. Long bash commands get an AI-generated summary once you pick a model with `/goodies summary-model <provider/model>` (see "Smart summaries" below) — expanding a row swaps the summary back out for the raw command. While enabled, also flips `@bermudi/pi-codex`'s `apply_patch`/`web_search` into the same burst style. |
+| `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: back-to-back same-tool calls share one block (e.g. `read ×2`) until a boundary — visible text (assistant prose or a typed user message) or a thinking block (even an empty one, as OpenAI emits between tool calls) — so reasoning-per-call models render one block per call. Images stay visible without expanding, expand a row with ctrl+o to see the full command and results/diffs. Long bash commands get an AI-generated summary once you pick a model with `/goodies summary-model <provider/model>` (see "Smart summaries" below) — expanding a row swaps the summary back out for the raw command. While enabled, also flips `@bermudi/pi-codex`'s `apply_patch`/`web_search` into the same burst style. Long thinking runs can show a live plain-English line above the editor (`/goodies thinking-summaries on`) instead of a static `Thinking...` — see "Smart summaries". |
 | `review`           | `/review`, `/end-review`      | Code review workflow: review uncommitted changes, a branch, a commit, a GitHub PR, or folders. Prioritized findings with actionable follow-ups. |
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
 | `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 | `tps`              | hook (no command)             | Notify tokens/sec and in/out/cache token usage at the end of each agent turn.                                                                   |
-| `goodies`          | `/goodies`                    | Toggle individual features on/off without losing the rest. Also supports `/goodies summary-model [provider/model]` to pick the model used for AI bash-command summaries. State persists to `~/.pi/agent/goodies.json`. |
+| `goodies`          | `/goodies`                    | Toggle individual features on/off without losing the rest. Also supports `/goodies summary-model [provider/model]` to pick the model used for AI bash-command summaries, and `/goodies thinking-summaries <on\|off>` for live thinking summaries. State persists to `~/.pi/agent/goodies.json`. |
 
 ## Install
 
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.15.3
+pi install npm:bermudis-pi-goodies@0.16.0
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
@@ -59,7 +59,10 @@ widget line above the editor shows the cause and clears itself on the first
 success. Transient provider failures (upstream 5xx, stalls, network blips)
 are retried in place — up to three tries with a progressive pause of 1s,
 5s, then 10s — before any of that engages, so a single blip costs nothing;
-rate limits and other 4xx go straight to the pause. The log at
+rate limits and other 4xx go straight to the pause. Summary log events carry
+a `kind` field — `bash` or `thinking` — so `jq -r 'select(.type ==
+"summary_request") | [.kind, .outcome] | @tsv'` splits request counts by
+feature. The log at
 `~/.pi/agent/goodies.log` (capped at 256 KB, oldest
 lines dropped) records one structured JSONL event per summary request —
 success or failure, with duration and the command prefix (retried requests
@@ -78,10 +81,52 @@ Two practical notes:
   first ~2000 characters — to whichever provider hosts the model you chose.
   That is the same trust decision as running an agent session against that
   provider, made explicit here because it happens outside normal turns.
+  With thinking summaries on, the tail (~2000 characters) of in-progress
+  thinking goes to the same provider — same trust, recurring for as long as
+  the model reasons (see below).
 
 Failures degrade gracefully: the raw command stays visible as a heuristic
 hint, each distinct failure is logged once (naming the model), and repeated
 failures back off exponentially instead of hammering the provider.
+
+### Live thinking summaries
+
+With hidden thinking blocks (pi's `hideThinkingBlock`), a long reasoning
+run renders as one static italic `Thinking...` row — no hint of what the
+model is chewing on. `/goodies thinking-summaries on` adds a live line
+above the editor while a thinking run streams:
+
+```text
+✻ thinking · Weighing render escalation rules in pi-tui
+```
+
+The line updates as the reasoning moves — a summary every ~5s once the run
+passes ~400 characters, and only when it grew since the last one — and
+clears when the run closes (a tool call landing after it, the next thinking
+run taking over) or the turn settles. Short runs never cost a request:
+tool-interleaved reasoning is usually obvious from the tool row that
+follows.
+
+It needs the same summary model as bash summaries, rides the same provider
+health (a thinking failure pauses everything behind the shared `⏸` widget;
+the next success clears it), and logs the same `summary_request` events
+with `kind: "thinking"`. What it sends is the *tail* of the in-progress
+thinking — what the model is weighing *now*, not how it opened — and like
+commands it is logged as a digest, never raw text.
+
+Two honest trade-offs:
+
+- **Separate opt-in, default off.** A bash summary is one request per unique
+  command; a thinking summary recurs for as long as the model reasons.
+  Same provider, different volume — so `thinking-summaries on` asks for
+  that explicitly. It takes effect immediately, no `/reload`.
+- **It does not replace the `Thinking...` row itself.** Pi's only seam for
+  that text is one global label applied to every assistant message at
+  once — updating it mid-stream would rewrite every past thinking row, and
+  in regular tuiMode any change above the viewport is a full clear-screen +
+  scrollback wipe (rule 2 below — the 0.11.x flash). The widget line sits
+  above the editor, always at the transcript tail, so it is a cheap
+  differential update by construction.
 
 ### Render-safety rules (why summaries only refresh running rows)
 

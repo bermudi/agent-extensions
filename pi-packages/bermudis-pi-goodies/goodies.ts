@@ -61,6 +61,15 @@ type Config = Partial<Record<FeatureName, boolean>> & {
    * Unset means the feature is off.
    */
   "summary-model"?: string;
+  /**
+   * Live smart summaries of the model's thinking, shown as a widget line
+   * above the editor while a thinking run streams. Opt-in separately from
+   * bash summaries: it fires recurring requests for as long as the model
+   * reasons, which is more volume than the per-command bash summaries the
+   * summary-model opt-in described. Read at request time — no /reload
+   * needed. Still requires a summary-model to be set.
+   */
+  "thinking-summaries"?: boolean;
 };
 
 function loadConfig(): Config {
@@ -144,6 +153,16 @@ export function setSummaryModel(model: string | undefined): void {
   } else {
     config["summary-model"] = model.trim();
   }
+  saveConfig(config);
+}
+
+export function getThinkingSummariesEnabled(): boolean {
+  return config["thinking-summaries"] === true; // default off
+}
+
+export function setThinkingSummariesEnabled(enabled: boolean): void {
+  if (enabled) config["thinking-summaries"] = true;
+  else delete config["thinking-summaries"];
   saveConfig(config);
 }
 
@@ -235,7 +254,13 @@ export default function goodies(pi: ExtensionAPI): void {
   pi.registerCommand("goodies", {
     description: "Toggle bermudis-pi-goodies features on/off",
     getArgumentCompletions: (prefix) => {
-      const subcommands = ["list", "enable", "disable", "summary-model"];
+      const subcommands = [
+        "list",
+        "enable",
+        "disable",
+        "summary-model",
+        "thinking-summaries",
+      ];
       const verbMatch = prefix.match(/^(\S+)\s+(.*)$/);
       if (verbMatch) {
         const verb = verbMatch[1];
@@ -264,6 +289,12 @@ export default function goodies(pi: ExtensionAPI): void {
         const summaryModel = getSummaryModel();
         lines.push(
           `  smart summaries (bash): ${summaryModel ?? SUMMARY_OFF_HINT}`,
+        );
+        lines.push(
+          `  thinking summaries: ${getThinkingSummariesEnabled() ? "on" : "off"}` +
+            (getThinkingSummariesEnabled() && !summaryModel
+              ? ` (no summary model set — ${SUMMARY_OFF_HINT})`
+              : ""),
         );
         ctx.ui.notify(`goodies features:\n${lines.join("\n")}`, "info");
         return;
@@ -348,8 +379,32 @@ export default function goodies(pi: ExtensionAPI): void {
         return;
       }
 
+      if (sub === "thinking-summaries") {
+        const value = parts[1];
+        if (value !== "on" && value !== "off") {
+          ctx.ui.notify(
+            `Usage: /goodies thinking-summaries <on|off> (currently ${
+              getThinkingSummariesEnabled() ? "on" : "off"
+            })`,
+            "warning",
+          );
+          return;
+        }
+        setThinkingSummariesEnabled(value === "on");
+        const model = getSummaryModel();
+        ctx.ui.notify(
+          `thinking summaries ${value}. ` +
+            (value === "on" && !model
+              ? `No summary model set yet — run /goodies summary-model <provider/model> or nothing will happen. `
+              : "") +
+            "Takes effect immediately.",
+          "info",
+        );
+        return;
+      }
+
       ctx.ui.notify(
-        `Usage: /goodies [list|enable <feature>|disable <feature>|summary-model [provider/model|off]]`,
+        `Usage: /goodies [list|enable <feature>|disable <feature>|summary-model [provider/model|off]|thinking-summaries <on|off>]`,
         "warning",
       );
     },

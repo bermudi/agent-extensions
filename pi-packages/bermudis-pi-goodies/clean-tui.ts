@@ -49,6 +49,7 @@ import { describeError } from "./json-file.ts";
 import {
   findSummaryModel,
   getSummaryModel,
+  getThinkingSummariesEnabled,
   type SummaryModelRegistry,
 } from "./goodies.ts";
 
@@ -338,6 +339,11 @@ function recordResult(entry: Entry | undefined, result: any, ctx: any) {
 // unset summary-model means the feature is off entirely.
 interface SummaryBackend {
   summarize(cmd: string, signal: AbortSignal): Promise<string>;
+  /**
+   * Live summary of an in-progress thinking run (tail of its text).
+   * Optional so test backends for the bash path stay two-field objects.
+   */
+  summarizeThinking?(text: string, signal: AbortSignal): Promise<string>;
 }
 
 // Hard floor: commands at or under 80 chars are cheap to read as-is, so no
@@ -355,6 +361,13 @@ const SUMMARY_PROMPT =
   "Summarize this shell command in less than 13 words, plain English, no quotes, no formatting. " +
   'Examples: "cat >> file << \'EOF\' with 20 lines of log" -> "Appends reboot log to migration file". ' +
   "Command:\n";
+// The subject differs from the bash prompt: we are summarizing the agent's
+// own in-progress reasoning for a status line, so the answer must read as
+// present-tense activity ("Weighing render escalation rules"), not a
+// description of an artifact. The request carries the TAIL of the thinking
+// text — "what is it thinking about NOW" — not its start.
+const THINKING_SUMMARY_PROMPT =
+  "A coding agent is mid-reasoning about a task. Summarize what it is currently thinking about or doing in less than 10 words, present tense, plain English, no quotes, no formatting.\nRecent thinking:\n";
 // Provider error bodies are not under our control and flow into console
 // output plus the log-once dedup set; keep both bounded.
 const SUMMARY_ERROR_SNIPPET_CHARS = 200;
@@ -502,28 +515,9 @@ async function summarizeViaProvider(
   cmd: string,
   signal: AbortSignal,
 ): Promise<string> {
-  const configured = getSummaryModel();
-  if (!configured) throw new Error("no summary model configured");
-  const registry = summaryModelRegistry;
-  if (!registry)
-    throw new Error("model registry not captured yet this session");
-  const found = findSummaryModel(registry, configured);
-  if (!found)
-    throw new Error(`summary model "${configured}" not found in registry`);
-  const label = `${found.provider}/${found.id}`;
-  // getApiKeyAndHeaders resolves env keys, models.json auth, and refreshes
-  // OAuth tokens — the one thing a raw endpoint could never do. Safe to call
-  // fire-and-forget (pi-codex makes OAuth-refreshing calls the same way).
-  const auth = await registry.getApiKeyAndHeaders(found);
-  if (!auth.ok) throw new Error(`${auth.error} (${label})`);
-  const headers =
-    auth.headers && Object.keys(auth.headers).length > 0
-      ? auth.headers
-      : undefined;
-  if (!auth.apiKey && !headers)
-    throw new Error(`no API key or headers configured (${label})`);
+  const t = await resolveSummaryTransport();
   const response = await completeSimple(
-    found,
+    t.model,
     {
       messages: [
         {
@@ -536,14 +530,74 @@ async function summarizeViaProvider(
       ],
     },
     {
-      apiKey: auth.apiKey,
-      headers,
+      apiKey: t.apiKey,
+      headers: t.headers,
       maxTokens: SUMMARY_MAX_TOKENS,
       signal,
-      reasoning: summaryReasoning(found),
+      reasoning: summaryReasoning(t.model),
     },
   );
-  return convertSummaryResponse(response, label);
+  return convertSummaryResponse(response, t.label);
+}
+
+async function summarizeThinkingViaProvider(
+  text: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const t = await resolveSummaryTransport();
+  const response = await completeSimple(
+    t.model,
+    {
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: THINKING_SUMMARY_PROMPT + text }],
+          timestamp: Date.now(),
+        },
+      ],
+    },
+    {
+      apiKey: t.apiKey,
+      headers: t.headers,
+      maxTokens: SUMMARY_MAX_TOKENS,
+      signal,
+      reasoning: summaryReasoning(t.model),
+    },
+  );
+  return convertSummaryResponse(response, t.label);
+}
+
+/**
+ * Resolve the configured summary model plus its auth once, for either kind
+ * of summary request (bash commands, thinking runs). getApiKeyAndHeaders
+ * resolves env keys, models.json auth, and refreshes OAuth tokens — the one
+ * thing a raw endpoint could never do. Safe to call fire-and-forget
+ * (pi-codex makes OAuth-refreshing calls the same way).
+ */
+async function resolveSummaryTransport(): Promise<{
+  model: Model<Api>;
+  label: string;
+  apiKey?: string;
+  headers?: Record<string, string | null>;
+}> {
+  const configured = getSummaryModel();
+  if (!configured) throw new Error("no summary model configured");
+  const registry = summaryModelRegistry;
+  if (!registry)
+    throw new Error("model registry not captured yet this session");
+  const found = findSummaryModel(registry, configured);
+  if (!found)
+    throw new Error(`summary model "${configured}" not found in registry`);
+  const label = `${found.provider}/${found.id}`;
+  const auth = await registry.getApiKeyAndHeaders(found);
+  if (!auth.ok) throw new Error(`${auth.error} (${label})`);
+  const headers =
+    auth.headers && Object.keys(auth.headers).length > 0
+      ? auth.headers
+      : undefined;
+  if (!auth.apiKey && !headers)
+    throw new Error(`no API key or headers configured (${label})`);
+  return { model: found, label, apiKey: auth.apiKey, headers };
 }
 
 /**
@@ -588,7 +642,12 @@ export function convertSummaryResponse(
 }
 
 function activeBackend(): SummaryBackend {
-  return summaryBackendOverride ?? { summarize: summarizeViaProvider };
+  return (
+    summaryBackendOverride ?? {
+      summarize: summarizeViaProvider,
+      summarizeThinking: summarizeThinkingViaProvider,
+    }
+  );
 }
 
 // Lowest-effort reasoning, but only where silence is broken: on OpenAI-
@@ -643,6 +702,7 @@ function logSummaryFailure(
   pauseMs?: number,
   ms?: number,
   attempt?: number,
+  kind: "bash" | "thinking" = "bash",
 ) {
   const msg = describeError(err);
   const pause = pauseMs
@@ -651,6 +711,7 @@ function logSummaryFailure(
   logGoodiesEvent({
     type: "summary_request",
     outcome: "failed",
+    kind,
     ...(ms === undefined ? {} : { ms }),
     error: msg.slice(0, 300),
     ...(pauseMs ? { pauseMs } : {}),
@@ -758,14 +819,89 @@ function startSummaryRequest(cmd: string): void {
   pendingSummaries.add(cmd);
   const requestStartedAt = Date.now();
   const signal = summarySessionAbort.signal;
-  // One AbortController per attempt so a timeout actually cancels that
-  // attempt's HTTP request instead of only stopping the wait — and so a
-  // retry starts from a fresh, unaborted controller. Each attempt chains
-  // itself to the session signal; a session switch aborts all of them.
-  let onSessionAbort: (() => void) | undefined;
+  summarizeWithRetries({
+    redact: redactCommandForLog(cmd),
+    kind: "bash",
+    request: (attemptSignal) => activeBackend().summarize(cmd, attemptSignal),
+    signal,
+  })
+    .then((result) => {
+      if (result.ok) {
+        // Abort check MUST precede any shared-state mutation: a stale promise
+        // settling after a session switch would otherwise delete the marker of
+        // a newer request for the same command (session_start already cleared
+        // the set, so the abandoned branch needs no cleanup).
+        if (signal.aborted) return;
+        pendingSummaries.delete(cmd);
+        summaryFailStreak = 0;
+        summaryBlockedUntil = 0;
+        summaryCache.set(cmd, normalizeSummary(result.text));
+        logGoodiesEvent({
+          type: "summary_request",
+          outcome: "ok",
+          kind: "bash",
+          ms: Date.now() - requestStartedAt,
+          ...(result.attempts > 1 ? { attempt: result.attempts } : {}),
+          ...redactCommandForLog(cmd),
+        });
+        clearSummaryPauseWidget();
+        invalidateRowsForCommand(cmd);
+        return;
+      }
+      // Always free the slot when the request settled, unless the session
+      // itself was aborted (session_start clears pendingSummaries via .clear()).
+      // The success-path guard alone would leave a per-request AbortError (not
+      // a session switch) in pendingSummaries forever, permanently burning a
+      // concurrency slot with zero log output.
+      if (!signal.aborted) pendingSummaries.delete(cmd);
+      // Switching sessions aborts in-flight summaries deliberately: that is
+      // not a provider failure — neither penalize nor log it.
+      if (signal.aborted || (result.err as Error)?.name === "AbortError")
+        return;
+      const pauseMs = noteSummaryFailure(result.err);
+      logSummaryFailure(
+        cmd,
+        result.err,
+        pauseMs,
+        Date.now() - requestStartedAt,
+        result.attempts,
+      );
+    })
+    .finally(() => {
+      if (!signal.aborted) drainSummaryQueue();
+    });
+}
+
+/** One summarizeWithRetries outcome: either the raw text, or the error. */
+type SummaryJobResult =
+  | { ok: true; text: string; attempts: number }
+  | { ok: false; err: unknown; attempts: number };
+
+/**
+ * Timeout + retry ladder shared by every summary request (bash commands and
+ * live thinking runs alike). One AbortController per attempt so a timeout
+ * actually cancels that attempt's HTTP request instead of only stopping the
+ * wait — and so a retry starts from a fresh, unaborted controller. Each
+ * attempt chains itself to the session signal; a session switch aborts all
+ * of them. Transient failures (upstream 5xx, stalls, network blips) get up
+ * to three quick second chances with progressive delays before the caller's
+ * failure handling (backoff, pause widget) engages. Intermediate failures
+ * are logged per attempt; the caller logs the final outcome.
+ */
+async function summarizeWithRetries(job: {
+  /** Log-safe reference for the per-attempt failure events. */
+  redact: { digest: string; len: number };
+  /** Which feature fired the request — lands in the structured log. */
+  kind: "bash" | "thinking";
+  /** One attempt: an abort-aware provider (or test-backend) call. */
+  request: (signal: AbortSignal) => Promise<string>;
+  /** Session signal; aborts every attempt and skips retry delays. */
+  signal: AbortSignal;
+}): Promise<SummaryJobResult> {
+  const { redact, kind, request, signal } = job;
   const summarizeOnce = (): Promise<string> => {
     const controller = new AbortController();
-    onSessionAbort = () => controller.abort();
+    const onSessionAbort = () => controller.abort();
     if (signal.aborted) controller.abort();
     else signal.addEventListener("abort", onSessionAbort, { once: true });
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
@@ -784,121 +920,71 @@ function startSummaryRequest(cmd: string): void {
       }, summaryRequestTimeoutMs);
     });
     timeoutTimer?.unref?.();
-    const summarizePromise = activeBackend().summarize(cmd, controller.signal);
+    const requestPromise = request(controller.signal);
     // The race below decides the outcome; the underlying promise may settle
     // later (timeout won) — swallow its late rejection so it never becomes
     // unhandled. Late landings are dropped; the queue retries after backoff.
-    summarizePromise.catch(() => {});
-    return Promise.race([summarizePromise, timeout]).finally(() => {
+    requestPromise.catch(() => {});
+    return Promise.race([requestPromise, timeout]).finally(() => {
       clearTimeout(timeoutTimer);
-      if (onSessionAbort) signal.removeEventListener("abort", onSessionAbort);
-      onSessionAbort = undefined;
+      signal.removeEventListener("abort", onSessionAbort);
     });
   };
 
-  let attemptsUsed = 0;
-  const runWithRetries = async (): Promise<string> => {
-    let lastErr: unknown;
-    const maxAttempts = summaryRetryDelaysMs.length + 1;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      attemptsUsed = attempt;
-      if (attempt > 1) {
-        // Progressive pause: delays[0] before attempt 2, delays[1] before
-        // attempt 3, and so on. Abort-aware: a session switch during the
-        // delay must skip the next attempt (the outer catch returns
-        // silently via signal.aborted).
-        await new Promise<void>((resolve) => {
-          const onAbort = () => {
-            clearTimeout(timer);
+  let lastErr: unknown;
+  const maxAttempts = summaryRetryDelaysMs.length + 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) {
+      // Progressive pause: delays[0] before attempt 2, delays[1] before
+      // attempt 3, and so on. Abort-aware: a session switch during the
+      // delay must skip the next attempt.
+      await new Promise<void>((resolve) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(
+          () => {
+            signal.removeEventListener("abort", onAbort);
             resolve();
-          };
-          const timer = setTimeout(
-            () => {
-              signal.removeEventListener("abort", onAbort);
-              resolve();
-            },
-            summaryRetryDelaysMs[attempt - 2] ?? 0,
-          );
-          timer.unref?.();
-          signal.addEventListener("abort", onAbort, { once: true });
-        });
-        if (signal.aborted) throw lastErr;
-      }
-      const attemptStartedAt = Date.now();
-      try {
-        return await summarizeOnce();
-      } catch (err) {
-        lastErr = err;
-        if (
-          signal.aborted ||
-          (err as Error)?.name === "AbortError" ||
-          attempt === maxAttempts ||
-          !isRetryableSummaryError(err)
-        ) {
-          throw err;
-        }
-        // Intermediate attempt: log it (attempt-numbered) but neither pause
-        // nor alarm — the retry owns recovery; backoff and the pause widget
-        // engage only when retries are exhausted. The retry holds its
-        // concurrency slot for the whole cycle, which bounds queue waits.
-        logGoodiesEvent({
-          type: "summary_request",
-          outcome: "failed",
-          attempt,
-          ms: Date.now() - attemptStartedAt,
-          error: describeError(err).slice(0, 300),
-          ...redactCommandForLog(cmd),
-        });
-      }
+          },
+          summaryRetryDelaysMs[attempt - 2] ?? 0,
+        );
+        timer.unref?.();
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      if (signal.aborted) return { ok: false, err: lastErr, attempts: attempt };
     }
-    throw lastErr;
-  };
-
-  runWithRetries()
-    .then((raw) => {
-      // Abort check MUST precede any shared-state mutation: a stale promise
-      // settling after a session switch would otherwise delete the marker of
-      // a newer request for the same command (session_start already cleared
-      // the set, so the abandoned branch needs no cleanup).
-      if (signal.aborted) return;
-      pendingSummaries.delete(cmd);
-      summaryFailStreak = 0;
-      summaryBlockedUntil = 0;
-      summaryCache.set(cmd, normalizeSummary(raw));
+    const attemptStartedAt = Date.now();
+    try {
+      return { ok: true, text: await summarizeOnce(), attempts: attempt };
+    } catch (err) {
+      lastErr = err;
+      if (
+        signal.aborted ||
+        (err as Error)?.name === "AbortError" ||
+        attempt === maxAttempts ||
+        !isRetryableSummaryError(err)
+      ) {
+        return { ok: false, err, attempts: attempt };
+      }
+      // Intermediate attempt: log it (attempt-numbered) but neither pause
+      // nor alarm — the retry owns recovery; backoff and the pause widget
+      // engage only when retries are exhausted. A retry holds its
+      // concurrency slot for the whole cycle, which bounds queue waits.
       logGoodiesEvent({
         type: "summary_request",
-        outcome: "ok",
-        ms: Date.now() - requestStartedAt,
-        ...(attemptsUsed > 1 ? { attempt: attemptsUsed } : {}),
-        ...redactCommandForLog(cmd),
+        outcome: "failed",
+        kind,
+        attempt,
+        ms: Date.now() - attemptStartedAt,
+        error: describeError(err).slice(0, 300),
+        ...redact,
       });
-      clearSummaryPauseWidget();
-      invalidateRowsForCommand(cmd);
-    })
-    .catch((err) => {
-      // Always free the slot when the request settled, unless the session
-      // itself was aborted (session_start clears pendingSummaries via .clear()).
-      // The previous guard only deleted on !signal.aborted && !AbortError —
-      // a per-request AbortError (not a session switch) left the command in
-      // pendingSummaries forever, permanently burning a concurrency slot
-      // with zero log output.
-      if (!signal.aborted) pendingSummaries.delete(cmd);
-      // Switching sessions aborts in-flight summaries deliberately: that is
-      // not a provider failure — neither penalize nor log it.
-      if (signal.aborted || (err as Error)?.name === "AbortError") return;
-      const pauseMs = noteSummaryFailure(err);
-      logSummaryFailure(
-        cmd,
-        err,
-        pauseMs,
-        Date.now() - requestStartedAt,
-        attemptsUsed,
-      );
-    })
-    .finally(() => {
-      if (onSessionAbort) signal.removeEventListener("abort", onSessionAbort);
-      if (!signal.aborted) drainSummaryQueue();
-    });
+    }
+  }
+  /* unreachable — the loop returns on its final attempt */
+  return { ok: false, err: lastErr, attempts: maxAttempts };
 }
 
 /** Start queued requests while capacity allows and no backoff is active. */
@@ -959,6 +1045,214 @@ let summarySwapMaxAgeMs = SUMMARY_SWAP_MAX_AGE_MS;
 
 export function __setSummarySwapMaxAgeForTesting(ms: number): void {
   summarySwapMaxAgeMs = ms;
+}
+
+// ── Live thinking summaries (widget above the editor) ──────────
+//
+// While the model streams a thinking run, pi's TUI (with
+// hideThinkingBlock) renders one static italic "Thinking..." row per run.
+// The only seam to change that text, ctx.ui.setHiddenThinkingLabel, is a
+// single GLOBAL string pushed to every assistant message component —
+// updating it mid-stream rewrites every past thinking row, and in regular
+// tuiMode any rendered change above the viewport top makes pi's diff
+// renderer fullRender(true): clear screen + scrollback wipe + repaint (see
+// the render-safety rules above; that is the 0.11.x flash class). So the
+// live summary instead renders as a widget line above the editor — the
+// same always-at-the-tail seam the pause indicator uses — and only while a
+// thinking run is actually streaming.
+const THINKING_WIDGET_KEY = "bermudis-pi-goodies.thinking";
+const THINKING_SUMMARY_PREFIX = "\u273b thinking \u00b7 ";
+// Below this the run says as much as a summary would; also keeps OpenAI's
+// empty reasoning items (no text at all) from ever costing a request.
+const THINKING_SUMMARY_MIN_CHARS = 400;
+// One request per run at most every 5s: the widget is polish, not telemetry.
+const THINKING_SUMMARY_INTERVAL_MS = 5_000;
+// And only when the run actually moved — the natural rate tracks how much
+// the model is thinking instead of the clock.
+const THINKING_SUMMARY_GROWTH_CHARS = 400;
+let thinkingMinChars = THINKING_SUMMARY_MIN_CHARS;
+let thinkingIntervalMs = THINKING_SUMMARY_INTERVAL_MS;
+let thinkingGrowthChars = THINKING_SUMMARY_GROWTH_CHARS;
+
+export function __setThinkingThresholdsForTesting(opts?: {
+  minChars?: number;
+  growthChars?: number;
+  intervalMs?: number;
+}): void {
+  thinkingMinChars = opts?.minChars ?? THINKING_SUMMARY_MIN_CHARS;
+  thinkingIntervalMs = opts?.intervalMs ?? THINKING_SUMMARY_INTERVAL_MS;
+  thinkingGrowthChars = opts?.growthChars ?? THINKING_SUMMARY_GROWTH_CHARS;
+}
+
+type ThinkingRun = {
+  /**
+   * First block of the trailing thinking run. Content blocks are stable
+   * object references across a message's message_update events (the burst
+   * boundary scanner relies on the same fact), so this identifies the run
+   * cheaply while it grows at the tail.
+   */
+  head: object;
+  /** Full run length when the last request fired (throttle bookkeeping). */
+  requestedLen: number;
+  /** When it fired. */
+  requestedAt: number;
+};
+let thinkingRun: ThinkingRun | undefined;
+// Global monotonic request counter: a landing applies to the widget only if
+// it is the newest request AND its run is still the active one.
+let thinkingSeqCounter = 0;
+let thinkingLandedSeq = 0;
+let thinkingInflight = false;
+let thinkingWidgetShown = false;
+
+export function __resetThinkingSummariesForTesting(): void {
+  resetThinkingState();
+}
+
+function resetThinkingState(): void {
+  // Clear through the current handle first (session_start replaces it right
+  // after); the try/catch inside covers a handle that already went stale.
+  clearThinkingWidget();
+  thinkingRun = undefined;
+  thinkingLandedSeq = 0;
+  thinkingInflight = false;
+}
+
+function setThinkingWidget(summary: string): void {
+  if (!summaryUi?.hasUI) return;
+  // Same width discipline as the pause widget: the line sits above the
+  // editor and must not wrap on narrow terminals.
+  const budget = 80 - THINKING_SUMMARY_PREFIX.length;
+  const brief =
+    summary.length > budget ? `${summary.slice(0, budget)}\u2026` : summary;
+  summaryUi.setWidget(THINKING_WIDGET_KEY, [
+    `${THINKING_SUMMARY_PREFIX}${brief}`,
+  ]);
+  thinkingWidgetShown = true;
+}
+
+function clearThinkingWidget(): void {
+  if (!thinkingWidgetShown) return;
+  thinkingWidgetShown = false;
+  try {
+    summaryUi?.setWidget(THINKING_WIDGET_KEY, undefined);
+  } catch {
+    // A stale UI handle across a session switch must not break the request
+    // path — the next landing re-shows the widget with a fresh handle.
+  }
+}
+
+/** Drop run tracking (new assistant message, settled turn, session switch). */
+function resetThinkingRun(): void {
+  thinkingRun = undefined;
+  clearThinkingWidget();
+}
+
+/**
+ * Track the trailing thinking run of the streaming assistant message and
+ * maybe fire a summary request for it. Runs on every message_update — walks
+ * the content from the end, so the cost is bounded by the trailing run, not
+ * the whole message.
+ */
+function trackThinkingStream(message: any): void {
+  const content = message?.content;
+  if (!Array.isArray(content)) return;
+  let i = content.length;
+  while (i > 0 && content[i - 1]?.type === "thinking") i--;
+  if (i === content.length) {
+    // No trailing thinking block: the run closed (text or a tool call
+    // streamed after it). Its summary would describe stale activity —
+    // the tool row that follows says what is happening now.
+    resetThinkingRun();
+    return;
+  }
+  const head = content[i] as object;
+  if (thinkingRun?.head !== head) {
+    // New run (first one, or a later run after this message moved on to
+    // text/tools and back to thinking). Fresh throttle window.
+    thinkingRun = { head, requestedLen: 0, requestedAt: 0 };
+    clearThinkingWidget();
+  }
+  const text = (content.slice(i) as Array<{ thinking?: string }>)
+    .map((b) => b.thinking ?? "")
+    .join("");
+  maybeRequestThinkingSummary(text);
+}
+
+function maybeRequestThinkingSummary(text: string): void {
+  const run = thinkingRun;
+  if (!run) return;
+  if (
+    !summaryEnabled ||
+    replaying ||
+    !getThinkingSummariesEnabled() || // separate opt-in: recurring requests
+    !getSummaryModel() || // unset = summaries off entirely
+    !summaryUi?.hasUI // headless has no widget to show
+  )
+    return;
+  const backend = activeBackend();
+  if (typeof backend.summarizeThinking !== "function") return;
+  if (thinkingInflight || Date.now() < summaryBlockedUntil) return;
+  if (text.length < thinkingMinChars) return;
+  if (
+    run.requestedLen > 0 &&
+    (Date.now() - run.requestedAt < thinkingIntervalMs ||
+      text.length - run.requestedLen < thinkingGrowthChars)
+  )
+    return;
+  run.requestedLen = text.length;
+  run.requestedAt = Date.now();
+  const seq = ++thinkingSeqCounter;
+  const head = run.head;
+  thinkingInflight = true;
+  const signal = summarySessionAbort.signal;
+  const requestStartedAt = Date.now();
+  summarizeWithRetries({
+    redact: redactCommandForLog(text),
+    kind: "thinking",
+    request: (attemptSignal) =>
+      backend.summarizeThinking!(text.slice(-2000), attemptSignal),
+    signal,
+  })
+    .then((result) => {
+      if (result.ok) {
+        if (signal.aborted) return;
+        // Provider health is shared with bash summaries: one provider, one
+        // recovery signal, one pause widget.
+        summaryFailStreak = 0;
+        summaryBlockedUntil = 0;
+        logGoodiesEvent({
+          type: "summary_request",
+          outcome: "ok",
+          kind: "thinking",
+          ms: Date.now() - requestStartedAt,
+          ...(result.attempts > 1 ? { attempt: result.attempts } : {}),
+          ...redactCommandForLog(text),
+        });
+        clearSummaryPauseWidget();
+        // Stale landings stay silent: the run moved on (or closed) while this
+        // request was in flight, or a newer request already updated the line.
+        if (thinkingRun?.head === head && seq > thinkingLandedSeq) {
+          thinkingLandedSeq = seq;
+          setThinkingWidget(normalizeSummary(result.text));
+        }
+        return;
+      }
+      if (!signal.aborted && (result.err as Error)?.name !== "AbortError") {
+        const pauseMs = noteSummaryFailure(result.err);
+        logSummaryFailure(
+          text,
+          result.err,
+          pauseMs,
+          Date.now() - requestStartedAt,
+          result.attempts,
+          "thinking",
+        );
+      }
+    })
+    .finally(() => {
+      if (!signal.aborted) thinkingInflight = false;
+    });
 }
 
 function bgFor(
@@ -1128,6 +1422,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
     type: "load",
     version: loadExtensionVersion(),
     summaryModel: getSummaryModel() ?? "off",
+    thinkingSummaries: getThinkingSummariesEnabled() ? "on" : "off",
   });
   const schemaTools = getBuiltInTools(process.cwd());
 
@@ -1155,6 +1450,9 @@ export default function cleanTui(pi: ExtensionAPI): void {
     if (!message) return;
     if (message.role === "assistant") {
       curAssistantBoundaries = new Set();
+      // A new assistant message brings a fresh content array — its thinking
+      // blocks are new objects, so drop the previous message's run tracking.
+      resetThinkingRun();
       // Some providers deliver the complete message at start (no streaming).
       scanAssistantBoundaries(message);
     } else if (message.role === "user") {
@@ -1169,6 +1467,13 @@ export default function cleanTui(pi: ExtensionAPI): void {
     // streaming events alone) also covers providers that skip granular
     // events; the Set keeps each block to exactly one bump.
     scanAssistantBoundaries(message);
+    trackThinkingStream(message);
+  });
+  pi.on("agent_settled", () => {
+    // Turn fully done (no retry/continuation coming): the thinking widget's
+    // last summary is spent. In-flight requests may still land — their
+    // run-identity check drops them silently.
+    resetThinkingRun();
   });
   pi.on("session_start", (_event, ctx) => {
     liveSeg = 0;
@@ -1179,6 +1484,9 @@ export default function cleanTui(pi: ExtensionAPI): void {
     invalidateById.clear();
     pendingSummaries.clear();
     summaryRequestQueue.length = 0;
+    // Thinking widget + run tracking belong to the previous session; the
+    // session abort below cancels any in-flight summary request.
+    resetThinkingState();
     // Capture the UI handle for the pause widget (guarded: harness stubs and
     // limited contexts lack setWidget), and drop any stale pause indicator
     // left over from the previous session. hasUI comes from the context —

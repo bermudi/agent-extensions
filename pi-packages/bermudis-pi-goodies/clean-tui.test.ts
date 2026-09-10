@@ -3,6 +3,7 @@ import { Box, Container } from "@earendil-works/pi-tui";
 import type { Model } from "@earendil-works/pi-ai";
 import cleanTui, {
   __clearSummaryCache,
+  __resetThinkingSummariesForTesting,
   __setSummaryBackoffForTesting,
   __setSummaryBackendForTesting,
   __setSummaryEnabled,
@@ -12,13 +13,18 @@ import cleanTui, {
   __setSummaryRetryDelaysForTesting,
   __setSummarySwapMaxAgeForTesting,
   __setSummaryUiForTesting,
+  __setThinkingThresholdsForTesting,
   convertSummaryResponse,
   setCleanTuiActive,
 } from "./clean-tui";
 import { PiHarness, type Theme } from "pi-harness";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { setSummaryModel, __setConfigPathForTesting } from "./goodies";
+import {
+  setSummaryModel,
+  setThinkingSummariesEnabled,
+  __setConfigPathForTesting,
+} from "./goodies";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
@@ -1784,6 +1790,349 @@ describe("clean-tui AI summary", () => {
     expect(textOf(row2.lastCallComponent)).toContain("fresh summary");
     expect(textOf(row2.lastCallComponent)).not.toContain("stale answer");
     expect(logged.filter((l) => l.includes("[clean-tui]"))).toHaveLength(0);
+  });
+});
+
+describe("clean-tui thinking summaries", () => {
+  const THINKING_KEY = "bermudis-pi-goodies.thinking";
+  const PAUSE_KEY = "bermudis-pi-goodies.summaries";
+
+  const cleanupFns: Array<() => void> = [];
+  afterEach(() => {
+    while (cleanupFns.length) cleanupFns.pop()!();
+    __setSummaryBackendForTesting(undefined);
+    __setSummaryUiForTesting(undefined);
+    __setSummaryEnabled(false);
+    __setThinkingThresholdsForTesting();
+    __resetThinkingSummariesForTesting();
+  });
+
+  /**
+   * Widget journal: every setWidget call, so tests can assert both content
+   * and clearing (content === undefined).
+   */
+  function useWidgetUi(): Array<[string, string[] | undefined]> {
+    const widgets: Array<[string, string[] | undefined]> = [];
+    __setSummaryUiForTesting({
+      hasUI: true,
+      setWidget: (key, content) => widgets.push([key, content]),
+    });
+    return widgets;
+  }
+
+  function lastWidget(
+    widgets: Array<[string, string[] | undefined]>,
+    key: string,
+  ): string[] | undefined {
+    const hit = [...widgets].reverse().find(([k]) => k === key);
+    return hit?.[1];
+  }
+
+  /** Scratch config + summary model + thinking summaries on. */
+  function enableThinkingSummariesForTest(): void {
+    const tmpDir = mkdtempSync(join(tmpdir(), "goodies-think-"));
+    __setConfigPathForTesting(join(tmpDir, "goodies.json"));
+    setSummaryModel("test/model");
+    setThinkingSummariesEnabled(true);
+    __setSummaryEnabled(true);
+    __clearSummaryCache();
+    cleanupFns.push(() => {
+      setThinkingSummariesEnabled(false);
+      setSummaryModel(undefined);
+      __setConfigPathForTesting(
+        join(homedir(), ".pi", "agent", "goodies.json"),
+      );
+    });
+  }
+
+  /** Backend that records thinking requests and answers from a script. */
+  function scriptedThinkingBackend(
+    impl: (text: string, signal: AbortSignal) => Promise<string> | string,
+  ): string[] {
+    const calls: string[] = [];
+    __setSummaryBackendForTesting({
+      summarize: async () => {
+        throw new Error("bash summaries are not under test here");
+      },
+      summarizeThinking: async (text, signal) => {
+        calls.push(text);
+        return impl(text, signal);
+      },
+    });
+    return calls;
+  }
+
+  /** Harness with a streaming assistant message whose thinking grows. */
+  function streamThinking(h: PiHarness, ...texts: string[]): void {
+    const block = { type: "thinking", thinking: "" };
+    h.emit("message_start", {
+      message: { role: "assistant", content: [block] },
+    });
+    for (const t of texts) {
+      block.thinking = t;
+      h.emit("message_update", {
+        message: { role: "assistant", content: [block] },
+      });
+    }
+  }
+
+  test("streaming thinking run shows a live summary widget line", async () => {
+    const calls = scriptedThinkingBackend(
+      () => '"Weighing render safety rules"',
+    );
+    enableThinkingSummariesForTest();
+    __setThinkingThresholdsForTesting({
+      minChars: 50,
+      growthChars: 50,
+      intervalMs: 0,
+    });
+    const widgets = useWidgetUi();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    streamThinking(h, "x".repeat(60));
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(calls).toHaveLength(1);
+    const line = lastWidget(widgets, THINKING_KEY)?.[0];
+    expect(line).toContain("\u273b thinking \u00b7 ");
+    // normalizeSummary strips the model's surrounding quotes before display.
+    expect(line).toContain("Weighing render safety rules");
+    expect(line).not.toContain('"');
+  });
+
+  test("sends only the tail of the thinking text", async () => {
+    const calls = scriptedThinkingBackend(() => "ok");
+    enableThinkingSummariesForTest();
+    __setThinkingThresholdsForTesting({
+      minChars: 50,
+      growthChars: 50,
+      intervalMs: 0,
+    });
+    const widgets = useWidgetUi();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    const text = "a".repeat(2900) + "TAILMARK" + "b".repeat(100);
+    streamThinking(h, text);
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].length).toBeLessThanOrEqual(2000);
+    expect(calls[0].endsWith("TAILMARK" + "b".repeat(100))).toBe(true);
+  });
+
+  test("short thinking runs and disabled feature cost nothing", async () => {
+    // Short run: no request.
+    let calls = scriptedThinkingBackend(() => "ok");
+    enableThinkingSummariesForTest();
+    __setThinkingThresholdsForTesting({
+      minChars: 400,
+      growthChars: 50,
+      intervalMs: 0,
+    });
+    const widgets = useWidgetUi();
+    let h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    streamThinking(h, "x".repeat(120));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toHaveLength(0);
+    expect(lastWidget(widgets, THINKING_KEY)).toBeUndefined();
+
+    // Default off: same session shape, but the config flag never set.
+    calls = scriptedThinkingBackend(() => "ok");
+    const tmpDir = mkdtempSync(join(tmpdir(), "goodies-think-off-"));
+    __setConfigPathForTesting(join(tmpDir, "goodies.json"));
+    setSummaryModel("test/model");
+    __setSummaryEnabled(true);
+    __clearSummaryCache();
+    __resetThinkingSummariesForTesting();
+    cleanupFns.push(() => {
+      setSummaryModel(undefined);
+      __setConfigPathForTesting(
+        join(homedir(), ".pi", "agent", "goodies.json"),
+      );
+    });
+    h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    streamThinking(h, "x".repeat(600));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toHaveLength(0);
+  });
+
+  test("throttles per run: interval and growth gates", async () => {
+    const calls = scriptedThinkingBackend(() => "ok");
+    enableThinkingSummariesForTest();
+    // Interval gate: second burst within the window never re-requests.
+    __setThinkingThresholdsForTesting({
+      minChars: 50,
+      growthChars: 50,
+      intervalMs: 60_000,
+    });
+    const widgets = useWidgetUi();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    streamThinking(h, "x".repeat(60), "x".repeat(500));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toHaveLength(1);
+
+    // Growth gate: even with no interval, a small delta is not worth a call.
+    // (Same block object growing in place, exactly how pi-ai accumulates
+    // the partial — a NEW block object would be a new run with a fresh
+    // throttle window, which is allowed to request.)
+    __setThinkingThresholdsForTesting({
+      minChars: 50,
+      growthChars: 5_000,
+      intervalMs: 0,
+    });
+    const same = { type: "thinking", thinking: "x".repeat(500) };
+    h.emit("message_update", {
+      message: { role: "assistant", content: [same] },
+    });
+    // NOTE: `same` is a new object, so this legitimately starts a new run
+    // and fires (request #2). The growth gate below rides on THIS run.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toHaveLength(2);
+    same.thinking = "x".repeat(560); // +60 — below the growth gate
+    h.emit("message_update", {
+      message: { role: "assistant", content: [same] },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toHaveLength(2);
+    same.thinking = "x".repeat(500 + 5_100); // +5100 — clears the gate
+    h.emit("message_update", {
+      message: { role: "assistant", content: [same] },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toHaveLength(3);
+  });
+
+  test("closing the run clears the widget; stale landings stay silent", async () => {
+    const resolvers: Array<(s: string) => void> = [];
+    const calls = scriptedThinkingBackend(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    enableThinkingSummariesForTest();
+    __setThinkingThresholdsForTesting({
+      minChars: 50,
+      growthChars: 50,
+      intervalMs: 0,
+    });
+    const widgets = useWidgetUi();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    const block = { type: "thinking", thinking: "x".repeat(60) };
+    h.emit("message_start", {
+      message: { role: "assistant", content: [block] },
+    });
+    h.emit("message_update", {
+      message: { role: "assistant", content: [block] },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls).toHaveLength(1);
+    expect(lastWidget(widgets, THINKING_KEY)).toBeUndefined(); // still in flight
+
+    // The run closes: a tool call streams after the thinking block.
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [
+          block,
+          { type: "toolCall", id: "t1", name: "bash", arguments: {} },
+        ],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    // Still no widget line — and now the landing must be dropped as stale.
+    resolvers[0]("Summarizing a closed run");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(lastWidget(widgets, THINKING_KEY)).toBeUndefined();
+    expect(calls).toHaveLength(1);
+  });
+
+  test("agent_settled clears the widget", async () => {
+    scriptedThinkingBackend(() => "Planning the refactor");
+    enableThinkingSummariesForTest();
+    __setThinkingThresholdsForTesting({
+      minChars: 50,
+      growthChars: 50,
+      intervalMs: 0,
+    });
+    const widgets = useWidgetUi();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    streamThinking(h, "x".repeat(60));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(lastWidget(widgets, THINKING_KEY)?.[0]).toContain(
+      "Planning the refactor",
+    );
+
+    h.emit("agent_settled", { type: "agent_settled" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(lastWidget(widgets, THINKING_KEY)).toBeUndefined();
+  });
+
+  test("failure shows the shared pause widget and logs kind: thinking", async () => {
+    const logPath = (() => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "goodies-think-log-"));
+      const p = join(tmpDir, "goodies.log");
+      __setSummaryLogPathForTesting(p);
+      cleanupFns.push(() => __setSummaryLogPathForTesting(undefined));
+      return p;
+    })();
+    scriptedThinkingBackend(() =>
+      Promise.reject(new Error("429: rate limit exceeded (test/model)")),
+    );
+    enableThinkingSummariesForTest();
+    __setSummaryBackoffForTesting(0, 0);
+    cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
+    __setThinkingThresholdsForTesting({
+      minChars: 50,
+      growthChars: 50,
+      intervalMs: 0,
+    });
+    const widgets = useWidgetUi();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    streamThinking(h, "x".repeat(60));
+    await new Promise((r) => setTimeout(r, 20));
+
+    const pause = lastWidget(widgets, PAUSE_KEY)?.[0] ?? "";
+    expect(pause).toContain("\u23f8 summaries");
+    expect(pause).toContain("429");
+    const events = readFileSync(logPath, "utf-8")
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const failed = events.find(
+      (e) => e.type === "summary_request" && e.outcome === "failed",
+    );
+    expect(failed?.kind).toBe("thinking");
+    // Thinking text must not leak into the log — digest + length only.
+    expect(readFileSync(logPath, "utf-8")).not.toContain("x".repeat(50));
   });
 });
 

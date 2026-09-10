@@ -5,6 +5,8 @@ import {
   listFeatures,
   getSummaryModel,
   setSummaryModel,
+  getThinkingSummariesEnabled,
+  setThinkingSummariesEnabled,
   findSummaryModel,
   suggestSummaryModels,
   __setConfigPathForTesting,
@@ -340,5 +342,79 @@ describe("/goodies summary-model handler", () => {
     expect(getSummaryModel()).toBe("zai/glm-5.3");
     expect(notices[0].level).toBe("warning");
     expect(notices[0].msg).toContain("could not validate");
+  });
+});
+
+describe("/goodies thinking-summaries handler", () => {
+  /** Stub ExtensionAPI capturing the registered command options. */
+  function registerGoodies(): {
+    handler: (args: string, ctx: never) => Promise<void>;
+  } {
+    let captured!: { handler: (args: string, ctx: never) => Promise<void> };
+    goodiesDefault({
+      registerCommand: (_name: string, opts: typeof captured) => {
+        captured = opts;
+      },
+    } as never);
+    return captured;
+  }
+
+  function fakeCtx() {
+    const notices: Array<{ msg: string; level: string }> = [];
+    const ctx = {
+      ui: {
+        notify: (msg: string, level: string) => notices.push({ msg, level }),
+      },
+    };
+    return { ctx, notices };
+  }
+
+  beforeEach(() => {
+    const dir = mkdtempSync(join(tmpdir(), "goodies-thinking-flag-"));
+    __setConfigPathForTesting(join(dir, "goodies.json"));
+  });
+
+  test("on/off persists; default is off", async () => {
+    expect(getThinkingSummariesEnabled()).toBe(false);
+    const cmd = registerGoodies();
+    const { ctx, notices } = fakeCtx();
+
+    await cmd.handler("thinking-summaries on", ctx as never);
+    expect(getThinkingSummariesEnabled()).toBe(true);
+    expect(notices[0].level).toBe("info");
+    // No summary model on the scratch config: says so.
+    expect(notices[0].msg).toContain("summary-model");
+
+    await cmd.handler("thinking-summaries off", ctx as never);
+    expect(getThinkingSummariesEnabled()).toBe(false);
+  });
+
+  test("on with a summary model set does not nag", async () => {
+    setSummaryModel("kilo/xai/grok-4-fast");
+    const cmd = registerGoodies();
+    const { ctx, notices } = fakeCtx();
+    await cmd.handler("thinking-summaries on", ctx as never);
+    expect(getThinkingSummariesEnabled()).toBe(true);
+    expect(notices[0].msg).not.toContain("summary-model");
+  });
+
+  test("anything but on/off is a usage warning and changes nothing", async () => {
+    const cmd = registerGoodies();
+    const { ctx, notices } = fakeCtx();
+    await cmd.handler("thinking-summaries maybe", ctx as never);
+    expect(getThinkingSummariesEnabled()).toBe(false);
+    expect(notices[0].level).toBe("warning");
+    expect(notices[0].msg).toContain("currently off");
+  });
+
+  test("list shows the thinking-summaries state", async () => {
+    const cmd = registerGoodies();
+    const { ctx, notices } = fakeCtx();
+    await cmd.handler("list", ctx as never);
+    expect(notices[0].msg).toContain("thinking summaries: off");
+    setThinkingSummariesEnabled(true);
+    const after = fakeCtx();
+    await cmd.handler("list", after.ctx as never);
+    expect(after.notices[0].msg).toContain("thinking summaries: on");
   });
 });
