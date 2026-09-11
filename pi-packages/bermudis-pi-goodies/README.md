@@ -263,3 +263,27 @@ unrelated sessions. Do not also load the standalone `kilo.ts` or
 `provider-balance.ts` entries once this bundle is installed. If you previously
 symlinked the standalone `provider-balance.ts`, remove that link — the feature
 now ships in this bundle.
+
+### Kilo catalog health
+
+`refreshModels` degrades silently on purpose — on failure it serves the last
+good (or bootstrap) catalog so pickers keep working. Two signals make that
+visible: while a kilo model is active and the last refresh failed, the footer
+shows a badge next to the balance (`kilo: stale 2h`, or `kilo: no catalog`
+when only the bootstrap router loaded), and every failure lands as a
+`kilo_warning` line in `~/.pi/agent/goodies.log`
+(`jq 'select(.type=="kilo_warning")' ~/.pi/agent/goodies.log`). If Pi's
+refresh API changes shape, kilo.ts logs a one-time `neither publish nor
+store` warning instead of silently losing catalog persistence.
+
+Before publishing — or whenever kilo misbehaves — run the live smoke check:
+
+```bash
+bun run kilo-smoke   # in pi-packages/bermudis-pi-goodies
+```
+
+It fetches the public catalog anonymously and runs every entry through the
+production mapping code; exit 0 means all models still map. `DRIFT` lines are
+informational: they flag that kilo.ts's hardcoded knowledge (Responses-API
+routing metadata, anthropic cache control, `:free` conventions) may need a
+review. It never touches the device-auth endpoint.

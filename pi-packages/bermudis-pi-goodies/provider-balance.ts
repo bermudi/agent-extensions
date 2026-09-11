@@ -25,6 +25,7 @@ import {
   describeError,
   timeoutSignal,
 } from "./json-file.ts";
+import { getKiloCatalogStatus, type KiloCatalogStatus } from "./kilo.ts";
 
 const KILO_API_BASE = process.env.KILO_API_URL || "https://api.kilo.ai";
 const KILO_BALANCE_ENDPOINT = `${KILO_API_BASE}/api/profile/balance`;
@@ -1153,6 +1154,25 @@ function addBalanceToWorkingDirectoryLine(
   return [`${left}${padding}${right}`, ...lines.slice(1)];
 }
 
+// --- Kilo catalog badge ------------------------------------------------------
+// kilo.ts serves a fallback catalog when its refresh fails (see
+// getKiloCatalogStatus in kilo.ts). The balance footer is the only
+// kilo-owned UI the user routinely looks at, so a degraded catalog gets a
+// badge next to the balance instead of failing invisibly.
+
+export function formatKiloCatalogStatus(
+  status: Readonly<KiloCatalogStatus>,
+  nowMs: number,
+): string | undefined {
+  if (!status.degraded) return undefined;
+  if (status.checkedAt <= 0) return "kilo: no catalog";
+  const minutes = Math.floor(Math.max(0, nowMs - status.checkedAt) / 60_000);
+  if (minutes < 60) return `kilo: stale ${Math.max(1, minutes)}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `kilo: stale ${hours}h`;
+  return `kilo: stale ${Math.floor(hours / 24)}d`;
+}
+
 export interface ProviderBalanceDependencies {
   adapters?: Readonly<Record<string, BalanceAdapter>>;
   cacheDir?: string;
@@ -1512,18 +1532,32 @@ export default function providerBalance(
 
       return {
         invalidate: () => footer.invalidate(),
-        render: (width: number) =>
-          addBalanceToWorkingDirectoryLine(
+        render: (width: number) => {
+          const balanceText =
+            !identityPending &&
+            balance &&
+            balanceFetchedAt !== undefined &&
+            now() - balanceFetchedAt < BALANCE_CACHE_TTL_MS
+              ? formatBalance(balance, now())
+              : undefined;
+          // The kilo catalog badge is kilo-specific and only meaningful while
+          // a kilo model is active; formatKiloCatalogStatus returns undefined
+          // when the catalog is healthy or the provider is anonymous.
+          const kiloBadge =
+            activeContext?.model?.provider === "kilo"
+              ? formatKiloCatalogStatus(getKiloCatalogStatus(), now())
+              : undefined;
+          const rightText =
+            kiloBadge && balanceText
+              ? `${kiloBadge} · ${balanceText}`
+              : (kiloBadge ?? balanceText);
+          return addBalanceToWorkingDirectoryLine(
             footer.render(width),
             width,
             theme,
-            !identityPending &&
-              balance &&
-              balanceFetchedAt !== undefined &&
-              now() - balanceFetchedAt < BALANCE_CACHE_TTL_MS
-              ? formatBalance(balance, now())
-              : undefined,
-          ),
+            rightText,
+          );
+        },
         dispose: () => {
           unsubscribeBranchChange();
           footer.dispose();

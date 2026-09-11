@@ -5,11 +5,13 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import kilo, {
   abortableSleep,
+  getKiloCatalogStatus,
   getKiloModelCompat,
   getKiloThinkingLevelMap,
   isFreeModel,
   modelSupportsReasoning,
   parsePrice,
+  resetKiloStateForTesting,
   shouldUseResponsesApi,
   thinkingLevelMapFromVariants,
   type OpenRouterModel,
@@ -29,6 +31,7 @@ beforeEach(() => {
   scratchLogDir = mkdtempSync(join(tmpdir(), "kilo-log-test-"));
   scratchLogPath = join(scratchLogDir, "goodies.log");
   setGoodiesLogPathForTesting(scratchLogPath);
+  resetKiloStateForTesting();
 });
 
 afterEach(() => {
@@ -373,6 +376,161 @@ describe("catalog refresh", () => {
   });
 });
 
+describe("persistence shape drift", () => {
+  test("warns once when the context exposes no known persistence API", async () => {
+    // Simulates the next pi host rename: neither publish (0.84+) nor store
+    // (0.80–0.83) exists on the context. The adapter must still serve the
+    // bootstrap catalog, but the silent no-op becomes a logged warning —
+    // exactly once per process, not once per refresh.
+    const provider = captureKiloProvider();
+    const refreshModels = provider.refreshModels;
+    if (!refreshModels) throw new Error("Kilo refresh hook was not registered");
+
+    const context = {
+      credential: { type: "api_key", key: "test-key" },
+      stored: undefined,
+      allowNetwork: false,
+    } as unknown as Parameters<typeof refreshModels>[0];
+
+    const first = await refreshModels(context);
+    const second = await refreshModels(context);
+
+    expect(first.map(({ id }) => id)).toEqual(["kilo-auto/free"]);
+    expect(second.map(({ id }) => id)).toEqual(["kilo-auto/free"]);
+    const warnings = readLogLines().filter(
+      (e) =>
+        e.type === "kilo_warning" &&
+        String(e.message).includes("neither publish nor store"),
+    );
+    expect(warnings).toHaveLength(1);
+  });
+});
+
+describe("catalog status snapshot", () => {
+  function apiContext(): Parameters<
+    NonNullable<ProviderConfig["refreshModels"]>
+  >[0] {
+    return {
+      credential: { type: "api_key", key: "test-key" },
+      stored: undefined,
+      publish: async () => true,
+      allowNetwork: true,
+      force: true,
+    } as unknown as Parameters<NonNullable<ProviderConfig["refreshModels"]>>[0];
+  }
+
+  test("degraded after a fetch failure, recovers after a success", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      const provider = captureKiloProvider();
+      const refreshModels = provider.refreshModels;
+      if (!refreshModels)
+        throw new Error("Kilo refresh hook was not registered");
+
+      globalThis.fetch = (async () =>
+        new Response("Internal Server Error", { status: 500 })) as typeof fetch;
+      await refreshModels(apiContext());
+
+      const degraded = getKiloCatalogStatus();
+      expect(degraded.degraded).toBe(true);
+      expect(degraded.modelCount).toBe(1); // bootstrap fallback
+      expect(degraded.checkedAt).toBe(0);
+
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: "vendor/one",
+                name: "One",
+                context_length: 32_000,
+              },
+              {
+                id: "vendor/two",
+                name: "Two",
+                context_length: 32_000,
+              },
+            ],
+          }),
+          { status: 200 },
+        )) as typeof fetch;
+      await refreshModels(apiContext());
+
+      const healthy = getKiloCatalogStatus();
+      expect(healthy.degraded).toBe(false);
+      expect(healthy.modelCount).toBe(2);
+      expect(healthy.checkedAt).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("an anonymous refresh clears a stale degraded flag", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      const provider = captureKiloProvider();
+      const refreshModels = provider.refreshModels;
+      if (!refreshModels)
+        throw new Error("Kilo refresh hook was not registered");
+
+      globalThis.fetch = (async () =>
+        new Response("Internal Server Error", { status: 500 })) as typeof fetch;
+      await refreshModels(apiContext());
+      expect(getKiloCatalogStatus().degraded).toBe(true);
+
+      // Logout: no credential means the free bootstrap is served by design,
+      // and a leftover degraded flag must not badge anonymous sessions.
+      globalThis.fetch = (() => {
+        throw new Error("unexpected fetch for anonymous refresh");
+      }) as typeof fetch;
+      await refreshModels({
+        credential: undefined,
+        allowNetwork: true,
+      } as unknown as Parameters<typeof refreshModels>[0]);
+      expect(getKiloCatalogStatus().degraded).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("restoring a persisted snapshot reports its size and checkedAt", async () => {
+    const provider = captureKiloProvider();
+    const refreshModels = provider.refreshModels;
+    if (!refreshModels) throw new Error("Kilo refresh hook was not registered");
+
+    const checkedAt = Date.now() - 60_000;
+    const context = {
+      credential: { type: "api_key", key: "test-key" },
+      stored: {
+        checkedAt,
+        models: [
+          {
+            id: "restored/model",
+            name: "Restored Model",
+            provider: "kilo",
+            api: "openai-completions",
+            baseUrl: "https://api.kilo.ai/api/gateway",
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 32_000,
+            maxTokens: 8_000,
+          },
+        ],
+      },
+      allowNetwork: false,
+    } as unknown as Parameters<typeof refreshModels>[0];
+
+    const restored = await refreshModels(context);
+    expect(restored.map(({ id }) => id)).toEqual(["restored/model"]);
+
+    const status = getKiloCatalogStatus();
+    expect(status.degraded).toBe(false);
+    expect(status.modelCount).toBe(1);
+    expect(status.checkedAt).toBe(checkedAt);
+  });
+});
+
 describe("parsePrice", () => {
   test("converts per-token to per-million-token", () => {
     // $0.001 per token == $1000 per million tokens
@@ -385,6 +543,15 @@ describe("parsePrice", () => {
     expect(parsePrice(null)).toBe(0);
     expect(parsePrice("")).toBe(0);
     expect(parsePrice("not-a-number")).toBe(0);
+  });
+
+  test("treats negative sentinel pricing (routers) as unknown", () => {
+    // kilo-auto/* and openrouter/* routers report "-1" per token for
+    // variable pay-per-result pricing; that must not become a negative
+    // per-million cost in pi's model config.
+    expect(parsePrice("-1")).toBe(0);
+    expect(parsePrice("-0.0005")).toBe(0);
+    expect(parsePrice("0")).toBe(0);
   });
 });
 

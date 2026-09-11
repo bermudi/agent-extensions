@@ -84,12 +84,34 @@ function compatibleRefreshContext(context: unknown): CompatibleRefreshContext {
   return context as CompatibleRefreshContext;
 }
 
+/**
+ * The structural adapter above is intentionally untyped, which also means a
+ * future host rename would fail silently: no restore, no persist, no error.
+ * When the context matches NO known shape, say so (once per process) so the
+ * next pi migration announces itself in the log instead of hiding.
+ */
+let warnedUnrecognizedPersistenceShape = false;
+
+function warnUnrecognizedPersistenceShape(operation: string): void {
+  if (warnedUnrecognizedPersistenceShape) return;
+  warnedUnrecognizedPersistenceShape = true;
+  reportFailure(
+    "kilo_warning",
+    `[kilo] refresh-models context exposes neither publish nor store (${operation}); model catalog persistence is disabled. pi's refresh API likely changed — kilo.ts needs a compat update.`,
+  );
+}
+
 async function readStoredCatalog(
   context: unknown,
 ): Promise<StoredModelCatalog | undefined> {
   const compatible = compatibleRefreshContext(context);
   if (compatible.stored) return compatible.stored;
   if (compatible.store) return compatible.store.read();
+  // A context with publish but no snapshot is the modern shape with nothing
+  // persisted yet — normal, not drift.
+  if (typeof compatible.publish !== "function") {
+    warnUnrecognizedPersistenceShape("restore");
+  }
   return undefined;
 }
 
@@ -103,7 +125,10 @@ async function publishStoredCatalog(
   }
   if (compatible.store) {
     await compatible.store.write(entry);
+    return true;
   }
+  warnUnrecognizedPersistenceShape("persist");
+  // The in-memory catalog still updates; only persistence is lost.
   return true;
 }
 
@@ -293,6 +318,10 @@ export function parsePrice(price: string | null | undefined): number {
   if (!price) return 0;
   const parsed = parseFloat(price);
   if (isNaN(parsed)) return 0;
+  // Kilo/OpenRouter use negative sentinels ("-1") for router models with
+  // variable, pay-per-result pricing. That means unknown, not a credit —
+  // surfaced 2026-05 by the kilo-smoke check.
+  if (parsed <= 0) return 0;
   // OpenRouter prices are per-token; pi expects per-million-token.
   return parsed * 1_000_000;
 }
@@ -478,7 +507,8 @@ export function modelSupportsReasoning(m: OpenRouterModel): boolean {
   );
 }
 
-function mapOpenRouterModel(m: OpenRouterModel): ProviderModelConfig {
+/** Map a Kilo/OpenRouter catalog entry to a Pi provider model config. Exported for the live smoke check (scripts/kilo-smoke.ts), which runs the production mapper against the real gateway. */
+export function mapOpenRouterModel(m: OpenRouterModel): ProviderModelConfig {
   const inputModalities = m.architecture?.input_modalities ?? ["text"];
   const supportsImages = inputModalities.includes("image");
   const supportsReasoning = modelSupportsReasoning(m);
@@ -536,6 +566,43 @@ const KILO_FREE_MODELS: ProviderModelConfig[] = [
     supported_parameters: ["reasoning"],
   }),
 ];
+
+// --- Catalog health snapshot (footer badge) ---------------------------------
+//
+// refreshModels degrades silently by design: on failure it serves the last
+// good (or bootstrap) catalog so pickers keep working. That silence hides
+// gateway drift until a user notices missing models. provider-balance's
+// footer polls this snapshot and shows a badge while we are degraded, so
+// "the picker looks sparse" becomes an explicit on-screen signal.
+// Display-only: the refresh logic never reads it back.
+
+export interface KiloCatalogStatus {
+  /** Models in the catalog currently served (1 = bootstrap free router only). */
+  modelCount: number;
+  /** When the served catalog was last verified (epoch ms); 0 = bootstrap only. */
+  checkedAt: number;
+  /** Most recent refresh attempt failed; a fallback catalog is being served. */
+  degraded: boolean;
+}
+
+const kiloCatalogStatus: KiloCatalogStatus = {
+  modelCount: KILO_FREE_MODELS.length,
+  checkedAt: 0,
+  degraded: false,
+};
+
+/** Snapshot for display surfaces (the provider-balance footer badge). */
+export function getKiloCatalogStatus(): Readonly<KiloCatalogStatus> {
+  return kiloCatalogStatus;
+}
+
+/** Tests only: reset module-level warning/display state between cases. */
+export function resetKiloStateForTesting(): void {
+  warnedUnrecognizedPersistenceShape = false;
+  kiloCatalogStatus.modelCount = KILO_FREE_MODELS.length;
+  kiloCatalogStatus.checkedAt = 0;
+  kiloCatalogStatus.degraded = false;
+}
 
 function modelConfigToStoredModel(model: ProviderModelConfig): Model<Api> {
   return {
@@ -654,7 +721,13 @@ export default function kilo(pi: ExtensionAPI): void {
             ? (credential.key ?? null)
             : null;
 
-      if (!token) return KILO_FREE_MODELS;
+      if (!token) {
+        // Anonymous use serves the free bootstrap by design — that is not
+        // degradation, so make sure a stale degraded flag cannot outlive a
+        // logout.
+        kiloCatalogStatus.degraded = false;
+        return KILO_FREE_MODELS;
+      }
 
       if (!lastFullCatalog) {
         try {
@@ -666,6 +739,9 @@ export default function kilo(pi: ExtensionAPI): void {
           if (restored.length > 0) {
             lastFullCatalog = restored;
             lastFullCatalogCheckedAt = stored?.checkedAt ?? 0;
+            kiloCatalogStatus.modelCount = restored.length;
+            kiloCatalogStatus.checkedAt = lastFullCatalogCheckedAt;
+            kiloCatalogStatus.degraded = false;
           }
         } catch (error) {
           reportFailure(
@@ -709,12 +785,16 @@ export default function kilo(pi: ExtensionAPI): void {
         }
         lastFullCatalog = models;
         lastFullCatalogCheckedAt = checkedAt;
+        kiloCatalogStatus.modelCount = models.length;
+        kiloCatalogStatus.checkedAt = checkedAt;
+        kiloCatalogStatus.degraded = false;
         return models;
       } catch (error) {
         // Closing a picker or starting a newer refresh aborts the old request.
         // Each generation owns its request so a successor never inherits an
         // aborted promise from the generation it superseded.
         if (!context.signal?.aborted) {
+          kiloCatalogStatus.degraded = true;
           reportFailure(
             "kilo_warning",
             `[kilo] refreshModels fetch failed: ${describeError(error)}`,

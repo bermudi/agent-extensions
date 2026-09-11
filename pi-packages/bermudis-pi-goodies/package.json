@@ -30,7 +30,8 @@
     "build": "esbuild index.ts --bundle --platform=neutral --packages=external --format=esm --banner:js=\"// @ts-nocheck\" --outfile=bermudis-pi-goodies.bundle.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "format": "prettier --write \"*.ts\" \"!*.bundle.ts\""
+    "kilo-smoke": "bun run scripts/kilo-smoke.ts",
+    "format": "prettier --write \"*.ts\" \"scripts/*.ts\" \"!*.bundle.ts\""
   },
   "type": "module"
 }

@@ -10,6 +10,9 @@ pi-packages/
                          # clean-tui render paths MUST follow the render-safety rules in its
                          # README (pi-tui fullRender escalation: clearOnShrink + above-viewport
                          # changes wipe the screen in regular mode; fullscreen has neither)
+                         # kilo drift detection: footer badge (`kilo: stale …`) + kilo_warning
+                         # lines in goodies.log + `bun run kilo-smoke` (live catalog check; run
+                         # before releasing — DRIFT lines = kilo.ts hardcoded knowledge needs review)
   critique/               # ACTIVE (opt-in): launch the Bun-only Critique TUI from Pi
   diff/                   # ACTIVE (project-local)
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
@@ -114,6 +117,7 @@ infrastructure. Never move them into `pi-packages/`, publish them, or delete the
 
 Release = tag push → GitHub Actions publishes to npm via OIDC trusted publishing (no npm token in CI). Steps:
 
+0. From `pi-packages/bermudis-pi-goodies`, run `bun run kilo-smoke` — the live Kilo catalog check. Hard failures block; `DRIFT` lines mean kilo.ts's hardcoded model knowledge (Responses routing, anthropic cache control, `:free`) needs review first.
 1. Bump `version` in `pi-packages/bermudis-pi-goodies/package.json` (keep compact JSON style; `npm version` rewrites arrays to multiline — avoid), update the `pi install npm:bermudis-pi-goodies@X.Y.Z` line in its README, commit.
 2. Push to `main`, then `git tag bermudis-pi-goodies-vX.Y.Z && git push origin bermudis-pi-goodies-vX.Y.Z`. (Or use the workflow's manual `Run workflow` dispatch to re-publish the current main without tag churn.)
 3. The workflow `.github/workflows/publish-bermudis-pi-goodies.yml` verifies tag == package version (tag pushes only), typechecks, tests, publishes. Watch with `gh run watch <run-id> --exit-status`.

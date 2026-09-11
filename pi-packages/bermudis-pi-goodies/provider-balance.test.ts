@@ -37,6 +37,7 @@ import providerBalance, {
   writeCachedBalance,
   clearBalanceFailureMarker,
   FAILURE_BACKOFF_MS,
+  formatKiloCatalogStatus,
   zaiQuotaToBalance,
   type BalanceAdapter,
 } from "./provider-balance.ts";
@@ -963,6 +964,58 @@ describe("formatBalance", () => {
     expect(
       formatBalance([{ quota: { remainingPercent: 50, windowSeconds: 3600 } }]),
     ).toBe("1h 50%");
+  });
+});
+
+describe("formatKiloCatalogStatus", () => {
+  const now = 1_700_000_000_000;
+
+  test("healthy catalogs produce no badge", () => {
+    expect(
+      formatKiloCatalogStatus(
+        { modelCount: 300, checkedAt: now, degraded: false },
+        now,
+      ),
+    ).toBeUndefined();
+  });
+
+  test("degraded with no catalog ever fetched", () => {
+    expect(
+      formatKiloCatalogStatus(
+        { modelCount: 1, checkedAt: 0, degraded: true },
+        now,
+      ),
+    ).toBe("kilo: no catalog");
+  });
+
+  test("age compacts to minutes, hours, days", () => {
+    expect(
+      formatKiloCatalogStatus(
+        { modelCount: 5, checkedAt: now - 5 * 60_000, degraded: true },
+        now,
+      ),
+    ).toBe("kilo: stale 5m");
+    expect(
+      formatKiloCatalogStatus(
+        { modelCount: 5, checkedAt: now - 3 * 60 * 60_000, degraded: true },
+        now,
+      ),
+    ).toBe("kilo: stale 3h");
+    expect(
+      formatKiloCatalogStatus(
+        { modelCount: 5, checkedAt: now - 60 * 60 * 60_000, degraded: true },
+        now,
+      ),
+    ).toBe("kilo: stale 2d");
+  });
+
+  test("a failure seconds after a fresh check still shows at least 1m", () => {
+    expect(
+      formatKiloCatalogStatus(
+        { modelCount: 5, checkedAt: now - 2_000, degraded: true },
+        now,
+      ),
+    ).toBe("kilo: stale 1m");
   });
 });
 
