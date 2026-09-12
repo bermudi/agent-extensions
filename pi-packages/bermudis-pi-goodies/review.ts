@@ -25,6 +25,19 @@
  *   its contents are appended to the review prompt.
  *
  * Note: PR review requires a clean working tree (no uncommitted changes to tracked files).
+ *
+ * Provenance: this file is a copy of the upstream Pi review extension,
+ * https://github.com/earendil-works/pi-review (MIT), bundled here so goodies
+ * ships /review without a second install. Upstream owns the design, prompts,
+ * and review rubric — before changing review behavior, check upstream for
+ * fixes and new features and port them instead of letting this copy drift.
+ *
+ * Local deltas on top of upstream f1de050 (2026-07-19; upstream main's tip as
+ * of 2026-09-12) — re-apply these when re-syncing:
+ * - prettier-formatted (2-space) and wired to this package's describeError()
+ * - parsePrReference(): exported, strictly numeric bare refs, anchored PR-URL
+ *   regex, and the URL's owner/repo forwarded to gh via --repo
+ * - tokenizeArgs(): hoisted to module scope and exported for tests
  */
 
 import type {
