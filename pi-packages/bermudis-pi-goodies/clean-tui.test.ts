@@ -2588,3 +2588,51 @@ describe("convertSummaryResponse — production error conversion", () => {
     ).toBe("Cleans the build");
   });
 });
+
+describe("clean-tui rendering edge cases", () => {
+  test("expanded write hides its success output", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    const w = h.row("write", "w");
+    w.setArgs({ path: "/tmp/one.txt", content: "a\nb" });
+    w.setResult({
+      content: [
+        { type: "text", text: "Successfully wrote 3 bytes to /tmp/one.txt" },
+      ],
+    });
+    w.setExpanded(true);
+
+    // pi's write renderer returns nothing on success (the header's line count
+    // is the feedback); showing "Successfully wrote …" in the error color made
+    // every successful expanded write look like a failure.
+    expect(textOf(w.lastCallComponent)).toContain("write /tmp/one.txt");
+    expect(textOf(w.lastCallComponent)).not.toContain("Successfully wrote");
+  });
+
+  test("a grouped write burst hides success output but shows a failed call", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    const ok = h.row("write", "ok");
+    const bad = h.row("write", "bad");
+    ok.setArgs({ path: "/tmp/one.txt", content: "a" });
+    bad.setArgs({ path: "/tmp/two.txt", content: "b" });
+    ok.setResult({
+      content: [
+        { type: "text", text: "Successfully wrote 1 bytes to /tmp/one.txt" },
+      ],
+    });
+    bad.setResult({
+      content: [{ type: "text", text: "EACCES: permission denied" }],
+      isError: true,
+    });
+    ok.setExpanded(true);
+
+    expect(textOf(ok.lastCallComponent)).toContain("write ×2");
+    expect(textOf(ok.lastCallComponent)).not.toContain("Successfully wrote");
+    expect(textOf(ok.lastCallComponent)).toContain("permission denied");
+  });
+});

@@ -1822,8 +1822,11 @@ export default function cleanTui(pi: ExtensionAPI): void {
     parameters: schemaTools.write.parameters,
     bullet: formatWriteBullet,
     groupedDetails(entries, theme) {
+      // pi renders a write result only when the call failed (a success is
+      // "Successfully wrote N bytes", which it hides); showing it here in the
+      // error color painted every successful expanded write red.
       return entries
-        .filter((e) => e.result && resultText(e.result as any))
+        .filter((e) => e.isError && e.result && resultText(e.result as any))
         .map(
           (e) =>
             `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}: ${theme.fg("error", resultText(e.result as any)!)}`,
@@ -1840,7 +1843,8 @@ export default function cleanTui(pi: ExtensionAPI): void {
       return `${theme.fg("toolTitle", theme.bold("write"))} ${display}${info}`;
     },
     soloExpanded(entry, _args, theme) {
-      if (!entry.result) return "";
+      // Matches pi's write renderer: success output stays hidden.
+      if (!entry.isError || !entry.result) return "";
       const txt = resultText(entry.result as any);
       return txt ? theme.fg("error", txt) : "";
     },
