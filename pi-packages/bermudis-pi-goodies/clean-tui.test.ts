@@ -549,6 +549,26 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(e.lastCallComponent)).not.toContain("×2");
   });
 
+  test("a resumed branch's last call does not group with the first live call", () => {
+    // Replay segments count down from -1 and live segments up from 0. Both
+    // used to start at 0, so a boundary-free branch's last replayed call
+    // collided with the first live call of the same tool and merged across the
+    // replay/live edge.
+    const h = freshHarness();
+    h.ctx.sessionManager.branch = [assistantMessage({ id: "a", name: "read" })];
+    h.emit("session_start", { reason: "resume" });
+
+    const a = h.row("read", "a");
+    a.setArgs({ path: "/tmp/a.ts" });
+
+    h.emit("agent_start");
+    const b = h.row("read", "b");
+    b.setArgs({ path: "/tmp/b.ts" });
+
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(b.lastCallComponent instanceof Container).toBe(false);
+  });
+
   test("a provider delivering the whole message at once still splits interleaved calls", () => {
     // Non-streaming providers hand the complete message (later boundaries
     // included) at message_start, before any tool component registers. An

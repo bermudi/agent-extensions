@@ -1582,7 +1582,11 @@ export default function cleanTui(pi: ExtensionAPI): void {
     // branch (defensive) get NaN and render solo.
     replaySegByToolCallId.clear();
     const branch = ctx?.sessionManager?.getBranch?.() ?? [];
-    let seg = 0;
+    // Replay segments start at -1 and count down; live segments start at 0 and
+    // count up. Starting replay at -1 (not 0) keeps the domains disjoint —
+    // seg 0 belongs to live only — so a resumed branch's last call can never
+    // group with the first call of the next run (see shouldGroup).
+    let seg = -1;
     for (const entry of branch) {
       const message = entry?.type === "message" ? entry.message : undefined;
       if (!message) continue;
