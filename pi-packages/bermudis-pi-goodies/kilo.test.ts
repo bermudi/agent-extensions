@@ -489,6 +489,51 @@ describe("catalog status snapshot", () => {
     } as unknown as Parameters<NonNullable<ProviderConfig["refreshModels"]>>[0];
   }
 
+  test("an empty catalog response keeps the last good catalog and marks degraded", async () => {
+    // A 200 with no usable entries is a gateway failure, not a catalog: serving
+    // [] would empty the picker for a full freshness window (checkedAt looks
+    // fresh) while the footer badge stayed silent.
+    const originalFetch = globalThis.fetch;
+    try {
+      const provider = captureKiloProvider();
+      const refreshModels = provider.refreshModels;
+      if (!refreshModels)
+        throw new Error("Kilo refresh hook was not registered");
+
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            data: [
+              { id: "vendor/one", name: "One", context_length: 32_000 },
+              { id: "vendor/two", name: "Two", context_length: 32_000 },
+            ],
+          }),
+          { status: 200 },
+        )) as typeof fetch;
+      await refreshModels(apiContext());
+      expect(getKiloCatalogStatus().modelCount).toBe(2);
+
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ data: [] }), {
+          status: 200,
+        })) as typeof fetch;
+      const served = await refreshModels(apiContext());
+
+      expect(served.map(({ id }) => id)).toEqual(["vendor/one", "vendor/two"]);
+      const status = getKiloCatalogStatus();
+      expect(status.degraded).toBe(true);
+      expect(status.modelCount).toBe(2);
+      const warnings = readLogLines().filter(
+        (e) =>
+          e.type === "kilo_warning" &&
+          String(e.message).includes("empty model catalog"),
+      );
+      expect(warnings).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("degraded after a fetch failure, recovers after a success", async () => {
     const originalFetch = globalThis.fetch;
     try {

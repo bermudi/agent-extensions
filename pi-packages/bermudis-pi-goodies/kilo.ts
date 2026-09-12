@@ -672,7 +672,7 @@ async function fetchKiloModels(options?: {
     throw new Error("Invalid models response: missing data array");
   }
 
-  return json.data
+  const models = json.data
     .filter((m) => {
       const outputMods = m.architecture?.output_modalities ?? [];
       if (outputMods.includes("image")) return false; // skip image-generation
@@ -680,6 +680,17 @@ async function fetchKiloModels(options?: {
       return true;
     })
     .map(mapOpenRouterModel);
+
+  // A 200 with no usable entries is a gateway failure, not a catalog. Treating
+  // it as success would replace last-good (or the free bootstrap) with nothing
+  // and — because the freshness window then looks satisfied — hold an empty
+  // picker for four hours. Kilo's own gateway treats an empty model list as a
+  // schema error for its transcription catalog.
+  if (models.length === 0) {
+    throw new Error("Kilo returned an empty model catalog");
+  }
+
+  return models;
 }
 
 // =============================================================================
