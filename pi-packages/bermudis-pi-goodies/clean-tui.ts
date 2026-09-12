@@ -104,7 +104,10 @@ function getBuiltInTools(cwd: string): BuiltInTools {
 
 function shortenPath(path: string): string {
   const home = homedir();
-  if (path.startsWith(home)) return `~${path.slice(home.length)}`;
+  // Only a real subpath of home shortens: a bare startsWith turns a sibling
+  // like `/home/me-other/x` into `~-other/x`.
+  if (path === home || path.startsWith(`${home}/`))
+    return `~${path.slice(home.length)}`;
   return path;
 }
 

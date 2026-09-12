@@ -2635,4 +2635,24 @@ describe("clean-tui rendering edge cases", () => {
     expect(textOf(ok.lastCallComponent)).not.toContain("Successfully wrote");
     expect(textOf(ok.lastCallComponent)).toContain("permission denied");
   });
+
+  test("shortenPath only shortens real subpaths of home", () => {
+    const home = homedir();
+    const sibling = `${home}-other/notes.txt`;
+
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const r = h.row("read", "r");
+    r.setArgs({ path: sibling });
+    expect(textOf(r.lastCallComponent)).toContain(sibling);
+    expect(textOf(r.lastCallComponent)).not.toContain("~-other");
+
+    const h2 = freshHarness();
+    h2.emit("session_start", { reason: "startup" });
+    h2.emit("agent_start");
+    const r2 = h2.row("read", "r2");
+    r2.setArgs({ path: `${home}/notes.txt` });
+    expect(textOf(r2.lastCallComponent)).toContain("~/notes.txt");
+  });
 });
