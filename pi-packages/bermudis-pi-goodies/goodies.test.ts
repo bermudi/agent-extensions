@@ -7,6 +7,8 @@ import {
   setSummaryModel,
   getThinkingSummariesEnabled,
   setThinkingSummariesEnabled,
+  completeGoodiesArguments,
+  wrapGoodiesAutocomplete,
   findSummaryModel,
   suggestSummaryModels,
   __setConfigPathForTesting,
@@ -14,6 +16,7 @@ import {
 } from "./goodies";
 import goodiesDefault from "./goodies";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import type { AutocompleteProvider } from "@earendil-works/pi-tui";
 import {
   readFileSync,
   unlinkSync,
@@ -92,6 +95,23 @@ describe("goodies feature toggles", () => {
     expect(
       JSON.parse(readFileSync(CONFIG_PATH, "utf-8"))["summary-model"],
     ).toBeUndefined();
+  });
+
+  test("writes merge with changes another session made since startup", () => {
+    // Several pi sessions share ~/.pi/agent/goodies.json, each holding the
+    // config it loaded at startup. A write from a long-lived session must not
+    // revert what a newer one stored — that is how a configured summary-model
+    // kept disappearing behind an unrelated /goodies toggle.
+    writeFileSync(
+      CONFIG_PATH,
+      JSON.stringify({ "summary-model": "other/session-model", tps: false }),
+    );
+    setThinkingSummariesEnabled(true);
+    expect(getThinkingSummariesEnabled()).toBe(true);
+    const config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+    expect(config["summary-model"]).toBe("other/session-model");
+    expect(config.tps).toBe(false);
+    expect(config["thinking-summaries"]).toBe(true);
   });
 
   test("corrupt config logs a failure and falls back to defaults", () => {
@@ -256,6 +276,7 @@ describe("/goodies summary-model handler", () => {
   } {
     let captured!: { handler: (args: string, ctx: never) => Promise<void> };
     goodiesDefault({
+      on: () => {},
       registerCommand: (_name: string, opts: typeof captured) => {
         captured = opts;
       },
@@ -352,6 +373,7 @@ describe("/goodies thinking-summaries handler", () => {
   } {
     let captured!: { handler: (args: string, ctx: never) => Promise<void> };
     goodiesDefault({
+      on: () => {},
       registerCommand: (_name: string, opts: typeof captured) => {
         captured = opts;
       },
@@ -411,10 +433,160 @@ describe("/goodies thinking-summaries handler", () => {
     const cmd = registerGoodies();
     const { ctx, notices } = fakeCtx();
     await cmd.handler("list", ctx as never);
-    expect(notices[0].msg).toContain("thinking summaries: off");
+    expect(notices[0].msg).toContain(
+      "thinking summaries: off — run /goodies thinking-summaries on to enable",
+    );
     setThinkingSummariesEnabled(true);
     const after = fakeCtx();
     await cmd.handler("list", after.ctx as never);
     expect(after.notices[0].msg).toContain("thinking summaries: on");
+    expect(after.notices[0].msg).toContain("no summary model set");
+  });
+});
+
+describe("/goodies argument completion", () => {
+  test("subcommands take a trailing space only when they expect an argument", () => {
+    expect(completeGoodiesArguments("")?.map((i) => i.value)).toEqual([
+      "list",
+      "enable ",
+      "disable ",
+      "summary-model ",
+      "thinking-summaries ",
+    ]);
+    expect(completeGoodiesArguments("en")).toEqual([
+      { value: "enable ", label: "enable" },
+    ]);
+    expect(completeGoodiesArguments("di")).toEqual([
+      { value: "disable ", label: "disable" },
+    ]);
+    expect(completeGoodiesArguments("l")).toEqual([
+      { value: "list", label: "list" },
+    ]);
+  });
+
+  test("enable/disable values complete without a trailing space", () => {
+    expect(completeGoodiesArguments("enable co")).toEqual([
+      { value: "enable copy-with-model", label: "copy-with-model" },
+      { value: "enable copy-trajectory", label: "copy-trajectory" },
+    ]);
+    expect(completeGoodiesArguments("disable tps")).toEqual([
+      { value: "disable tps", label: "tps" },
+    ]);
+    const all = completeGoodiesArguments("disable ");
+    expect(all).toHaveLength(listFeatures().length);
+    expect(all?.[0]).toEqual({
+      value: "disable copy-with-model",
+      label: "copy-with-model",
+    });
+  });
+
+  test("thinking-summaries completes on/off", () => {
+    expect(completeGoodiesArguments("thinking-summaries ")).toEqual([
+      { value: "thinking-summaries on", label: "on" },
+      { value: "thinking-summaries off", label: "off" },
+    ]);
+    expect(completeGoodiesArguments("thinking-summaries of")).toEqual([
+      { value: "thinking-summaries off", label: "off" },
+    ]);
+  });
+
+  test("unknown subcommands and values produce no completions", () => {
+    expect(completeGoodiesArguments("frobnicate")).toBeNull();
+    expect(completeGoodiesArguments("summary-model some/model")).toBeNull();
+    expect(completeGoodiesArguments("enable nope")).toBeNull();
+  });
+});
+
+describe("/goodies forced-Tab autocomplete wrapper", () => {
+  function fakeProvider() {
+    const calls = { suggestions: 0, applied: 0 };
+    const provider: AutocompleteProvider = {
+      async getSuggestions() {
+        calls.suggestions += 1;
+        return { items: [{ value: "src/", label: "src/" }], prefix: "" };
+      },
+      applyCompletion(lines, cursorLine, cursorCol) {
+        calls.applied += 1;
+        return { lines, cursorLine, cursorCol };
+      },
+      shouldTriggerFileCompletion: () => true,
+    };
+    return { provider, calls };
+  }
+
+  const force = { signal: new AbortController().signal, force: true };
+
+  test("Tab in /goodies argument context lists features, never cwd paths", async () => {
+    const { provider, calls } = fakeProvider();
+    const wrapped = wrapGoodiesAutocomplete(provider);
+    const line = "/goodies disable ";
+    const result = await wrapped.getSuggestions([line], 0, line.length, force);
+    expect(result?.prefix).toBe("disable ");
+    expect(result?.items).toHaveLength(listFeatures().length);
+    expect(result?.items[0]).toEqual({
+      value: "disable copy-with-model",
+      label: "copy-with-model",
+    });
+    expect(calls.suggestions).toBe(0);
+  });
+
+  test("claims argument context even with nothing to offer (no path fallback)", async () => {
+    const { provider, calls } = fakeProvider();
+    const wrapped = wrapGoodiesAutocomplete(provider);
+    const line = "/goodies summary-model ";
+    expect(wrapped.shouldTriggerFileCompletion([line], 0, line.length)).toBe(
+      true,
+    );
+    expect(
+      await wrapped.getSuggestions([line], 0, line.length, force),
+    ).toBeNull();
+    expect(calls.suggestions).toBe(0);
+  });
+
+  test("non-forced requests and other lines delegate untouched", async () => {
+    const { provider, calls } = fakeProvider();
+    const wrapped = wrapGoodiesAutocomplete(provider);
+    const line = "/goodies disable ";
+    await wrapped.getSuggestions([line], 0, line.length, {
+      ...force,
+      force: false,
+    });
+    await wrapped.getSuggestions(["git status"], 0, 10, force);
+    // A /goodies-looking line deeper in a multi-line draft is not slash context.
+    await wrapped.getSuggestions(["# note", line], 1, line.length, force);
+    expect(calls.suggestions).toBe(3);
+    expect(wrapped.shouldTriggerFileCompletion(["git status"], 0, 10)).toBe(
+      true,
+    );
+    wrapped.applyCompletion(
+      [line],
+      0,
+      line.length,
+      { value: "disable tps", label: "tps" },
+      "disable ",
+    );
+    expect(calls.applied).toBe(1);
+  });
+});
+
+describe("/goodies autocomplete registration", () => {
+  test("session_start installs the wrapper once per extension load", () => {
+    let handler!: (event: never, ctx: never) => void;
+    const factories: unknown[] = [];
+    goodiesDefault({
+      on: (event: string, registered: typeof handler) => {
+        expect(event).toBe("session_start");
+        handler = registered;
+      },
+      registerCommand: () => {},
+    } as never);
+    const ctx = {
+      ui: {
+        addAutocompleteProvider: (factory: unknown) => factories.push(factory),
+      },
+    };
+    handler({} as never, ctx as never);
+    handler({} as never, ctx as never);
+    expect(factories).toEqual([wrapGoodiesAutocomplete]);
   });
 });

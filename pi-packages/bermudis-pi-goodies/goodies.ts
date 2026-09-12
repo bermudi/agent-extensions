@@ -12,6 +12,10 @@
  */
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  AutocompleteItem,
+  AutocompleteProvider,
+} from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -129,13 +133,27 @@ function saveConfig(config: Config): void {
 
 let config = loadConfig();
 
+/**
+ * Every config write re-reads the file first. Several pi sessions share
+ * ~/.pi/agent/goodies.json and each caches it from its own startup, so writing
+ * the cached copy back would silently revert settings another session changed
+ * since — how a configured summary-model kept disappearing under a session
+ * that only ever toggled an unrelated feature.
+ */
+function updateConfig(mutate: (config: Config) => void): void {
+  config = loadConfig();
+  mutate(config);
+  saveConfig(config);
+}
+
 export function isEnabled(name: FeatureName): boolean {
   return config[name] !== false; // default true
 }
 
 export function setEnabled(name: FeatureName, enabled: boolean): void {
-  config[name] = enabled;
-  saveConfig(config);
+  updateConfig((next) => {
+    next[name] = enabled;
+  });
 }
 
 export function listFeatures(): Array<{ name: FeatureName; enabled: boolean }> {
@@ -148,12 +166,13 @@ export function getSummaryModel(): string | undefined {
 }
 
 export function setSummaryModel(model: string | undefined): void {
-  if (model === undefined || model.trim() === "") {
-    delete config["summary-model"];
-  } else {
-    config["summary-model"] = model.trim();
-  }
-  saveConfig(config);
+  updateConfig((next) => {
+    if (model === undefined || model.trim() === "") {
+      delete next["summary-model"];
+    } else {
+      next["summary-model"] = model.trim();
+    }
+  });
 }
 
 export function getThinkingSummariesEnabled(): boolean {
@@ -161,9 +180,10 @@ export function getThinkingSummariesEnabled(): boolean {
 }
 
 export function setThinkingSummariesEnabled(enabled: boolean): void {
-  if (enabled) config["thinking-summaries"] = true;
-  else delete config["thinking-summaries"];
-  saveConfig(config);
+  updateConfig((next) => {
+    if (enabled) next["thinking-summaries"] = true;
+    else delete next["thinking-summaries"];
+  });
 }
 
 // ── Summary-model resolution against pi's model registry ────────────────────
@@ -250,33 +270,129 @@ export function suggestSummaryModels(
 export const SUMMARY_OFF_HINT =
   "off — run /goodies summary-model <provider/model> to enable";
 
+/** Human-facing hint shown wherever thinking summaries being off matters. */
+export const THINKING_SUMMARIES_OFF_HINT =
+  "off — run /goodies thinking-summaries on to enable";
+
+const SUBCOMMANDS = [
+  "list",
+  "enable",
+  "disable",
+  "summary-model",
+  "thinking-summaries",
+];
+
+/** Subcommands that take a further argument, completed with a trailing space. */
+const SUBCOMMANDS_WITH_ARGUMENT = new Set([
+  "enable",
+  "disable",
+  "summary-model",
+  "thinking-summaries",
+]);
+
+/**
+ * Argument completions for /goodies: subcommands first, then each verb's
+ * values. Shared with the forced-Tab wrapper below so both paths answer from
+ * one source.
+ */
+export function completeGoodiesArguments(
+  prefix: string,
+): AutocompleteItem[] | null {
+  const verbMatch = prefix.match(/^(\S+)\s+(.*)$/);
+  if (!verbMatch) {
+    const query = prefix.trim();
+    const matches = SUBCOMMANDS.filter((s) => s.startsWith(query));
+    return matches.length
+      ? matches.map((s) => ({
+          value: SUBCOMMANDS_WITH_ARGUMENT.has(s) ? `${s} ` : s,
+          label: s,
+        }))
+      : null;
+  }
+  const verb = verbMatch[1];
+  const valuePrefix = verbMatch[2].trim();
+  if (verb === "enable" || verb === "disable") {
+    const matches = FEATURES.filter((f) => f.startsWith(valuePrefix));
+    return matches.length
+      ? matches.map((f) => ({ value: `${verb} ${f}`, label: f }))
+      : null;
+  }
+  if (verb === "thinking-summaries") {
+    const matches = ["on", "off"].filter((v) => v.startsWith(valuePrefix));
+    return matches.length
+      ? matches.map((v) => ({ value: `${verb} ${v}`, label: v }))
+      : null;
+  }
+  return null;
+}
+
+/** The argument text of a /goodies line, or null outside that context. */
+function goodiesArgumentText(
+  lines: string[],
+  cursorLine: number,
+  cursorCol: number,
+): string | null {
+  if (cursorLine !== 0) return null;
+  const match = /^\/goodies\s+(.*)$/.exec((lines[0] ?? "").slice(0, cursorCol));
+  return match ? match[1] : null;
+}
+
+/**
+ * Pi's editor turns Tab in slash-command argument context into a forced file
+ * completion that never consults the command's getArgumentCompletions, so Tab
+ * after `/goodies enable ` would list cwd paths. Claim that context and answer
+ * from the command's own completions — paths are never a valid /goodies
+ * argument.
+ */
+export function wrapGoodiesAutocomplete(
+  current: AutocompleteProvider,
+): AutocompleteProvider {
+  return {
+    async getSuggestions(lines, cursorLine, cursorCol, options) {
+      if (options.force) {
+        const argumentText = goodiesArgumentText(lines, cursorLine, cursorCol);
+        if (argumentText !== null) {
+          const items = completeGoodiesArguments(argumentText);
+          return items ? { items, prefix: argumentText } : null;
+        }
+      }
+      return current.getSuggestions(lines, cursorLine, cursorCol, options);
+    },
+    applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+      return current.applyCompletion(
+        lines,
+        cursorLine,
+        cursorCol,
+        item,
+        prefix,
+      );
+    },
+    shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+      if (goodiesArgumentText(lines, cursorLine, cursorCol) !== null) {
+        return true;
+      }
+      return (
+        current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ??
+        true
+      );
+    },
+  };
+}
+
+let autocompleteWrapped = false;
+
 export default function goodies(pi: ExtensionAPI): void {
+  // Once per extension load: session_start also fires on /new, /resume, and
+  // /fork, where the first session's wrapper is still installed.
+  pi.on("session_start", (_event, ctx) => {
+    if (autocompleteWrapped) return;
+    autocompleteWrapped = true;
+    ctx.ui.addAutocompleteProvider(wrapGoodiesAutocomplete);
+  });
+
   pi.registerCommand("goodies", {
     description: "Toggle bermudis-pi-goodies features on/off",
-    getArgumentCompletions: (prefix) => {
-      const subcommands = [
-        "list",
-        "enable",
-        "disable",
-        "summary-model",
-        "thinking-summaries",
-      ];
-      const verbMatch = prefix.match(/^(\S+)\s+(.*)$/);
-      if (verbMatch) {
-        const verb = verbMatch[1];
-        const featurePrefix = verbMatch[2].trim();
-        if (["enable", "disable"].includes(verb)) {
-          return FEATURES.filter((f) => f.startsWith(featurePrefix)).map(
-            (f) => ({ value: `${verb} ${f}`, label: f }),
-          );
-        }
-        return null;
-      }
-      const firstWord = prefix.trim();
-      return subcommands
-        .filter((s) => s.startsWith(firstWord))
-        .map((s) => ({ value: s, label: s }));
-    },
+    getArgumentCompletions: completeGoodiesArguments,
     handler: async (args, ctx) => {
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const sub = parts[0] || "list";
@@ -290,10 +406,13 @@ export default function goodies(pi: ExtensionAPI): void {
         lines.push(
           `  smart summaries (bash): ${summaryModel ?? SUMMARY_OFF_HINT}`,
         );
+        const thinkingEnabled = getThinkingSummariesEnabled();
         lines.push(
-          `  thinking summaries: ${getThinkingSummariesEnabled() ? "on" : "off"}` +
-            (getThinkingSummariesEnabled() && !summaryModel
-              ? ` (no summary model set — ${SUMMARY_OFF_HINT})`
+          `  thinking summaries: ${
+            thinkingEnabled ? "on" : THINKING_SUMMARIES_OFF_HINT
+          }` +
+            (thinkingEnabled && !summaryModel
+              ? " (no summary model set — run /goodies summary-model <provider/model>)"
               : ""),
         );
         ctx.ui.notify(`goodies features:\n${lines.join("\n")}`, "info");

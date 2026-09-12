@@ -664,8 +664,10 @@ describe("clean-tui AI summary", () => {
   function useScratchConfig(): void {
     const tmpDir = mkdtempSync(join(tmpdir(), "goodies-cfg-"));
     __setConfigPathForTesting(join(tmpDir, "goodies.json"));
+    // Restore ONLY the path. Clearing the config here would run after the real
+    // path is restored when a test stacks two of these helpers (cleanups unwind
+    // LIFO), wiping the user's actual ~/.pi/agent/goodies.json.
     cleanupFns.push(() => {
-      setSummaryModel(undefined);
       __setConfigPathForTesting(
         join(homedir(), ".pi", "agent", "goodies.json"),
       );
@@ -1886,8 +1888,8 @@ describe("clean-tui thinking summaries", () => {
     __setSummaryEnabled(true);
     __clearSummaryCache();
     cleanupFns.push(() => {
-      setThinkingSummariesEnabled(false);
-      setSummaryModel(undefined);
+      // Restore the path only — see useScratchConfig() for why clearing here
+      // would corrupt the user's real config.
       __setConfigPathForTesting(
         join(homedir(), ".pi", "agent", "goodies.json"),
       );
@@ -2001,12 +2003,6 @@ describe("clean-tui thinking summaries", () => {
     __setSummaryEnabled(true);
     __clearSummaryCache();
     __resetThinkingSummariesForTesting();
-    cleanupFns.push(() => {
-      setSummaryModel(undefined);
-      __setConfigPathForTesting(
-        join(homedir(), ".pi", "agent", "goodies.json"),
-      );
-    });
     h = new PiHarness();
     cleanTui(h.api);
     h.emit("session_start", { reason: "startup" });
