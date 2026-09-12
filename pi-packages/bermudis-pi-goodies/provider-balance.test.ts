@@ -349,6 +349,109 @@ describe("auth transition", () => {
     await Promise.resolve();
     expect(scheduled.length).toBeGreaterThan(timersBeforeInput);
   });
+
+  test("survives an unrelated refresh landing inside the poll window", async () => {
+    // Regression: the poller used to capture refreshGeneration and bail out
+    // when any other refresh (turn_end, agent_settled, idle poll) bumped it.
+    // That refresh resolved the OLD credential before it started, so the
+    // credential swap went unnoticed until some later, unrelated trigger.
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: ExtensionContext) => unknown
+    >();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    const flush = () =>
+      new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+
+    let token = "token-old";
+    const fetched: string[] = [];
+    try {
+      providerBalance(
+        {
+          on(event, handler) {
+            handlers.set(
+              event,
+              handler as (event: unknown, ctx: ExtensionContext) => unknown,
+            );
+          },
+          events: {
+            emit() {},
+            on() {
+              return () => {};
+            },
+          },
+        } as unknown as ExtensionAPI,
+        {
+          adapters: {
+            kilo: {
+              fetch: async (fetchedToken: string) => {
+                fetched.push(fetchedToken);
+                return [{ credits: 1 }];
+              },
+            },
+          },
+          cacheDir: directory,
+          random: () => 0.5,
+          setTimeout,
+          clearTimeout,
+        },
+      );
+
+      const ctx = {
+        mode: "tui",
+        model: { provider: "kilo" },
+        isIdle: () => false,
+        ui: { setFooter() {} },
+        sessionManager: { getBranch: () => [] },
+        modelRegistry: {
+          isUsingOAuth: () => false,
+          getApiKeyForProvider: async () => token,
+        },
+      } as unknown as ExtensionContext;
+
+      const start = handlers.get("session_start");
+      const input = handlers.get("input");
+      const turnEnd = handlers.get("turn_end");
+      if (!start || !input || !turnEnd) {
+        throw new Error("missing lifecycle handlers");
+      }
+
+      start({}, ctx);
+      await flush();
+      expect(fetched).toEqual(["token-old"]);
+
+      // "/login kilo" arms the transition poller.
+      input({ text: "/login kilo" }, ctx);
+      const poller = scheduled[scheduled.length - 1]!;
+      expect(poller.delay).toBe(250);
+
+      // An authoritative refresh lands while the browser login is still open.
+      turnEnd({ turnIndex: 0 }, ctx);
+      await flush();
+
+      // The credential has not changed yet: the poller must keep polling.
+      poller.callback();
+      await flush();
+      const repolls = scheduled.filter((entry) => entry.delay === 1_000);
+      expect(repolls.length).toBe(1);
+
+      // The login completes; the surviving poll notices the new credential.
+      token = "token-new";
+      repolls[0]!.callback();
+      await flush();
+      expect(fetched).toEqual(["token-old", "token-old", "token-new"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("turn_end cadence", () => {

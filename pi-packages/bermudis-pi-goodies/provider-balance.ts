@@ -1242,11 +1242,15 @@ export default function providerBalance(
     previousCacheKey: string | undefined,
   ): void {
     if (authTransitionTimer !== undefined) clearTimer(authTransitionTimer);
-    const generation = refreshGeneration;
     let attempts = 0;
+    // Deliberately not gated on refreshGeneration: any unrelated refresh
+    // (turn_end, agent_settled, an idle poll) landing while the user is still
+    // completing /login would otherwise kill the poller, and that refresh
+    // resolved the OLD credential before it started, so nothing would pick up
+    // the new one. Only a session switch (activeContext) ends the poll early.
     const check = async (): Promise<void> => {
       attempts++;
-      if (generation !== refreshGeneration || activeContext !== ctx) return;
+      if (activeContext !== ctx) return;
       let token: string | undefined;
       try {
         token = await ctx.modelRegistry.getApiKeyForProvider(provider);
@@ -1258,7 +1262,7 @@ export default function providerBalance(
         }
         return;
       }
-      if (generation !== refreshGeneration || activeContext !== ctx) return;
+      if (activeContext !== ctx) return;
       const currentCacheKey = token
         ? balanceCacheKey(provider, token)
         : undefined;
