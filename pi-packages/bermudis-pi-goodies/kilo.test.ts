@@ -406,6 +406,76 @@ describe("persistence shape drift", () => {
   });
 });
 
+describe("restore sanitization", () => {
+  test("a pre-clamp snapshot never restores negative costs", async () => {
+    // ~/.pi/agent/models-store.json entries written before the negative-sentinel
+    // clamp (parsePrice) hold -1e6/Mtok for Kilo's "-1" router prices. Restoring
+    // them verbatim made pi bill those models with negative rates, so the
+    // restore path re-clamps — and only clamps what is actually invalid.
+    const provider = captureKiloProvider();
+    const refreshModels = provider.refreshModels;
+    if (!refreshModels) throw new Error("Kilo refresh hook was not registered");
+
+    const restored = await refreshModels({
+      credential: { type: "api_key", key: "test-key" },
+      stored: {
+        checkedAt: Date.now(),
+        models: [
+          {
+            id: "kilo-auto/efficient",
+            name: "Auto Efficient",
+            provider: "kilo",
+            api: "openai-completions",
+            baseUrl: "https://api.kilo.ai/api/gateway",
+            reasoning: true,
+            input: ["text", "image"],
+            cost: {
+              input: -1_000_000,
+              output: -1_000_000,
+              cacheRead: -2,
+              cacheWrite: 0,
+            },
+            contextWindow: 1_000_000,
+            maxTokens: 65_536,
+            compat: { thinkingFormat: "openrouter", supportsStore: false },
+          },
+          {
+            id: "vendor/paid",
+            name: "Paid Model",
+            provider: "kilo",
+            api: "openai-completions",
+            baseUrl: "https://api.kilo.ai/api/gateway",
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0.5 },
+            contextWindow: 32_000,
+            maxTokens: 8_000,
+          },
+        ],
+      },
+      allowNetwork: false,
+    } as unknown as Parameters<typeof refreshModels>[0]);
+
+    expect(restored.map(({ id }) => id)).toEqual([
+      "kilo-auto/efficient",
+      "vendor/paid",
+    ]);
+    expect(restored[0].cost).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    expect(restored[0].maxTokens).toBe(65_536);
+    expect(restored[1].cost).toEqual({
+      input: 1.25,
+      output: 10,
+      cacheRead: 0.125,
+      cacheWrite: 0.5,
+    });
+  });
+});
+
 describe("catalog status snapshot", () => {
   function apiContext(): Parameters<
     NonNullable<ProviderConfig["refreshModels"]>

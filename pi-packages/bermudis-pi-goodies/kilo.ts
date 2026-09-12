@@ -623,7 +623,17 @@ function storedModelToConfig(model: Model<Api>): ProviderModelConfig | null {
     reasoning: model.reasoning,
     thinkingLevelMap: model.thinkingLevelMap,
     input: model.input,
-    cost: model.cost,
+    // Persisted catalogs outlive the mapper that wrote them: a snapshot written
+    // before the negative-sentinel clamp (parsePrice, 0.17.0) still holds
+    // -1e6/Mtok for Kilo's "-1" router prices. Re-clamp on restore so pi never
+    // bills a request with a negative rate.
+    cost: {
+      ...model.cost,
+      input: Math.max(0, model.cost?.input ?? 0),
+      output: Math.max(0, model.cost?.output ?? 0),
+      cacheRead: Math.max(0, model.cost?.cacheRead ?? 0),
+      cacheWrite: Math.max(0, model.cost?.cacheWrite ?? 0),
+    },
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
     compat: model.compat,
