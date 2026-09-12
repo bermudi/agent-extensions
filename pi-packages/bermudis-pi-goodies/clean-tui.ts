@@ -162,6 +162,14 @@ let liveSeg = 0;
  * reasoning items interleaved between tool calls of one message.
  */
 let curAssistantBoundaries = new Set<object>();
+/**
+ * The assistant message currently streaming. Boundaries are counted lazily —
+ * only up to a call's position as it registers (scanBoundariesBeforeTool) and
+ * in full when the message closes (flushAssistantBoundaries) — so a provider
+ * that delivers the whole message (later boundaries included) at once still
+ * splits its calls where the content splits. See scanAssistantBoundaries.
+ */
+let curAssistantMessage: any;
 // True while pi is replaying persisted history (startup with -c/--continue,
 // /resume, /fork). During replay no events fire, so segment boundaries are
 // rebuilt from the session branch instead (see session_start).
@@ -179,11 +187,24 @@ function upsertEntry(
 ): Entry {
   let e = entryById.get(toolCallId);
   if (!e) {
+    let seg: number;
+    if (replaying) {
+      seg = replaySegByToolCallId.get(toolCallId) ?? NaN;
+    } else {
+      // Count the boundaries above this call before reading the counter, so a
+      // burst splits exactly where the message content splits — including when
+      // a provider delivers the whole message (later boundaries included) at
+      // once. Eagerly counting on message_update would bump for boundaries
+      // that sit after a call that has not registered yet, merging it with
+      // the next call the boundary was meant to separate it from.
+      scanBoundariesBeforeTool(toolCallId);
+      seg = liveSeg;
+    }
     e = {
       toolCallId,
       toolName,
       args,
-      seg: replaying ? (replaySegByToolCallId.get(toolCallId) ?? NaN) : liveSeg,
+      seg,
       index: entries.length,
     };
     entries.push(e);
@@ -227,13 +248,50 @@ function isBurstBoundaryBlock(block: any): boolean {
 }
 
 /** Bump the segment once for every boundary block new since the last scan. */
-function scanAssistantBoundaries(message: any): void {
-  for (const block of message?.content ?? []) {
+function scanAssistantBoundaries(message: any, upTo = Infinity): void {
+  const content: any[] = message?.content ?? [];
+  for (let i = 0; i < content.length && i < upTo; i++) {
+    const block = content[i];
     if (!isBurstBoundaryBlock(block) || curAssistantBoundaries.has(block))
       continue;
     curAssistantBoundaries.add(block);
     liveSeg++;
   }
+}
+
+/**
+ * Count the boundaries that precede `toolCallId` in the current assistant
+ * message. Called at registration, so a call's segment reflects only the
+ * boundaries above it — that is what keeps an interleaved thinking block
+ * splitting two calls even when the whole message (and its later boundaries)
+ * arrives at once, as non-streaming providers deliver it.
+ *
+ * When the id is not in the message content (test rows register independently
+ * of the message; some providers omit the block), every currently-present
+ * boundary precedes the call by construction — content appends in order — so
+ * counting all of them is the same rule.
+ */
+function scanBoundariesBeforeTool(toolCallId: string): void {
+  const content: any[] = curAssistantMessage?.content ?? [];
+  for (let i = 0; i < content.length; i++) {
+    const block = content[i];
+    if (block?.type === "toolCall" && block.id === toolCallId) {
+      scanAssistantBoundaries(curAssistantMessage, i);
+      return;
+    }
+  }
+  scanAssistantBoundaries(curAssistantMessage);
+}
+
+/**
+ * Count the boundaries of the assistant message that just ended, including
+ * any after its last tool call. Their only job is to separate that message's
+ * tools from the next message's, so they land when the message closes rather
+ * than eagerly.
+ */
+function flushAssistantBoundaries(): void {
+  if (curAssistantMessage) scanAssistantBoundaries(curAssistantMessage);
+  curAssistantMessage = undefined;
 }
 
 function shouldGroup(a: Entry, b: Entry): boolean {
@@ -1434,34 +1492,45 @@ export default function cleanTui(pi: ExtensionAPI): void {
         .modelRegistry;
     }
   });
-  // Boundary blocks (visible prose, thinking) are detected during streaming —
-  // pi creates a message's tool components while that message is still
-  // streaming and blocks stream in order, so by the time a tool call of a
-  // message registers, every boundary block before it has already bumped the
-  // segment. Extension events are emitted before the TUI creates those
+  // Boundary blocks (visible prose, thinking) are counted lazily, in content
+  // order: at registration each tool counts only the boundaries above it
+  // (upsertEntry -> scanBoundariesBeforeTool), and a message's trailing
+  // boundaries land when it closes. This holds whether the message streams in
+  // block-by-block or arrives whole (non-streaming providers), where an eager
+  // scan would see later boundaries before the calls they separate have
+  // registered. Extension events are emitted before the TUI creates those
   // components (agent-session emits to extensions first).
   pi.on("message_start", (event, _ctx) => {
     const message = (event as any).message;
     if (!message) return;
     if (message.role === "assistant") {
+      // Close the previous assistant message first: count its trailing
+      // boundaries so the next message's tools cannot group across them.
+      flushAssistantBoundaries();
       curAssistantBoundaries = new Set();
+      curAssistantMessage = message;
       // A new assistant message brings a fresh content array — its thinking
       // blocks are new objects, so drop the previous message's run tracking.
       resetThinkingRun();
-      // Some providers deliver the complete message at start (no streaming).
-      scanAssistantBoundaries(message);
     } else if (message.role === "user") {
       // A typed user message is prose; it must split the surrounding bursts.
+      // Close the assistant message that preceded it first, then bump.
+      flushAssistantBoundaries();
+      curAssistantBoundaries = new Set();
       if (hasVisibleText(message)) liveSeg++;
     }
   });
   pi.on("message_update", (event, _ctx) => {
     const message = (event as any).message;
     if (message?.role !== "assistant") return;
-    // Scanning the accumulating content (rather than matching granular
-    // streaming events alone) also covers providers that skip granular
-    // events; the Set keeps each block to exactly one bump.
-    scanAssistantBoundaries(message);
+    // Keep the newest message object: boundaries arrive on update events. In
+    // real pi the accumulator is mutated in place (same reference), but tests
+    // and some providers hand a fresh object — scanBoundariesBeforeTool and
+    // flushAssistantBoundaries must read whichever carries the content.
+    curAssistantMessage = message;
+    // Boundaries are not counted here: registration counts only those above
+    // each call and message close flushes the rest (see message_start). The
+    // accumulating content is still walked for live thinking summaries.
     trackThinkingStream(message);
   });
   pi.on("agent_settled", () => {
@@ -1473,6 +1542,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     liveSeg = 0;
     curAssistantBoundaries = new Set();
+    curAssistantMessage = undefined;
     replaying = true;
     entries.length = 0;
     entryById.clear();

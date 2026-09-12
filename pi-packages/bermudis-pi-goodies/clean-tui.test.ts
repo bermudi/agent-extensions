@@ -548,6 +548,35 @@ describe("clean-tui resume/replay", () => {
     expect(textOf(e.lastCallComponent)).toContain("edit");
     expect(textOf(e.lastCallComponent)).not.toContain("×2");
   });
+
+  test("a provider delivering the whole message at once still splits interleaved calls", () => {
+    // Non-streaming providers hand the complete message (later boundaries
+    // included) at message_start, before any tool component registers. An
+    // eager boundary scan counted the second thinking block before call b
+    // existed, so a and b merged despite the block between them.
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    h.emit("message_start", {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "" },
+          { type: "toolCall", id: "a", name: "read", arguments: {} },
+          { type: "thinking", thinking: "" },
+          { type: "toolCall", id: "b", name: "read", arguments: {} },
+        ],
+      },
+    });
+
+    const a = h.row("read", "a");
+    a.setArgs({ path: "/tmp/a.ts" });
+    const b = h.row("read", "b");
+    b.setArgs({ path: "/tmp/b.ts" });
+
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(b.lastCallComponent instanceof Container).toBe(false);
+  });
 });
 
 describe("clean-tui render reentrancy", () => {
