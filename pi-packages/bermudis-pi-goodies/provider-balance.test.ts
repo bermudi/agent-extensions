@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -448,6 +449,131 @@ describe("auth transition", () => {
       repolls[0]!.callback();
       await flush();
       expect(fetched).toEqual(["token-old", "token-old", "token-new"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("footer lifecycle", () => {
+  /** Stand-in for pi's footer container: it holds whatever the extension last
+   *  installed, and `undefined` restores the built-in footer. */
+  function createFooterHost() {
+    const builtin = { render: () => ["builtin footer"] };
+    let mounted: { render(width: number): string[] } = builtin;
+    const tui = { requestRender() {} };
+    const theme = {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    const footerData = {
+      getGitBranch: () => undefined,
+      getExtensionStatuses: () => new Map<string, string>(),
+      getAvailableProviderCount: () => 1,
+      onBranchChange: () => () => {},
+    };
+    return {
+      isBuiltinMounted: () => mounted === builtin,
+      renderMounted: () => mounted.render(100),
+      ui: {
+        setFooter(
+          factory?:
+            | ((
+                tui: unknown,
+                theme: unknown,
+                footerData: unknown,
+              ) => { render(width: number): string[] })
+            | undefined,
+        ) {
+          mounted = factory ? factory(tui, theme, footerData) : builtin;
+        },
+      },
+    };
+  }
+
+  test("session shutdown hands the footer back before the ctx goes stale", async () => {
+    initTheme("dark");
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: ExtensionContext) => unknown
+    >();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    const host = createFooterHost();
+
+    try {
+      providerBalance(
+        {
+          on(event, handler) {
+            handlers.set(
+              event,
+              handler as (event: unknown, ctx: ExtensionContext) => unknown,
+            );
+          },
+          events: {
+            emit() {},
+            on() {
+              return () => {};
+            },
+          },
+        } as unknown as ExtensionAPI,
+        {
+          adapters: { kilo: { fetch: async () => [{ credits: 42 }] } },
+          cacheDir: directory,
+          random: () => 0.5,
+          setTimeout,
+          clearTimeout,
+        },
+      );
+
+      const ctx = {
+        mode: "tui",
+        model: {
+          provider: "kilo",
+          id: "kilo-model",
+          reasoning: false,
+          contextWindow: 128_000,
+        },
+        isIdle: () => false,
+        ui: host.ui,
+        sessionManager: {
+          getBranch: () => [],
+          getEntries: () => [],
+          getCwd: () => "/work",
+          getSessionName: () => undefined,
+        },
+        getContextUsage: () => null,
+        modelRegistry: {
+          isUsingOAuth: () => false,
+          getApiKeyForProvider: async () => "token",
+        },
+      } as unknown as ExtensionContext;
+
+      const start = handlers.get("session_start");
+      const shutdown = handlers.get("session_shutdown");
+      if (!start || !shutdown) throw new Error("missing lifecycle handlers");
+
+      start({}, ctx);
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+
+      // The balance footer is mounted and live before teardown.
+      expect(host.isBuiltinMounted()).toBe(false);
+      expect(host.renderMounted().join("\n")).toContain("$42.00");
+
+      shutdown({}, ctx);
+
+      // pi keeps a custom footer mounted until it is handed back, and by then
+      // the captured ctx is stale: the next TUI frame would throw out of the
+      // render loop, which pi turns into process.exit(1).
+      expect(host.isBuiltinMounted()).toBe(true);
+      expect(() => host.renderMounted()).not.toThrow();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

@@ -1216,6 +1216,8 @@ export default function providerBalance(
   let idleRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   let authTransitionTimer: ReturnType<typeof setTimeout> | undefined;
   let requestRender: (() => void) | undefined;
+  /** True while our footer component is the one mounted in the TUI. */
+  let footerInstalled = false;
   let activeThinkingLevel: ActiveThinkingLevel = "off";
 
   function clearBalance(): void {
@@ -1566,9 +1568,11 @@ export default function providerBalance(
           unsubscribeBranchChange();
           footer.dispose();
           requestRender = undefined;
+          footerInstalled = false;
         },
       };
     });
+    footerInstalled = true;
   }
 
   // Fires for startup, reload, and every session switch/new/fork: pi tears
@@ -1645,6 +1649,21 @@ export default function providerBalance(
   });
 
   pi.on("session_shutdown", () => {
+    // A custom footer stays mounted until pi replaces it: session_shutdown is
+    // how reload and session replacement tear us down, while the TUI keeps
+    // rendering, and the ctx is invalidated immediately afterwards. A render
+    // in that window reaches the footer facade's inactive-context guard and
+    // throws out of the render loop, which pi turns into an uncaught exception
+    // (process.exit(1)). Hand the footer back while the ctx is still usable;
+    // the next session_start installs a fresh one.
+    if (footerInstalled) {
+      try {
+        activeContext?.ui.setFooter(undefined);
+      } catch {
+        // An already-stopped UI (quit path) has nothing to restore.
+      }
+      footerInstalled = false;
+    }
     refreshGeneration++;
     refreshInFlight = false;
     refreshController?.abort();
