@@ -24,7 +24,7 @@ extensions. One entry point, twelve independent features.
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.19.0
+pi install npm:bermudis-pi-goodies@0.20.0
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
@@ -94,10 +94,11 @@ failures back off exponentially instead of hammering the provider.
 With hidden thinking blocks (pi's `hideThinkingBlock`), a long reasoning
 run renders as one static italic `Thinking...` row — no hint of what the
 model is chewing on. `/goodies thinking-summaries on` adds a live line
-above the editor while a thinking run streams:
+above the editor while a thinking run streams, in the same dim italic style
+as the `Thinking...` rows so it never reads as assistant prose:
 
 ```text
-Weighing render escalation rules in pi-tui
+… Weighing render escalation rules in pi-tui
 ```
 
 The line updates as the reasoning moves — a summary every ~5s once the run
@@ -116,10 +117,11 @@ commands it is logged as a digest, never raw text.
 
 Two honest trade-offs:
 
-- **Separate opt-in, default off.** A bash summary is one request per unique
+- **Separate opt-in, default off every launch.** A bash summary is one request per unique
   command; a thinking summary recurs for as long as the model reasons.
   Same provider, different volume — so `thinking-summaries on` asks for
-  that explicitly. It takes effect immediately, no `/reload`.
+  that explicitly, for this pi run only (off again next launch, never saved).
+  It takes effect immediately, no `/reload`.
 - **It does not replace the `Thinking...` row itself.** Pi's only seam for
   that text is one global label applied to every assistant message at
   once — updating it mid-stream would rewrite every past thinking row, and

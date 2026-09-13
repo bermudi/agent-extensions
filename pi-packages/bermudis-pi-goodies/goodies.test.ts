@@ -102,6 +102,8 @@ describe("goodies feature toggles", () => {
     // config it loaded at startup. A write from a long-lived session must not
     // revert what a newer one stored — that is how a configured summary-model
     // kept disappearing behind an unrelated /goodies toggle.
+    // Thinking summaries are session-only: enabling them must not touch the
+    // file, so other sessions' persisted settings always survive.
     writeFileSync(
       CONFIG_PATH,
       JSON.stringify({ "summary-model": "other/session-model", tps: false }),
@@ -111,7 +113,7 @@ describe("goodies feature toggles", () => {
     const config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
     expect(config["summary-model"]).toBe("other/session-model");
     expect(config.tps).toBe(false);
-    expect(config["thinking-summaries"]).toBe(true);
+    expect(config["thinking-summaries"]).toBeUndefined();
   });
 
   test("corrupt config logs a failure and falls back to defaults", () => {
@@ -391,12 +393,14 @@ describe("/goodies thinking-summaries handler", () => {
     return { ctx, notices };
   }
 
+  let thinkingConfigPath: string;
   beforeEach(() => {
     const dir = mkdtempSync(join(tmpdir(), "goodies-thinking-flag-"));
-    __setConfigPathForTesting(join(dir, "goodies.json"));
+    thinkingConfigPath = join(dir, "goodies.json");
+    __setConfigPathForTesting(thinkingConfigPath);
   });
 
-  test("on/off persists; default is off", async () => {
+  test("on/off is session-only; default is off", async () => {
     expect(getThinkingSummariesEnabled()).toBe(false);
     const cmd = registerGoodies();
     const { ctx, notices } = fakeCtx();
@@ -404,10 +408,29 @@ describe("/goodies thinking-summaries handler", () => {
     await cmd.handler("thinking-summaries on", ctx as never);
     expect(getThinkingSummariesEnabled()).toBe(true);
     expect(notices[0].level).toBe("info");
+    // Session-only: the file never carries the key.
+    if (existsSync(thinkingConfigPath)) {
+      expect(
+        JSON.parse(readFileSync(thinkingConfigPath, "utf-8"))[
+          "thinking-summaries"
+        ],
+      ).toBeUndefined();
+    }
     // No summary model on the scratch config: says so.
     expect(notices[0].msg).toContain("summary-model");
+    expect(notices[0].msg).toContain("this pi run only");
 
     await cmd.handler("thinking-summaries off", ctx as never);
+    expect(getThinkingSummariesEnabled()).toBe(false);
+  });
+
+  test("a fresh config scope resets to off", async () => {
+    const cmd = registerGoodies();
+    const { ctx } = fakeCtx();
+    await cmd.handler("thinking-summaries on", ctx as never);
+    expect(getThinkingSummariesEnabled()).toBe(true);
+    const dir = mkdtempSync(join(tmpdir(), "goodies-thinking-fresh-"));
+    __setConfigPathForTesting(join(dir, "goodies.json"));
     expect(getThinkingSummariesEnabled()).toBe(false);
   });
 

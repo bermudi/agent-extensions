@@ -8,7 +8,8 @@
  * State persists to ~/.pi/agent/goodies.json. Toggling a feature writes the
  * config but does NOT unload/reload the extension — every feature is registered
  * at load time, so a toggle needs `/reload` or a new session to take effect.
- * The only exception is `summary-model`, which is read at request time.
+ * Exceptions read at request time: `summary-model`, and `thinking-summaries`
+ * which is session-only (off on every pi launch, never persisted — token spend).
  */
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -24,9 +25,16 @@ import { writeJsonFileAtomic, describeError } from "./json-file.ts";
 
 let CONFIG_PATH = join(homedir(), ".pi", "agent", "goodies.json");
 
+/** Session-only flag: thinking summaries default off every pi launch. */
+let sessionThinkingEnabled = false;
+
 export function __setConfigPathForTesting(path: string): void {
   CONFIG_PATH = path;
   config = loadConfig();
+  // Thinking summaries are session-only (default off every pi launch), so a
+  // fresh config scope in tests also means a fresh flag — otherwise an
+  // earlier test's `on` would leak into later ones sharing the process.
+  sessionThinkingEnabled = false;
 }
 
 type FeatureName =
@@ -66,12 +74,10 @@ type Config = Partial<Record<FeatureName, boolean>> & {
    */
   "summary-model"?: string;
   /**
-   * Live smart summaries of the model's thinking, shown as a widget line
-   * above the editor while a thinking run streams. Opt-in separately from
-   * bash summaries: it fires recurring requests for as long as the model
-   * reasons, which is more volume than the per-command bash summaries the
-   * summary-model opt-in described. Read at request time — no /reload
-   * needed. Still requires a summary-model to be set.
+   * Legacy persisted key. Thinking summaries are now session-only (off on
+   * every pi launch, on only when `/goodies thinking-summaries on` runs in
+   * that pi run) because they can add meaningful token spend. The file key
+   * is ignored; it is deleted on write for migration from older versions.
    */
   "thinking-summaries"?: boolean;
 };
@@ -176,14 +182,20 @@ export function setSummaryModel(model: string | undefined): void {
 }
 
 export function getThinkingSummariesEnabled(): boolean {
-  return config["thinking-summaries"] === true; // default off
+  return sessionThinkingEnabled; // default off every pi launch
 }
 
 export function setThinkingSummariesEnabled(enabled: boolean): void {
-  updateConfig((next) => {
-    if (enabled) next["thinking-summaries"] = true;
-    else delete next["thinking-summaries"];
-  });
+  sessionThinkingEnabled = enabled;
+  // Migration: drop any stale persisted key from older versions so it can
+  // never revive. Best-effort — a failure must not break the toggle.
+  try {
+    updateConfig((next) => {
+      delete next["thinking-summaries"];
+    });
+  } catch {
+    // ignore: the in-memory flag above already took effect
+  }
 }
 
 // ── Summary-model resolution against pi's model registry ────────────────────
@@ -512,7 +524,7 @@ export default function goodies(pi: ExtensionAPI): void {
         setThinkingSummariesEnabled(value === "on");
         const model = getSummaryModel();
         ctx.ui.notify(
-          `thinking summaries ${value}. ` +
+          `thinking summaries ${value} for this pi run only (off again next launch). ` +
             (value === "on" && !model
               ? `No summary model set yet — run /goodies summary-model <provider/model> or nothing will happen. `
               : "") +

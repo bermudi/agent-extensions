@@ -171,11 +171,10 @@ describe("clean-tui resume/replay", () => {
   });
 
   test("replayed thinking blocks between tool calls split bursts", () => {
-    // The reported bug (OpenAI models): the Responses API emits a reasoning
-    // item before every tool call, and reasoning text is often absent — the
-    // persisted block arrives empty. Each block is a boundary, so the calls
-    // no longer merge into one burst that hides the later call above the
-    // thinking row it chronologically follows.
+    // Thinking with text between calls is a boundary, so the calls do not
+    // merge into one burst that would hide the later call above the thinking
+    // row it chronologically follows. Empty thinking is ignored (pi renders
+    // no row for it) — see the next test.
     const toolCall = (id: string, name: string) => ({
       type: "toolCall",
       id,
@@ -189,8 +188,14 @@ describe("clean-tui resume/replay", () => {
 
     const h = freshHarness();
     h.ctx.sessionManager.branch = [
-      withBlocks({ type: "thinking", thinking: "" }, toolCall("a", "read")),
-      withBlocks({ type: "thinking", thinking: "" }, toolCall("b", "read")),
+      withBlocks(
+        { type: "thinking", thinking: "first plan" },
+        toolCall("a", "read"),
+      ),
+      withBlocks(
+        { type: "thinking", thinking: "second plan" },
+        toolCall("b", "read"),
+      ),
     ];
     h.emit("session_start", { reason: "resume" });
     const a = h.row("read", "a");
@@ -205,9 +210,9 @@ describe("clean-tui resume/replay", () => {
     const h2 = freshHarness();
     h2.ctx.sessionManager.branch = [
       withBlocks(
-        { type: "thinking", thinking: "" },
+        { type: "thinking", thinking: "plan c" },
         toolCall("c", "read"),
-        { type: "thinking", thinking: "" },
+        { type: "thinking", thinking: "plan d" },
         toolCall("d", "read"),
       ),
     ];
@@ -236,6 +241,39 @@ describe("clean-tui resume/replay", () => {
     f.setArgs({ path: "/tmp/f.ts" });
     expect(textOf(e.lastCallComponent)).toContain("read ×2");
     expect(f.lastCallComponent instanceof Container).toBe(true);
+  });
+
+  test("replayed empty thinking blocks do not split bursts", () => {
+    // Pi renders no row for empty thinking, so grouping across it matches
+    // the screen. OpenAI models often emit reasoning items with no text
+    // before every tool call — those must not force solos.
+    const toolCall = (id: string, name: string) => ({
+      type: "toolCall",
+      id,
+      name,
+      arguments: {},
+    });
+    const withBlocks = (...blocks: unknown[]) => ({
+      type: "message",
+      message: { role: "assistant", content: blocks },
+    });
+
+    const h = freshHarness();
+    h.ctx.sessionManager.branch = [
+      withBlocks(
+        { type: "thinking", thinking: "" },
+        toolCall("a", "read"),
+        { type: "thinking", thinking: "   " },
+        toolCall("b", "read"),
+      ),
+    ];
+    h.emit("session_start", { reason: "resume" });
+    const a = h.row("read", "a");
+    const b = h.row("read", "b");
+    a.setArgs({ path: "/tmp/a.ts" });
+    b.setArgs({ path: "/tmp/b.ts" });
+    expect(textOf(a.lastCallComponent)).toContain("read ×2");
+    expect(b.lastCallComponent instanceof Container).toBe(true);
   });
 
   test("replayed prose between messages keeps their bursts apart", () => {
@@ -368,7 +406,7 @@ describe("clean-tui resume/replay", () => {
   });
 
   test("live: back-to-back tool-only assistant messages chain into one burst", () => {
-    // Messages carrying only tool calls — no prose, no thinking block — never
+    // Messages carrying only tool calls — no prose, no visible thinking — never
     // bump the segment, so their calls chain into one block; the next
     // message's prose ends the chain.
     const h = freshHarness();
@@ -400,10 +438,8 @@ describe("clean-tui resume/replay", () => {
   });
 
   test("live: a thinking block between tool calls splits the burst", () => {
-    // The reported bug (OpenAI models): the Responses API emits a reasoning
-    // item before every tool call, often with no reasoning text — the block
-    // arrives empty. It must still end the open burst: a merged block would
-    // render the later call inside the box above the thinking row it follows.
+    // Thinking with text between calls ends the open burst: a merged block
+    // would render the later call inside the box above the thinking row.
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
@@ -416,7 +452,7 @@ describe("clean-tui resume/replay", () => {
     h.emit("message_update", {
       message: {
         role: "assistant",
-        content: [{ type: "thinking", thinking: "" }],
+        content: [{ type: "thinking", thinking: "now the second step" }],
       },
     });
     const b = h.row("bash", "b");
@@ -440,7 +476,7 @@ describe("clean-tui resume/replay", () => {
         role: "assistant",
         content: [
           { type: "toolCall", id: "a", name: "bash", arguments: {} },
-          { type: "thinking", thinking: "" },
+          { type: "thinking", thinking: "between-step plan" },
         ],
       },
     });
@@ -569,6 +605,46 @@ describe("clean-tui resume/replay", () => {
     expect(b.lastCallComponent instanceof Container).toBe(false);
   });
 
+  test("live: empty thinking between tool calls does not split the burst", () => {
+    // Empty reasoning items (OpenAI emits one before every call, often with
+    // no text) produce no Thinking... row, so grouping across them matches
+    // the screen — this is the screenshot case: three solos become one burst.
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+
+    h.emit("message_start", { message: { role: "assistant" } });
+    const a = h.row("bash", "a");
+    a.setArgs({ command: "echo one" });
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "a", name: "bash", arguments: {} },
+          { type: "thinking", thinking: "" },
+        ],
+      },
+    });
+    const b = h.row("bash", "b");
+    b.setArgs({ command: "echo two" });
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "a", name: "bash", arguments: {} },
+          { type: "thinking", thinking: "" },
+          { type: "toolCall", id: "b", name: "bash", arguments: {} },
+          { type: "thinking", thinking: "   " },
+        ],
+      },
+    });
+    const c = h.row("bash", "c");
+    c.setArgs({ command: "echo three" });
+    expect(textOf(a.lastCallComponent)).toContain("bash ×3");
+    expect(b.lastCallComponent instanceof Container).toBe(true);
+    expect(c.lastCallComponent instanceof Container).toBe(true);
+  });
+
   test("a provider delivering the whole message at once still splits interleaved calls", () => {
     // Non-streaming providers hand the complete message (later boundaries
     // included) at message_start, before any tool component registers. An
@@ -581,9 +657,9 @@ describe("clean-tui resume/replay", () => {
       message: {
         role: "assistant",
         content: [
-          { type: "thinking", thinking: "" },
+          { type: "thinking", thinking: "first plan" },
           { type: "toolCall", id: "a", name: "read", arguments: {} },
-          { type: "thinking", thinking: "" },
+          { type: "thinking", thinking: "second plan" },
           { type: "toolCall", id: "b", name: "read", arguments: {} },
         ],
       },
@@ -1856,27 +1932,61 @@ describe("clean-tui thinking summaries", () => {
     __setSummaryEnabled(false);
     __setThinkingThresholdsForTesting();
     __resetThinkingSummariesForTesting();
+    setThinkingSummariesEnabled(false);
   });
 
   /**
    * Widget journal: every setWidget call, so tests can assert both content
-   * and clearing (content === undefined).
+   * and clearing (content === undefined). Thinking widgets are themed
+   * factories (italic thinkingText, matching pi's Thinking... row) so they
+   * never render as plain body text; the pause widget stays a string[].
    */
-  function useWidgetUi(): Array<[string, string[] | undefined]> {
-    const widgets: Array<[string, string[] | undefined]> = [];
+  type WidgetContent =
+    | string[]
+    | ((
+        tui: unknown,
+        theme: {
+          fg: (color: string, text: string) => string;
+          italic: (text: string) => string;
+        },
+      ) => { render: (width: number) => string[] });
+  function useWidgetUi(): Array<[string, WidgetContent | undefined]> {
+    const widgets: Array<[string, WidgetContent | undefined]> = [];
     __setSummaryUiForTesting({
       hasUI: true,
-      setWidget: (key, content) => widgets.push([key, content]),
+      setWidget: (key, content) =>
+        widgets.push([key, content as WidgetContent | undefined]),
     });
     return widgets;
   }
 
+  /** Resolve either widget form to its visible text. */
+  function widgetText(content: WidgetContent | undefined): string {
+    if (content === undefined) return "";
+    if (Array.isArray(content)) return content[0] ?? "";
+    const fakeTheme = {
+      fg: (color: string, text: string) => `<${color}>${text}</>`,
+      italic: (text: string) => `<i>${text}</i>`,
+    };
+    return content(undefined, fakeTheme).render(200).join("\n");
+  }
+
   function lastWidget(
-    widgets: Array<[string, string[] | undefined]>,
+    widgets: Array<[string, WidgetContent | undefined]>,
     key: string,
-  ): string[] | undefined {
+  ): WidgetContent | undefined {
     const hit = [...widgets].reverse().find(([k]) => k === key);
     return hit?.[1];
+  }
+
+  function lastWidgetText(
+    widgets: Array<[string, WidgetContent | undefined]>,
+    key: string,
+  ): string | undefined {
+    const hit = [...widgets].reverse().find(([k]) => k === key);
+    if (!hit) return undefined;
+    if (hit[1] === undefined) return undefined;
+    return widgetText(hit[1]);
   }
 
   /** Scratch config + summary model + thinking summaries on. */
@@ -1947,10 +2057,13 @@ describe("clean-tui thinking summaries", () => {
     await new Promise((r) => setTimeout(r, 20));
 
     expect(calls).toHaveLength(1);
-    const line = lastWidget(widgets, THINKING_KEY)?.[0];
-    // No label, no marker — the line's place and style already say what
-    // it is; the summary alone is the content.
-    expect(line).toBe("Weighing render safety rules");
+    const line = lastWidgetText(widgets, THINKING_KEY);
+    // Styled like pi's Thinking... row (italic thinkingText) with a leading
+    // ellipsis — never plain body text, so it can't read as assistant prose.
+    expect(line).toContain("Weighing render safety rules");
+    expect(line).toContain("…");
+    expect(line).toContain("<thinkingText>");
+    expect(line).toContain("<i>");
   });
 
   test("sends only the tail of the thinking text", async () => {
@@ -2127,7 +2240,7 @@ describe("clean-tui thinking summaries", () => {
 
     streamThinking(h, "x".repeat(60));
     await new Promise((r) => setTimeout(r, 20));
-    expect(lastWidget(widgets, THINKING_KEY)?.[0]).toContain(
+    expect(lastWidgetText(widgets, THINKING_KEY)).toContain(
       "Planning the refactor",
     );
 

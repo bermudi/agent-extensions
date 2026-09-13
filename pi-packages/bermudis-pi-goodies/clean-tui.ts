@@ -12,14 +12,15 @@
  * this boundary every same-tool call of an entire agent run accumulates into
  * one mega-block rendered at the first call's position.
  *
- * A thinking block closes the burst as well: models interleave reasoning
+ * A thinking block with text closes the burst as well: models interleave reasoning
  * between tool calls (the OpenAI Responses API emits a reasoning item before
  * every call; interleaved thinking does the same), and a merged burst would
  * render the later call inside the box above the thinking row it follows.
- * The block counts even when its text is empty — OpenAI models often return
- * no actual reasoning data, but the reasoning item still marks the step.
+ * Empty thinking is ignored — pi renders no row for it, so grouping across it
+ * matches what you see. OpenAI models often emit reasoning items with no
+ * actual text; those no longer split bursts.
  *
- * Messages carrying only tool calls (no prose, no thinking block) do NOT
+ * Messages carrying only tool calls (no prose, no visible thinking) do NOT
  * close the burst: nothing separates their calls from the previous ones, so
  * back-to-back same-tool calls chain into one block. Typed user messages
  * count as prose too.
@@ -234,15 +235,16 @@ function hasVisibleText(message: any): boolean {
 }
 
 /**
- * A burst boundary block: visible prose or a thinking block. Thinking closes
- * a burst even when its text is empty — OpenAI models materialize a reasoning
- * item before every tool call and often return no reasoning text for it, but
- * the block still marks a chronological step that a merged burst would hide
- * inside the box above it.
+ * A burst boundary block: visible prose or thinking with text. Matches pi's
+ * rendering, which skips empty thinking runs entirely — an empty reasoning
+ * item produces no Thinking... row, so grouping across it matches the screen.
  */
 function isBurstBoundaryBlock(block: any): boolean {
   if (!block || typeof block !== "object") return false;
-  if (block.type === "thinking") return true;
+  if (block.type === "thinking")
+    return (
+      typeof block.thinking === "string" && block.thinking.trim().length > 0
+    );
   return (
     block.type === "text" &&
     typeof block.text === "string" &&
@@ -302,7 +304,7 @@ function shouldGroup(a: Entry, b: Entry): boolean {
   // A message's tools execute after its own prose and before the next message
   // streams, so the segment counter (bumped when a boundary block appears)
   // splits bursts exactly where the conversation visually splits. Messages
-  // with no boundary block (no prose, no thinking) never bump it, so a model
+  // with no boundary block (no prose, no visible thinking) never bump it, so a model
   // calling tools one-per-message still chains into a single block. Live
   // segments count up, replay segments count down — the two domains can never
   // merge. NaN (unknown lineage) compares unequal to everything, so those
@@ -428,7 +430,9 @@ const SUMMARY_PROMPT =
 // description of an artifact. The request carries the TAIL of the thinking
 // text — "what is it thinking about NOW" — not its start.
 const THINKING_SUMMARY_PROMPT =
-  "A coding agent is mid-reasoning about a task. Summarize what it is currently thinking about or doing in less than 10 words, present tense, plain English, no quotes, no formatting.\nRecent thinking:\n";
+  "A coding agent is mid-reasoning about a task. Summarize what it is currently thinking about in less than 15 words, plain English, no quotes, no formatting. " +
+  "Start with the word 'Thinking', e.g. 'Thinking through opcode cycles' or 'Thinking about render rules'. " +
+  "Never start with an action verb like Writing or Implementing — it is only thinking, not doing.\nRecent thinking:\n";
 // Provider error bodies are not under our control and flow into console
 // output plus the log-once dedup set; keep both bounded.
 const SUMMARY_ERROR_SNIPPET_CHARS = 200;
@@ -449,7 +453,19 @@ const summaryRequestQueue: string[] = [];
 // line remains only for headless modes (no UI to attach a widget to).
 interface SummaryUi {
   hasUI: boolean;
-  setWidget(key: string, content: string[] | undefined): void;
+  setWidget(
+    key: string,
+    content:
+      | string[]
+      // Themed factory so the widget can match pi's own Thinking... styling
+      // (italic thinkingText) instead of rendering as plain white text that
+      // reads like assistant prose. Mirrors pi's setWidget overload.
+      | ((tui: unknown, theme: {
+          fg: (color: string, text: string) => string;
+          italic: (text: string) => string;
+        }) => { render: (width: number) => string[]; invalidate: () => void })
+      | undefined,
+  ): void;
 }
 const SUMMARY_WIDGET_KEY = "bermudis-pi-goodies.summaries";
 let summaryUi: SummaryUi | undefined;
@@ -1180,10 +1196,16 @@ function resetThinkingState(): void {
 
 function setThinkingWidget(summary: string): void {
   if (!summaryUi?.hasUI) return;
-  // Same width discipline as the pause widget: the line sits above the
-  // editor and must not wrap on narrow terminals.
-  const brief = summary.length > 80 ? `${summary.slice(0, 80)}\u2026` : summary;
-  summaryUi.setWidget(THINKING_WIDGET_KEY, [brief]);
+  // No length cut: the full summary shows, even if it wraps on narrow
+  // terminals. Styled exactly like pi's own hidden-thinking row — italic
+  // thinkingText — with a leading ellipsis so it reads as continuing
+  // thought, never as assistant prose. A plain string[] widget renders as
+  // default body text (white), which is why bare summaries cosplayed as
+  // assistant messages.
+  const line = `\u2026 ${summary}`;
+  summaryUi.setWidget(THINKING_WIDGET_KEY, (_tui, theme) =>
+    new Text(theme.italic(theme.fg("thinkingText", line)), 0, 0),
+  );
   thinkingWidgetShown = true;
 }
 
