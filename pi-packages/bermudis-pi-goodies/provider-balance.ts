@@ -40,6 +40,10 @@ const CODEX_API_BASE = (
 ).replace(/\/+$/, "");
 const CODEX_USAGE_ENDPOINT = `${CODEX_API_BASE}/wham/usage`;
 const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
+const COMMANDCODE_API_BASE = (
+  process.env.COMMANDCODE_API_URL || "https://api.commandcode.ai"
+).replace(/\/+$/, "");
+const COMMANDCODE_CREDITS_ENDPOINT = `${COMMANDCODE_API_BASE}/alpha/billing/credits`;
 const BALANCE_FETCH_TIMEOUT_MS = 5_000;
 /**
  * While Pi is waiting for input, periodically adopt another session's fresh
@@ -593,12 +597,135 @@ async function fetchCodexQuota(
   return codexQuotaToBalance(quota);
 }
 
+// --- CommandCode -----------------------------------------------------------
+// CommandCode documents only chat/messages/models endpoints, but its CLI
+// drives `/usage` from private alpha endpoints on the same host with the
+// same Bearer key. GET /alpha/billing/credits returns the credit pools plus
+// the rolling usage windows, so one request yields both. Alpha means the
+// shape can change without notice — parse defensively and treat a changed
+// shape as "no reading" rather than a wrong number.
+export interface CommandcodeWindow {
+  usedPercent: number;
+  windowSeconds: number;
+  /** Unix timestamp in seconds, converted from the API's millisecond resetAt. */
+  resetAt?: number;
+}
+
+export interface CommandcodeBalance {
+  /** Total remaining credits across monthly, purchased, and free pools. */
+  credits: number | null;
+  fiveHour: CommandcodeWindow | null;
+  weekly: CommandcodeWindow | null;
+}
+
+const COMMANDCODE_FIVE_HOUR_SECONDS = 5 * 60 * 60;
+const COMMANDCODE_WEEK_SECONDS = 7 * 24 * 60 * 60;
+
+function parseCommandcodeResetAtSeconds(value: unknown): number | undefined {
+  let millis: number | null = null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    // Millisecond epochs are ~1e12 and up; second epochs are ~1e9.
+    millis = value >= 1_000_000_000_000 ? value : value * 1000;
+  } else if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value.trim());
+    millis = Number.isNaN(parsed) ? null : parsed;
+  }
+  return millis !== null && millis > 0 ? millis / 1000 : undefined;
+}
+
+function parseCommandcodeWindow(
+  value: unknown,
+  windowSeconds: number,
+): CommandcodeWindow | null {
+  const used = numericProperty(value, "used");
+  const cap = numericProperty(value, "cap");
+  if (used === null || cap === null || cap <= 0) return null;
+  const resetAt = parseCommandcodeResetAtSeconds(asRecord(value)?.resetAt);
+  return {
+    usedPercent: (used / cap) * 100,
+    windowSeconds,
+    ...(resetAt === undefined ? {} : { resetAt }),
+  };
+}
+
+export function parseCommandcodeBalance(
+  value: unknown,
+): CommandcodeBalance | null {
+  const payload = asRecord(value);
+  // The CLI reads body.credits for the pools and body.windowLimits for the
+  // rolling windows; accept the body with or without a `data` wrapper so a
+  // minor alpha reshaping still parses.
+  const body = asRecord(payload?.data) ?? payload;
+  if (!body) return null;
+  const pools = asRecord(body.credits);
+  const monthly = numericProperty(pools, "monthlyCredits");
+  const purchased = numericProperty(pools, "purchasedCredits");
+  const free = numericProperty(pools, "freeCredits");
+  const credits =
+    monthly !== null && purchased !== null && free !== null
+      ? Math.max(0, monthly + purchased + free)
+      : null;
+  const windows = asRecord(body.windowLimits);
+  const fiveHour = parseCommandcodeWindow(
+    windows?.fiveHour,
+    COMMANDCODE_FIVE_HOUR_SECONDS,
+  );
+  const weekly = parseCommandcodeWindow(
+    windows?.weekly,
+    COMMANDCODE_WEEK_SECONDS,
+  );
+  if (credits === null && !fiveHour && !weekly) return null;
+  return { credits, fiveHour, weekly };
+}
+
+export function commandcodeBalanceToBalance(
+  balance: CommandcodeBalance,
+): Balance {
+  const segments: BalanceSegment[] = [];
+  if (balance.credits !== null) segments.push({ credits: balance.credits });
+  for (const window of [balance.fiveHour, balance.weekly]) {
+    if (window) segments.push({ quota: windowToQuota(window) });
+  }
+  return segments;
+}
+
+export function formatCommandcodeBalance(
+  balance: CommandcodeBalance,
+  nowMs = Date.now(),
+): string {
+  return formatBalance(commandcodeBalanceToBalance(balance), nowMs);
+}
+
+async function fetchCommandcodeBalance(
+  token: string,
+  signal: AbortSignal,
+): Promise<Balance> {
+  const response = await fetch(COMMANDCODE_CREDITS_ENDPOINT, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+    signal: timeoutSignal(BALANCE_FETCH_TIMEOUT_MS, signal),
+  });
+  if (!response.ok) {
+    throw new Error(`CommandCode balance request failed: ${response.status}`);
+  }
+  const balance = parseCommandcodeBalance(await response.json());
+  if (balance === null) {
+    throw new Error("CommandCode balance response was invalid");
+  }
+  return commandcodeBalanceToBalance(balance);
+}
+
 const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
   kilo: { fetch: fetchKiloBalance },
   openrouter: { fetch: fetchOpenRouterBalance },
   zai: { fetch: fetchZaiQuota },
   "zai-coding-cn": { fetch: fetchZaiCodingCnQuota },
   "openai-codex": { fetch: fetchCodexQuota, requiresOAuth: true },
+  // Both CommandCode transports share one account and one key.
+  commandcode: { fetch: fetchCommandcodeBalance },
+  "commandcode-anthropic": { fetch: fetchCommandcodeBalance },
 };
 
 // --- Shared balance cache ---------------------------------------------------
@@ -630,7 +757,10 @@ export function balanceCacheKey(provider: string, token: string): string {
             ? ZAI_CODING_CN_QUOTA_ENDPOINT
             : provider === "zai"
               ? ZAI_QUOTA_ENDPOINT
-              : provider;
+              : provider === "commandcode" ||
+                  provider === "commandcode-anthropic"
+                ? COMMANDCODE_CREDITS_ENDPOINT
+                : provider;
   const fingerprint = createHash("sha256").update(identity).digest("hex");
   return `v2:${provider}:${endpoint}:${fingerprint}`;
 }

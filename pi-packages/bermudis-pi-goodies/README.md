@@ -15,7 +15,7 @@ extensions. One entry point, twelve independent features.
 | `clean-tui`        | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: back-to-back same-tool calls share one block (e.g. `read ×2`) until a boundary — visible text (assistant prose or a typed user message) or a thinking block (even an empty one, as OpenAI emits between tool calls) — so reasoning-per-call models render one block per call. Images stay visible without expanding, expand a row with ctrl+o to see the full command and results/diffs. Long bash commands get an AI-generated summary once you pick a model with `/goodies summary-model <provider/model>` (see "Smart summaries" below) — expanding a row swaps the summary back out for the raw command. While enabled, also flips `@bermudi/pi-codex`'s `apply_patch`/`web_search` into the same burst style. Long thinking runs can show a live plain-English line above the editor (`/goodies thinking-summaries on`) instead of a static `Thinking...` — see "Smart summaries". |
 | `review`           | `/review`, `/end-review`      | Code review workflow: review uncommitted changes, a branch, a commit, a GitHub PR, or folders. Prioritized findings with actionable follow-ups. |
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
-| `provider-balance` | footer (no command)           | Show remaining Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
+| `provider-balance` | footer (no command)           | Show remaining Kilo, OpenRouter, or CommandCode credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 | `tps`              | hook (no command)             | Notify tokens/sec and in/out/cache token usage at the end of each agent turn.                                                                   |
 | `goodies`          | `/goodies`                    | Toggle individual features on/off without losing the rest. Also supports `/goodies summary-model [provider/model]` to pick the model used for AI bash-command summaries, and `/goodies thinking-summaries <on\|off>` for live thinking summaries. State persists to `~/.pi/agent/goodies.json`. |
 
@@ -244,10 +244,14 @@ catalog no more than every four hours. Balance and quota requests run in the bac
 never delay session startup, model selection, or post-run input readiness.
 The footer also reads OpenRouter remaining credits for `openrouter`, z.ai GLM
 Coding Plan token quota for `zai` (Global) and `zai-coding-cn` (BigModel China),
-and OpenAI Codex's ChatGPT subscription quota when using `openai-codex` OAuth;
+OpenAI Codex's ChatGPT subscription quota when using `openai-codex` OAuth,
+and CommandCode credit balance plus 5-hour/weekly usage windows for
+`commandcode` and `commandcode-anthropic` (same account, same key);
 it skips platform API-key auth because that has no ChatGPT subscription quota.
 OpenRouter uses `GET /api/v1/credits`; z.ai uses
-`GET /api/monitor/usage/quota/limit`; Codex uses `GET /wham/usage`. z.ai and
+`GET /api/monitor/usage/quota/limit`; Codex uses `GET /wham/usage`;
+CommandCode uses `GET /alpha/billing/credits` (a private endpoint its CLI
+also uses; `COMMANDCODE_API_URL` can override the base URL). z.ai, Codex, and
 Codex show both each quota's window length and its `nextResetTime`/`reset_at`
 countdown (when supplied), and `CODEX_API_URL` or `CHATGPT_BASE_URL` can
 override the Codex base URL.

@@ -23,12 +23,15 @@ import type {
 import providerBalance, {
   balanceCacheKey,
   codexQuotaToBalance,
+  commandcodeBalanceToBalance,
   formatBalance,
   formatCodexQuota,
+  formatCommandcodeBalance,
   formatCredits,
   formatZaiQuota,
   parseCodexAccountId,
   parseCodexQuota,
+  parseCommandcodeBalance,
   parseKiloBalance,
   parseOpenRouterCredits,
   parseZaiQuota,
@@ -1127,6 +1130,116 @@ describe("codexQuotaToBalance", () => {
         quota: { remainingPercent: 74, windowSeconds: 604_800 },
       },
     ]);
+  });
+});
+
+describe("parseCommandcodeBalance", () => {
+  test("parses credit pools and both rolling windows", () => {
+    expect(
+      parseCommandcodeBalance({
+        credits: {
+          monthlyCredits: 10,
+          purchasedCredits: 2.5,
+          freeCredits: 0,
+          planId: "goat",
+        },
+        windowLimits: {
+          limited: true,
+          fiveHour: { used: 3.5, cap: 14, resetAt: 1_800_000_000_000 },
+          weekly: { used: 7, cap: 35, resetAt: 1_800_345_600_000 },
+        },
+      }),
+    ).toEqual({
+      credits: 12.5,
+      fiveHour: {
+        usedPercent: 25,
+        windowSeconds: 18_000,
+        resetAt: 1_800_000_000,
+      },
+      weekly: {
+        usedPercent: 20,
+        windowSeconds: 604_800,
+        resetAt: 1_800_345_600,
+      },
+    });
+  });
+
+  test("accepts a data wrapper and credits without windows (PAYG)", () => {
+    expect(
+      parseCommandcodeBalance({
+        data: {
+          credits: {
+            monthlyCredits: 0,
+            purchasedCredits: 15,
+            freeCredits: 0,
+          },
+        },
+      }),
+    ).toEqual({ credits: 15, fiveHour: null, weekly: null });
+  });
+
+  test("rejects malformed responses", () => {
+    expect(parseCommandcodeBalance(null)).toBeNull();
+    expect(parseCommandcodeBalance({})).toBeNull();
+    expect(
+      parseCommandcodeBalance({
+        credits: {
+          monthlyCredits: "10",
+          purchasedCredits: 0,
+          freeCredits: 0,
+        },
+      }),
+    ).toBeNull();
+    expect(
+      parseCommandcodeBalance({
+        windowLimits: { fiveHour: { used: 1, cap: 0 } },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("commandcodeBalanceToBalance", () => {
+  test("emits credits then windows, flipping used to remaining", () => {
+    expect(
+      commandcodeBalanceToBalance({
+        credits: 12.5,
+        fiveHour: { usedPercent: 25, windowSeconds: 18_000 },
+        weekly: null,
+      }),
+    ).toEqual([
+      { credits: 12.5 },
+      { quota: { remainingPercent: 75, windowSeconds: 18_000 } },
+    ]);
+  });
+});
+
+describe("formatCommandcodeBalance", () => {
+  test("shows credits then windows", () => {
+    expect(
+      formatCommandcodeBalance({
+        credits: 12.5,
+        fiveHour: { usedPercent: 25, windowSeconds: 18_000 },
+        weekly: { usedPercent: 20, windowSeconds: 604_800 },
+      }),
+    ).toBe("$12.50 · 5h 75% · 7d 80%");
+  });
+
+  test("shows a reset countdown from a millisecond resetAt", () => {
+    const nowMs = Date.UTC(2026, 0, 1);
+    expect(
+      formatCommandcodeBalance(
+        {
+          credits: null,
+          fiveHour: {
+            usedPercent: 25,
+            windowSeconds: 18_000,
+            resetAt: nowMs / 1000 + 2 * 60 * 60,
+          },
+          weekly: null,
+        },
+        nowMs,
+      ),
+    ).toBe("5h 75% ↻2h");
   });
 });
 
