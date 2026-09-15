@@ -472,6 +472,11 @@ async function runRoundtable(
       const live = liveParticipants[pi];
       const turnStart = Date.now();
       const tokensBefore = extractTokensFromAgent(live.agent);
+      // Snapshot state BEFORE prompting: the agent is cached across rounds,
+      // so state.messages holds every prior turn. Slice from here afterwards
+      // or each transcript entry re-includes all of this speaker's old turns
+      // (and the duplicates propagate into every other participant's delta).
+      const msgStart = live.agent.state.messages.length;
 
       // Build the delta — only new transcript entries since this participant's last turn
       const delta = transcript.slice(live.lastSeenIndex);
@@ -504,7 +509,8 @@ async function runRoundtable(
         const tokensAfter = extractTokensFromAgent(live.agent);
         const turnTokens = tokensAfter - tokensBefore;
         const output =
-          extractOutput(live.agent.state.messages) || "(no output)";
+          extractOutput(live.agent.state.messages.slice(msgStart)) ||
+          "(no output)";
         const errorMsg = (live.agent.state as { errorMessage?: string })
           .errorMessage;
 
