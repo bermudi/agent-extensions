@@ -125,6 +125,8 @@ export default function (pi: ExtensionAPI): void {
         { path: params.path, prompt: params.prompt },
         {
           cwd: ctx.cwd,
+          cfg: loadConfig(),
+          signal,
           registry: ctx.modelRegistry,
           readImage: (path) =>
             reader.execute(
@@ -143,7 +145,7 @@ export default function (pi: ExtensionAPI): void {
                 apiKey: options.apiKey,
                 headers: options.headers,
                 maxTokens: options.maxTokens,
-                signal,
+                signal: options.signal,
                 timeoutMs: 120_000,
                 maxRetries: 1,
               } as never,

@@ -8,7 +8,7 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, extname, join } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
 
 // --- structural stand-ins for pi types ---------------------------------------
 
@@ -131,7 +131,12 @@ export function loadConfig(): VisionConfig {
     // no config file — env vars only
   }
   cfgCache = {
-    model: (file.model ?? process.env.VISION_MODEL ?? "").trim(),
+    // `||` (not `??`) on model: an explicitly-written empty string in the file
+    // (e.g. saveConfig({ maxTokens }) before any model was ever set) must not
+    // shadow VISION_MODEL.
+    model:
+      (typeof file.model === "string" && file.model.trim()) ||
+      (process.env.VISION_MODEL ?? "").trim(),
     maxTokens: sanitizeMaxTokens(file.maxTokens),
   };
   return cfgCache;
@@ -169,10 +174,7 @@ export function parseVisionArgs(args: string): {
     const eq = tok.indexOf("=");
     if (eq <= 0) throw new Error(`Expected key=value, got "${tok}"`);
     const key = tok.slice(0, eq);
-    let value = tok.slice(eq + 1);
-    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-      value = value.slice(1, -1);
-    }
+    const value = tok.slice(eq + 1); // tokenize() already consumed any quotes
     if (key === "model") {
       if (!value.trim()) throw new Error("model must not be empty");
       values.model = value.trim();
@@ -307,6 +309,9 @@ export const MIME: Record<string, string> = {
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
   ".gif": "image/gif",
+  // Best-effort: Anthropic/OpenAI/Google reject image/bmp, so those calls fail
+  // one step later (surfaced as isError with the provider message; the agent
+  // can convert via bash). Qwen/DashScope and some gateways do accept it.
   ".bmp": "image/bmp",
 };
 
@@ -334,7 +339,7 @@ export async function readRawImage(
       `image too large (${(bytes.byteLength / 1048576).toFixed(1)}MB > 20MB). Downscale it first.`,
     );
   }
-  return { data: Buffer.from(bytes).toString("base64"), mimeType };
+  return { data: bytes.toString("base64"), mimeType };
 }
 
 // --- completion -------------------------------------------------------------------
@@ -421,6 +426,10 @@ export function frameVisionAnswer(
 
 export interface VisionToolDeps {
   cwd: string;
+  /** Config snapshot for this call (loaded at the boundary in index.ts). */
+  cfg: VisionConfig;
+  /** Abort signal for the in-flight call (pi's Esc). Forwarded to complete. */
+  signal?: AbortSignal;
   registry: RegistryLike;
   /** Delegate to pi's built-in read (photon resize, magic-byte mime, truncation). */
   readImage(
@@ -466,7 +475,7 @@ export async function runVisionTool(
     return failure("vision tool needs both a path and a prompt");
   }
 
-  const cfg = loadConfig();
+  const cfg = deps.cfg;
   if (!cfg.model) {
     return failure(
       "vision model not configured. Ask the user to run: /vision set model=<provider>/<vision-model-id>",
@@ -505,7 +514,7 @@ export async function runVisionTool(
       );
     }
     try {
-      const raw = await deps.readRaw(rawPath);
+      const raw = await deps.readRaw(resolve(deps.cwd, rawPath));
       image = { type: "image", data: raw.data, mimeType: raw.mimeType };
     } catch (e) {
       return failure(errorMessage(e));
@@ -525,6 +534,7 @@ export async function runVisionTool(
         apiKey: transport.apiKey,
         headers: transport.headers,
         maxTokens: cfg.maxTokens,
+        signal: deps.signal,
       },
     );
   } catch (e) {

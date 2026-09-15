@@ -83,6 +83,14 @@ describe("config", () => {
     expect(loadConfig().model).toBe("file/wins");
   });
 
+  test("empty model in file does not shadow env (maxTokens-only save)", () => {
+    // saveConfig({ maxTokens }) before any model was set persists model: ""
+    // — that must not count as a configured model.
+    process.env.VISION_MODEL = "env/wins";
+    saveConfig({ maxTokens: 42 });
+    expect(loadConfig().model).toBe("env/wins");
+  });
+
   test("save merges and sanitizes", () => {
     saveConfig({ model: "a/b" });
     saveConfig({ maxTokens: 42 });
@@ -330,17 +338,18 @@ function deps(overrides?: Partial<Parameters<typeof runVisionTool>[1]>) {
   const calls: Array<{
     model: string;
     prompt: string;
-    options: { maxTokens: number; apiKey?: string };
+    options: { maxTokens: number; apiKey?: string; signal?: AbortSignal };
   }> = [];
   const base = {
     cwd: "/tmp",
+    cfg: { model: "google/gemini-2.5-flash", maxTokens: DEFAULT_MAX_TOKENS },
     registry: fakeRegistry([VISION_MODEL]),
     readImage: async () => ({ content: [PNG_BLOCK] }),
     readRaw: async () => ({ data: "cmF3", mimeType: "image/png" }),
     complete: async (
       model: ModelLike,
       context: unknown,
-      options: { maxTokens: number; apiKey?: string },
+      options: { maxTokens: number; apiKey?: string; signal?: AbortSignal },
     ) => {
       const ctx = context as {
         messages: Array<{ content: Array<{ type: string; text?: string }> }>;
@@ -373,8 +382,9 @@ function stubUsage(input: number, output: number) {
 
 describe("runVisionTool", () => {
   test("happy path: question answered, framed, usage propagated", async () => {
-    saveConfig({ model: "google/gemini-2.5-flash", maxTokens: 777 });
-    const { deps: d, calls } = deps();
+    const { deps: d, calls } = deps({
+      cfg: { model: "google/gemini-2.5-flash", maxTokens: 777 },
+    });
     const updates: string[] = [];
     const result = await runVisionTool(
       { path: "shot.png", prompt: "what color is the button?" },
@@ -397,24 +407,54 @@ describe("runVisionTool", () => {
   });
 
   test("unconfigured → isError telling how to configure", async () => {
-    const { deps: d } = deps();
+    const { deps: d } = deps({
+      cfg: { model: "", maxTokens: DEFAULT_MAX_TOKENS },
+    });
     const result = await runVisionTool({ path: "x.png", prompt: "q" }, d);
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("/vision set model=");
   });
 
+  test("signal is forwarded to complete (Esc reaches the wire call)", async () => {
+    const ac = new AbortController();
+    const { deps: d, calls } = deps({ signal: ac.signal });
+    await runVisionTool({ path: "x.png", prompt: "q" }, d);
+    expect(calls[0].options.signal).toBe(ac.signal);
+  });
+
+  test("raw fallback resolves relative paths against deps.cwd", async () => {
+    const seen: string[] = [];
+    const { deps: d } = deps({
+      cwd: "/srv/project",
+      readImage: async () => ({
+        content: [{ type: "text", text: "(decode failed)" }],
+      }),
+      readRaw: async (p) => (
+        seen.push(p),
+        { data: "cmF3", mimeType: "image/bmp" }
+      ),
+    });
+    const result = await runVisionTool({ path: "legacy.bmp", prompt: "q" }, d);
+    expect(seen[0]).toBe("/srv/project/legacy.bmp");
+    expect(result.isError).toBeUndefined();
+  });
+
   test("model not in registry → isError with suggestions", async () => {
-    saveConfig({ model: "google/gemini-2.5-flsh" });
-    const { deps: d } = deps();
+    const { deps: d } = deps({
+      cfg: { model: "google/gemini-2.5-flsh", maxTokens: DEFAULT_MAX_TOKENS },
+    });
     const result = await runVisionTool({ path: "x.png", prompt: "q" }, d);
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("Did you mean");
   });
 
   test("configured model is text-only → isError with input hint", async () => {
-    saveConfig({ model: "deepseek/deepseek-v4-flash" });
     const { deps: d } = deps({
       registry: fakeRegistry([VISION_MODEL, TEXT_MODEL]),
+      cfg: {
+        model: "deepseek/deepseek-v4-flash",
+        maxTokens: DEFAULT_MAX_TOKENS,
+      },
     });
     const result = await runVisionTool({ path: "x.png", prompt: "q" }, d);
     expect(result.isError).toBe(true);
@@ -422,7 +462,6 @@ describe("runVisionTool", () => {
   });
 
   test("read failure passes through as isError", async () => {
-    saveConfig({ model: "google/gemini-2.5-flash" });
     const { deps: d } = deps({
       readImage: async () => ({
         content: [{ type: "text", text: "File not found: nope.png" }],
@@ -435,7 +474,6 @@ describe("runVisionTool", () => {
   });
 
   test("non-image file → isError, no vision call", async () => {
-    saveConfig({ model: "google/gemini-2.5-flash" });
     const { deps: d, calls } = deps({
       readImage: async () => ({
         content: [{ type: "text", text: "file contents" }],
@@ -448,7 +486,6 @@ describe("runVisionTool", () => {
   });
 
   test("read yields no image but path is an image → raw fallback", async () => {
-    saveConfig({ model: "google/gemini-2.5-flash" });
     let rawCalls = 0;
     const { deps: d, calls } = deps({
       readImage: async () => ({
@@ -467,7 +504,6 @@ describe("runVisionTool", () => {
   });
 
   test("vision API error → isError with provider message", async () => {
-    saveConfig({ model: "google/gemini-2.5-flash" });
     const { deps: d } = deps({
       complete: async () => ({
         stopReason: "error",
@@ -481,7 +517,6 @@ describe("runVisionTool", () => {
   });
 
   test("empty answer → isError", async () => {
-    saveConfig({ model: "google/gemini-2.5-flash" });
     const { deps: d } = deps({
       complete: async () => ({ stopReason: "stop", content: [] }),
     });
@@ -491,7 +526,6 @@ describe("runVisionTool", () => {
   });
 
   test("abort rethrows as AbortError (not swallowed into isError)", async () => {
-    saveConfig({ model: "google/gemini-2.5-flash" });
     const { deps: d } = deps({
       complete: async () => {
         const err = new Error("vision request aborted");
@@ -508,7 +542,6 @@ describe("runVisionTool", () => {
   });
 
   test("leading @ stripped from path", async () => {
-    saveConfig({ model: "google/gemini-2.5-flash" });
     const seen: string[] = [];
     const { deps: d } = deps({
       readImage: async (p) => (seen.push(p), { content: [PNG_BLOCK] }),
@@ -528,4 +561,24 @@ test("MIME map covers pi read's image types", () => {
   expect(MIME[".png"]).toBe("image/png");
   expect(MIME[".bmp"]).toBe("image/bmp");
   expect(MIME[".txt"]).toBeUndefined();
+});
+
+// --- raw read (real fs) ----------------------------------------------------------------
+
+test("readRawImage base64 roundtrip and mime guard", async () => {
+  const { readRawImage } = await import("./vision-core.ts");
+  const p = join("/tmp", `vision-raw-${process.pid}.png`);
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+  await Bun.write(p, bytes);
+  try {
+    const { data, mimeType } = await readRawImage(p);
+    expect(mimeType).toBe("image/png");
+    expect(Buffer.from(data, "base64")).toEqual(bytes);
+  } finally {
+    rmSync(p, { force: true });
+  }
+  await expect(readRawImage(p + ".nonexistent")).rejects.toThrow();
+  await expect(
+    readRawImage(join("/tmp", `vision-raw-${process.pid}.txt`)),
+  ).rejects.toThrow(/unsupported image type/);
 });
