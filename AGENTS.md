@@ -19,6 +19,11 @@ pi-packages/
   ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
   pi-harness/             # ACTIVE (dev-only): test harness for TUI extensions; faithful ToolExecutionComponent render semantics
   session-summarizer/     # INACTIVE (source kept; not linked in .pi/extensions — verify install state before claiming it runs)
+  vision/                 # CREATED, NOT INSTALLED (pending bermudi's call): separate `vision` tool — ask a vision model
+                         # from pi's registry targeted questions about an image (gemini-media-mcp pattern; read stays
+                         # untouched). Config: /vision set model=provider/id (~/.pi/vision.json, VISION_MODEL env).
+                         # Pins pi ^0.85.1 (createReadToolDefinition); registry auth via getApiKeyAndHeaders +
+                         # completeSimple — the goodies summary-model pattern, copied deliberately.
   zen-relay/              # ACTIVE (standalone, not a pi extension): all-local multi-IP relay for OpenCode Zen. Per-gateway SSH SOCKS tunnels + one local relay; pi uses it via models.json baseUrl override.
   experiments/            # ARCHIVE — unused/exploratory. Not typechecked, not in default test run.
 herdr-plugins/           # Herdr plugins (python3, stdlib-only), linked via `herdr plugin link`
