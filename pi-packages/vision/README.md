@@ -43,7 +43,9 @@ vision(path: "screenshot.png", prompt: "which element has focus, and what does t
 `/vision set` live-validates: unknown models get "did you mean" suggestions,
 text-only models and missing auth are rejected immediately.
 
-Config file: `~/.pi/vision.json` (0600). Env fallback: `VISION_MODEL=provider/model`.
+Config file: `~/.pi/agent/vision.json` (0600) — pi's agent config directory,
+and it follows `PI_CODING_AGENT_DIR` when that override is set.
+Env fallback: `VISION_MODEL=provider/model`.
 No API keys here — auth comes from pi.
 
 ## Model-id conventions

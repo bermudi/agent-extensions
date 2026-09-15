@@ -75,11 +75,25 @@ export interface VisionConfig {
 
 export const DEFAULT_MAX_TOKENS = 2000;
 
-export let configPath = join(homedir(), ".pi", "vision.json");
+/**
+ * pi's agent config directory, mirroring pi's own resolution: the
+ * PI_CODING_AGENT_DIR override if set, else ~/.pi/agent. Core stays pi-free
+ * (that's what keeps these tests runnable under plain bun), so the rule is
+ * mirrored rather than imported — keep in sync with pi's getAgentDir().
+ */
+export function defaultConfigPath(): string {
+  const override = process.env.PI_CODING_AGENT_DIR;
+  if (override && override.trim()) {
+    return join(override.replace(/^~(?=\/|$)/, homedir()), "vision.json");
+  }
+  return join(homedir(), ".pi", "agent", "vision.json");
+}
+
+export let configPath = defaultConfigPath();
 let cfgCache: VisionConfig | null = null;
 
 export function setConfigPath(path: string | null): void {
-  configPath = path ?? join(homedir(), ".pi", "vision.json");
+  configPath = path ?? defaultConfigPath();
   resetConfigCache();
 }
 

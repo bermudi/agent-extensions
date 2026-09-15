@@ -6,6 +6,7 @@ import {
   MIME,
   buildVisionContext,
   configPath,
+  defaultConfigPath,
   convertVisionResponse,
   findVisionModel,
   frameVisionAnswer,
@@ -89,6 +90,23 @@ describe("config", () => {
     process.env.VISION_MODEL = "env/wins";
     saveConfig({ maxTokens: 42 });
     expect(loadConfig().model).toBe("env/wins");
+  });
+
+  test("default path is pi's agent dir, honoring PI_CODING_AGENT_DIR", () => {
+    const prev = process.env.PI_CODING_AGENT_DIR;
+    try {
+      delete process.env.PI_CODING_AGENT_DIR;
+      expect(defaultConfigPath()).toEndWith("/.pi/agent/vision.json");
+      process.env.PI_CODING_AGENT_DIR = "/tmp/custom-agent";
+      expect(defaultConfigPath()).toBe("/tmp/custom-agent/vision.json");
+      process.env.PI_CODING_AGENT_DIR = "~/elsewhere";
+      expect(defaultConfigPath()).toEndWith("/elsewhere/vision.json");
+      expect(defaultConfigPath()).not.toContain("~/");
+    } finally {
+      if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prev;
+      setConfigPath(null);
+    }
   });
 
   test("save merges and sanitizes", () => {

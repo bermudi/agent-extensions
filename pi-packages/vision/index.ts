@@ -12,10 +12,11 @@
  *
  * Configure:  /vision set model=<provider>/<vision-model-id>   e.g.
  *             /vision set model=google/gemini-2.5-flash
- * or env:     VISION_MODEL=<provider>/<model>   (~/.pi/vision.json wins)
+ * or env:     VISION_MODEL=<provider>/<model>   (~/.pi/agent/vision.json wins)
  * Show/reset: /vision show | /vision reset
  */
 import { existsSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createReadToolDefinition } from "@earendil-works/pi-coding-agent";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
@@ -53,7 +54,7 @@ export default function (pi: ExtensionAPI): void {
         }
         resetConfigCache();
         ctx.ui.notify(
-          "vision: config cleared — VISION_MODEL env still applies if set",
+          `vision: config cleared — VISION_MODEL env still applies if set`,
           "info",
         );
         return;
@@ -86,7 +87,7 @@ export default function (pi: ExtensionAPI): void {
 
       const cfg = loadConfig();
       const src = existsSync(configPath)
-        ? `~/.pi/vision.json`
+        ? configPath.replace(homedir(), "~")
         : process.env.VISION_MODEL
           ? "VISION_MODEL env"
           : "not configured";
