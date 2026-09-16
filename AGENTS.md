@@ -27,6 +27,9 @@ pi-packages/
   session-summarizer/     # INACTIVE (source kept; not linked in .pi/extensions — verify install state before claiming it runs)
   zen-relay/              # ACTIVE (standalone, not a pi extension): all-local multi-IP relay for OpenCode Zen. Per-gateway SSH SOCKS tunnels + one local relay; pi uses it via models.json baseUrl override.
   experiments/            # ARCHIVE — unused/exploratory. Not typechecked, not in default test run.
+                         #   claudish/: port of the Claude Code claudish-to-english plugin (display-only
+                         #   plain-English rewrite of assistant messages). Standalone package, never
+                         #   published, not installed anywhere; own tests (58, run green).
 herdr-plugins/           # Herdr plugins (python3, stdlib-only), linked via `herdr plugin link`
   pane-layouts/           # ACTIVE: apply pane layouts (columns/rows/quad/main+stack) from a popup picker
   pi-reload/              # ACTIVE: send /reload to every idle pi instance in the session
