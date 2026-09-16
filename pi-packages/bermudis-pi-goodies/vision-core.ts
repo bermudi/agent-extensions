@@ -222,8 +222,9 @@ export interface CompletionItem {
 }
 
 /** Sort candidates by match quality against q: startsWith, then contains,
- *  then alphabetical. Stable and predictable — completion must not jump. */
-function rankCandidates(candidates: string[], q: string): string[] {
+ *  then alphabetical. Stable and predictable — completion must not jump.
+ *  Shared by /vision and /goodies summary-model completion. */
+export function rankCandidates(candidates: string[], q: string): string[] {
   const lower = candidates.map((c) => ({ c, l: c.toLowerCase() }));
   return lower
     .map((e) => {

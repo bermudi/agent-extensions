@@ -54,6 +54,8 @@ import {
   SelectList,
   Spacer,
   Text,
+  type AutocompleteItem,
+  type AutocompleteProvider,
 } from "@earendil-works/pi-tui";
 import path from "node:path";
 import { promises as fs } from "node:fs";
@@ -763,6 +765,112 @@ type ReviewPresetValue =
   | (typeof REVIEW_PRESETS)[number]["value"]
   | typeof TOGGLE_CUSTOM_INSTRUCTIONS_VALUE;
 
+// ── /review argument completion ─────────────────────────────────────────
+
+const REVIEW_VERBS_WITH_ARGUMENT = new Set([
+  "branch",
+  "commit",
+  "folder",
+  "pr",
+  "--extra",
+]);
+const REVIEW_VERBS = [
+  "uncommitted",
+  "branch",
+  "commit",
+  "folder",
+  "pr",
+  "--extra",
+];
+
+/**
+ * Complete /review arguments: the target verb (uncommitted/branch/commit/
+ * folder/pr) and the --extra flag. Values are refs, paths, or free text —
+ * no synchronous completion can do those justice, so returning null lets
+ * pi fall back to file completion (right for folder, harmless for refs).
+ */
+export function completeReviewArgument(
+  prefix: string,
+): AutocompleteItem[] | null {
+  if (!/\s/.test(prefix)) {
+    const query = prefix.trim().toLowerCase();
+    const matches = REVIEW_VERBS.filter((w) => w.startsWith(query));
+    return matches.length
+      ? matches.map((w) => ({
+          value: REVIEW_VERBS_WITH_ARGUMENT.has(w) ? `${w} ` : w,
+          label: w,
+        }))
+      : null;
+  }
+  const m = prefix.match(/^(\S+)\s+([\s\S]*)$/);
+  if (!m) return null;
+  const rest = m[2];
+  const tokens = rest.split(/\s+/).filter(Boolean);
+  const cur = /\s$/.test(rest) ? "" : (tokens[tokens.length - 1] ?? "");
+  // Only a partial flag completes past the verb; values stay free-form.
+  if (cur.startsWith("-")) {
+    return "--extra".startsWith(cur)
+      ? [{ value: "--extra ", label: "--extra" }]
+      : null;
+  }
+  return null;
+}
+
+/** The argument text of a /review line, or null outside that context. */
+function reviewArgumentText(
+  lines: string[],
+  cursorLine: number,
+  cursorCol: number,
+): string | null {
+  if (cursorLine !== 0) return null;
+  const match = /^\/review\s+(.*)$/.exec((lines[0] ?? "").slice(0, cursorCol));
+  return match ? match[1] : null;
+}
+
+/**
+ * Pi's editor turns Tab in slash-command argument context into a forced file
+ * completion that never consults the command's getArgumentCompletions, so Tab
+ * after "/review " would list cwd paths. Claim that context and answer from
+ * the command's own completions — mirrors goodies' wrapGoodiesAutocomplete.
+ * Returning null (values, unknown flags) falls back to file completion.
+ */
+export function wrapReviewAutocomplete(
+  current: AutocompleteProvider,
+): AutocompleteProvider {
+  return {
+    async getSuggestions(lines, cursorLine, cursorCol, options) {
+      if (options.force) {
+        const argumentText = reviewArgumentText(lines, cursorLine, cursorCol);
+        if (argumentText !== null) {
+          const items = completeReviewArgument(argumentText);
+          return items ? { items, prefix: argumentText } : null;
+        }
+      }
+      return current.getSuggestions(lines, cursorLine, cursorCol, options);
+    },
+    applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+      return current.applyCompletion(
+        lines,
+        cursorLine,
+        cursorCol,
+        item,
+        prefix,
+      );
+    },
+    shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+      if (reviewArgumentText(lines, cursorLine, cursorCol) !== null) {
+        return true;
+      }
+      return (
+        current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ??
+        true
+      );
+    },
+  };
+}
+
+let reviewAutocompleteWrapped = false;
+
 export default function reviewExtension(pi: ExtensionAPI) {
   function persistReviewSettings() {
     pi.appendEntry(REVIEW_SETTINGS_TYPE, {
@@ -866,6 +974,22 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     applyAllReviewState(ctx);
+    // Claim the /review forced-Tab context once per extension load (guarded:
+    // harness stubs and limited contexts lack addAutocompleteProvider).
+    const ui = (
+      ctx as {
+        ui?: {
+          addAutocompleteProvider?: (
+            factory: (current: AutocompleteProvider) => AutocompleteProvider,
+          ) => void;
+        };
+      }
+    ).ui;
+    const add = ui?.addAutocompleteProvider;
+    if (!reviewAutocompleteWrapped && typeof add === "function") {
+      reviewAutocompleteWrapped = true;
+      add(wrapReviewAutocomplete);
+    }
   });
 
   pi.on("session_tree", (_event, ctx) => {
@@ -1580,6 +1704,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
   pi.registerCommand("review", {
     description:
       "Review code changes (PR, uncommitted, branch, commit, or folder)",
+    getArgumentCompletions: completeReviewArgument,
     handler: async (args, ctx) => {
       if (!ctx.hasUI) {
         ctx.ui.notify("Review requires interactive mode", "error");

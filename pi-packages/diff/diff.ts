@@ -1,7 +1,75 @@
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  AutocompleteItem,
+  AutocompleteProvider,
+} from "@earendil-works/pi-tui";
 
 const commandName = "diff";
+
+/** Complete /diff arguments: the single word "clear" (anything else the
+ *  handler ignores). */
+function completeDiffArguments(prefix: string): AutocompleteItem[] | null {
+  const q = prefix.trim().toLowerCase();
+  return "clear".startsWith(q) ? [{ value: "clear", label: "clear" }] : null;
+}
+
+/** The argument text of a /diff line, or null outside that context. */
+function diffArgumentText(
+  lines: string[],
+  cursorLine: number,
+  cursorCol: number,
+): string | null {
+  if (cursorLine !== 0) return null;
+  const match = /^\/diff\s+(.*)$/.exec((lines[0] ?? "").slice(0, cursorCol));
+  return match ? match[1] : null;
+}
+
+/**
+ * Pi's editor turns Tab in slash-command argument context into a forced file
+ * completion that never consults the command's getArgumentCompletions — claim
+ * the /diff context and answer from its own completions (mirrors goodies'
+ * wrapGoodiesAutocomplete; null falls back to file completion).
+ */
+function wrapDiffAutocomplete(
+  current: AutocompleteProvider,
+): AutocompleteProvider {
+  return {
+    async getSuggestions(lines, cursorLine, cursorCol, options) {
+      if (options.force) {
+        const argumentText = diffArgumentText(lines, cursorLine, cursorCol);
+        if (argumentText !== null) {
+          const items = completeDiffArguments(argumentText);
+          return items ? { items, prefix: argumentText } : null;
+        }
+      }
+      return current.getSuggestions(lines, cursorLine, cursorCol, options);
+    },
+    applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+      return current.applyCompletion(
+        lines,
+        cursorLine,
+        cursorCol,
+        item,
+        prefix,
+      );
+    },
+    shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+      if (diffArgumentText(lines, cursorLine, cursorCol) !== null) {
+        return true;
+      }
+      return (
+        current.shouldTriggerFileCompletion?.(
+          lines,
+          cursorLine,
+          cursorCol,
+        ) ?? true
+      );
+    },
+  };
+}
+
+let autocompleteWrapped = false;
 
 function getStringPath(input: unknown) {
   if (!input || typeof input !== "object" || !("path" in input))
@@ -61,6 +129,27 @@ export default function (pi: ExtensionAPI) {
   let changedFiles = new Set<string>();
   let toolTouchedFiles = new Set<string>();
 
+  pi.on("session_start", (_event, ctx) => {
+    // Claim the /diff forced-Tab context once per extension load (guarded:
+    // harness stubs and limited contexts lack addAutocompleteProvider).
+    const ui = (
+      ctx as {
+        ui?: {
+          addAutocompleteProvider?: (
+            factory: (
+              current: AutocompleteProvider,
+            ) => AutocompleteProvider,
+          ) => void;
+        };
+      }
+    ).ui;
+    const add = ui?.addAutocompleteProvider;
+    if (!autocompleteWrapped && typeof add === "function") {
+      autocompleteWrapped = true;
+      add(wrapDiffAutocomplete);
+    }
+  });
+
   pi.on("agent_start", async (_event, ctx) => {
     toolTouchedFiles = new Set();
     changedFiles = new Set();
@@ -93,6 +182,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand(commandName, {
     description: "Show files changed by the last agent run",
+    getArgumentCompletions: completeDiffArguments,
     handler: async (args, ctx) => {
       await ctx.waitForIdle();
 

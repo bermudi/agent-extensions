@@ -1,5 +1,43 @@
 import { describe, expect, test } from "bun:test";
-import { parsePrReference, tokenizeArgs } from "./review";
+import {
+  completeReviewArgument,
+  parsePrReference,
+  tokenizeArgs,
+} from "./review";
+
+describe("/review argument completion", () => {
+  test("verbs complete with trailing space only when they take a value", () => {
+    expect(completeReviewArgument("")?.map((i) => i.value)).toEqual([
+      "uncommitted",
+      "branch ",
+      "commit ",
+      "folder ",
+      "pr ",
+      "--extra ",
+    ]);
+    expect(completeReviewArgument("br")).toEqual([
+      { value: "branch ", label: "branch" },
+    ]);
+    expect(completeReviewArgument("--e")).toEqual([
+      { value: "--extra ", label: "--extra" },
+    ]);
+    expect(completeReviewArgument("x")).toBeNull();
+  });
+
+  test("values stay free-form: null falls back to file completion", () => {
+    expect(completeReviewArgument("branch ")).toBeNull();
+    expect(completeReviewArgument("folder src/")).toBeNull();
+    expect(completeReviewArgument("pr 123")).toBeNull();
+    expect(completeReviewArgument("uncommitted ")).toBeNull();
+  });
+
+  test("partial flag completes past the verb; unknown flags do not", () => {
+    expect(completeReviewArgument("uncommitted --e")).toEqual([
+      { value: "--extra ", label: "--extra" },
+    ]);
+    expect(completeReviewArgument("uncommitted --bogus")).toBeNull();
+  });
+});
 
 describe("parsePrReference", () => {
   test("bare number returns prNumber with no repo", () => {

@@ -30,7 +30,7 @@ import {
   isEditToolResult,
   isWriteToolResult,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { Box, Text, type AutocompleteItem, type AutocompleteProvider } from "@earendil-works/pi-tui";
 import {
   appendFileSync,
   existsSync,
@@ -505,8 +505,77 @@ export interface ClaudishOptions {
   configPath?: string;
 }
 
+/** Complete /claudish arguments: the mode words the handler knows. */
+export function completeClaudishArguments(
+  prefix: string,
+): AutocompleteItem[] | null {
+  const q = prefix.trim().toLowerCase();
+  const words = ["on", "off", "status", "explain"].filter((w) =>
+    w.startsWith(q),
+  );
+  return words.length ? words.map((w) => ({ value: w, label: w })) : null;
+}
+
+/** The argument text of a /claudish line, or null outside that context. */
+function claudishArgumentText(
+  lines: string[],
+  cursorLine: number,
+  cursorCol: number,
+): string | null {
+  if (cursorLine !== 0) return null;
+  const match = /^\/claudish\s+(.*)$/.exec(
+    (lines[0] ?? "").slice(0, cursorCol),
+  );
+  return match?.[1] ?? null;
+}
+
+/**
+ * Pi's editor turns Tab in slash-command argument context into a forced file
+ * completion that never consults the command's getArgumentCompletions — claim
+ * the /claudish context and answer from its own completions (mirrors goodies'
+ * wrapGoodiesAutocomplete).
+ */
+function wrapClaudishAutocomplete(
+  current: AutocompleteProvider,
+): AutocompleteProvider {
+  return {
+    async getSuggestions(lines, cursorLine, cursorCol, options) {
+      if (options.force) {
+        const argumentText = claudishArgumentText(lines, cursorLine, cursorCol);
+        if (argumentText !== null) {
+          const items = completeClaudishArguments(argumentText);
+          return items ? { items, prefix: argumentText } : null;
+        }
+      }
+      return current.getSuggestions(lines, cursorLine, cursorCol, options);
+    },
+    applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+      return current.applyCompletion(
+        lines,
+        cursorLine,
+        cursorCol,
+        item,
+        prefix,
+      );
+    },
+    shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+      if (claudishArgumentText(lines, cursorLine, cursorCol) !== null) {
+        return true;
+      }
+      return (
+        current.shouldTriggerFileCompletion?.(
+          lines,
+          cursorLine,
+          cursorCol,
+        ) ?? true
+      );
+    },
+  };
+}
+
 export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
   configPath = options.configPath ?? join(getAgentDir(), CONFIG_FILENAME);
+  let autocompleteWrapped = false;
 
   // Read config at session start; reset the once-per-session notice.
   pi.on("session_start", (_event, ctx) => {
@@ -515,6 +584,24 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
     pendingPlaceholders.clear();
     lastHandledText = undefined;
     lastHandledAt = 0;
+    // Claim the /claudish forced-Tab context once per extension load
+    // (guarded: harness stubs and limited contexts lack the API).
+    const ui = (
+      ctx as {
+        ui?: {
+          addAutocompleteProvider?: (
+            factory: (
+              current: AutocompleteProvider,
+            ) => AutocompleteProvider,
+          ) => void;
+        };
+      }
+    ).ui;
+    const add = ui?.addAutocompleteProvider;
+    if (!autocompleteWrapped && typeof add === "function") {
+      autocompleteWrapped = true;
+      add(wrapClaudishAutocomplete);
+    }
     // A pending rewrite entry in a freshly loaded session was written by a
     // previous process that died mid-rewrite (crash/kill) — its rewrite can
     // never land. Flip it to the hidden failed state so it doesn't render an
@@ -735,6 +822,7 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
   pi.registerCommand("claudish", {
     description:
       "Control claudish plain-English rewrites: /claudish [on|off|status|explain] — explain rewrites the last assistant message on demand",
+    getArgumentCompletions: completeClaudishArguments,
     handler: async (args, ctx) => {
       const cfg = getConfig();
       const cmd = (args?.trim() || "status").toLowerCase();

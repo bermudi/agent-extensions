@@ -8,6 +8,7 @@ import {
   getThinkingSummariesEnabled,
   setThinkingSummariesEnabled,
   completeGoodiesArguments,
+  __setCompletionModelsForTesting,
   wrapGoodiesAutocomplete,
   findSummaryModel,
   suggestSummaryModels,
@@ -513,6 +514,34 @@ describe("/goodies argument completion", () => {
     ]);
   });
 
+  test("summary-model completes off/default then ranked catalogue models", () => {
+    __setCompletionModelsForTesting([
+      "zai/glm-5.3-flash",
+      "google/gemini-2.5-flash",
+      "anthropic/claude-opus-4-6",
+    ]);
+    // Empty token: clears first, then the whole catalogue alphabetically.
+    const all = completeGoodiesArguments("summary-model ")!.map((i) => i.value);
+    expect(all.slice(0, 2)).toEqual(["off", "default"]);
+    expect(all.slice(2)).toEqual([
+      "anthropic/claude-opus-4-6",
+      "google/gemini-2.5-flash",
+      "zai/glm-5.3-flash",
+    ]);
+    // Prefix match wins over contains.
+    expect(
+      completeGoodiesArguments("summary-model google/g")!.map((i) => i.value),
+    ).toEqual(["google/gemini-2.5-flash"]);
+    expect(
+      completeGoodiesArguments("summary-model zai")!.map((i) => i.value),
+    ).toEqual(["zai/glm-5.3-flash"]);
+    // Clear words still complete when they uniquely prefix-match.
+    expect(completeGoodiesArguments("summary-model of")).toEqual([
+      { value: "off", label: "off" },
+    ]);
+    __setCompletionModelsForTesting([]);
+  });
+
   test("unknown subcommands and values produce no completions", () => {
     expect(completeGoodiesArguments("frobnicate")).toBeNull();
     expect(completeGoodiesArguments("summary-model some/model")).toBeNull();
@@ -560,9 +589,10 @@ describe("/goodies forced-Tab autocomplete wrapper", () => {
     expect(wrapped.shouldTriggerFileCompletion([line], 0, line.length)).toBe(
       true,
     );
-    expect(
-      await wrapped.getSuggestions([line], 0, line.length, force),
-    ).toBeNull();
+    // With an empty stashed catalogue the clear words still complete — the
+    // claimed context never falls through to file completion.
+    const offered = await wrapped.getSuggestions([line], 0, line.length, force);
+    expect(offered?.items.map((i) => i.value)).toEqual(["off", "default"]);
     expect(calls.suggestions).toBe(0);
   });
 

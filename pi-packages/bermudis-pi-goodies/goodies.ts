@@ -22,6 +22,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { reportFailure } from "./goodies-log.ts";
 import { writeJsonFileAtomic, describeError } from "./json-file.ts";
+import { rankCandidates } from "./vision-core.ts";
 
 let CONFIG_PATH = join(homedir(), ".pi", "agent", "goodies.json");
 
@@ -337,6 +338,19 @@ export function completeGoodiesArguments(
       ? matches.map((v) => ({ value: `${verb} ${v}`, label: v }))
       : null;
   }
+  if (verb === "summary-model") {
+    // Single value token (model ids contain no spaces): "off"/"default"
+    // clear the setting; anything else matches the catalogue, ranked.
+    const q = valuePrefix.toLowerCase();
+    const items: AutocompleteItem[] = [];
+    for (const w of ["off", "default"]) {
+      if (w.startsWith(q)) items.push({ value: w, label: w });
+    }
+    for (const c of rankCandidates(completionModels, q).slice(0, 20)) {
+      items.push({ value: c, label: c });
+    }
+    return items.length ? items : null;
+  }
   return null;
 }
 
@@ -395,10 +409,28 @@ export function wrapGoodiesAutocomplete(
 
 let autocompleteWrapped = false;
 
+/**
+ * All catalogue models as "provider/id", stashed at session start for
+ * summary-model argument completion — completion callbacks are synchronous
+ * and context-free, so the registry must be captured beforehand. No auth
+ * filtering: getApiKeyAndHeaders can refresh OAuth tokens, far too heavy for
+ * keystrokes; a keyless pick hits the existing set-time warning instead.
+ */
+let completionModels: string[] = [];
+
+export function __setCompletionModelsForTesting(models: string[]): void {
+  completionModels = models;
+}
+
 export default function goodies(pi: ExtensionAPI): void {
   // Once per extension load: session_start also fires on /new, /resume, and
   // /fork, where the first session's wrapper is still installed.
   pi.on("session_start", (_event, ctx) => {
+    if (ctx.modelRegistry) {
+      completionModels = ctx.modelRegistry
+        .getAvailable()
+        .map((m) => `${m.provider}/${m.id}`);
+    }
     if (autocompleteWrapped) return;
     autocompleteWrapped = true;
     ctx.ui.addAutocompleteProvider(wrapGoodiesAutocomplete);
