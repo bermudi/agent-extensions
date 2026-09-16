@@ -10,6 +10,8 @@ pi-packages/
                          # image Q&A for visionless models: /vision set model, self-hides via setActiveTools when the active
                          # model declares image input, followUp=true threads keyed by path+size+mtime, answers raw text —
                          # provenance in details; vision-model system prompt keeps the injection refusal).
+                         # Renders via clean-tui's burst skeleton (createBurstRenderer, gated on the
+                         # CLEAN_TUI_ACTIVE flag at registration — same contract pi-codex mirrors).
                          # Needs pi ^0.85.x at runtime (vision uses createReadToolDefinition); peers bumped in lockstep.
                          # clean-tui render paths MUST follow the render-safety rules in its
                          # README (pi-tui fullRender escalation: clearOnShrink + above-viewport

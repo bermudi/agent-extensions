@@ -37,9 +37,69 @@ import {
   type ContentBlockLike,
   type ModelLike,
 } from "./vision-core.ts";
+import {
+  createBurstRenderer,
+  isCleanTuiActive,
+  shortenPath,
+} from "./clean-tui.ts";
 
 /** Follow-up threads live per pi process: capped, in-memory, never persisted. */
 const conversations = createConversationStore();
+
+/** First line of a question, hard-capped — prompts can be long/multi-line. */
+function questionPreview(prompt: unknown, cap: number): string {
+  const s = typeof prompt === "string" ? prompt : "";
+  if (!s) return "";
+  const nl = s.indexOf("\n");
+  let head = nl === -1 ? s : s.slice(0, nl);
+  if (head.length > cap) head = head.slice(0, cap - 1) + "…";
+  return head;
+}
+
+/** Answer text of a recorded vision result (its content is one text block). */
+function answerText(result: unknown): string {
+  const content = (result as { content?: Array<{ text?: string }> } | undefined)
+    ?.content;
+  return String(content?.[0]?.text ?? "").trim();
+}
+
+/** Burst-rendering spec (clean-tui style): header = path + question, the
+ *  answer stays hidden until the row is expanded. Same skeleton the built-in
+ *  tools use — attached only while clean-tui is active, else pi's default
+ *  rendering. */
+const visionBurstSpec = {
+  name: "vision",
+  bullet(entry: any, theme: any) {
+    const accent = (s: string) =>
+      theme.fg(entry.isError ? "error" : "accent", s);
+    const q = questionPreview(entry.args.prompt, 80);
+    const follow = entry.args.followUp ? theme.fg("muted", " (follow-up)") : "";
+    const label = `${accent(shortenPath(entry.args.path || "..."))}${follow}`;
+    return `  ${theme.fg("muted", "•")} ${label}${q ? theme.fg("toolOutput", ` — "${q}"`) : ""}`;
+  },
+  groupedDetails(entries: any[], theme: any) {
+    return entries
+      .map((e) => {
+        const label = `— ${shortenPath(e.args.path || "...")}${e.args.followUp ? " (follow-up)" : ""}: "${questionPreview(e.args.prompt, 90)}"`;
+        if (!e.result) return `\n${theme.fg("warning", `${label} (pending)`)}`;
+        const txt = answerText(e.result);
+        if (!txt) return `\n${theme.fg("muted", label)}`;
+        return `\n${theme.fg("muted", label)}\n${e.isError ? theme.fg("error", txt) : theme.fg("toolOutput", txt)}`;
+      })
+      .join("");
+  },
+  soloHeader(args: any, theme: any) {
+    const follow = args.followUp ? theme.fg("muted", " (follow-up)") : "";
+    const q = questionPreview(args.prompt, 90);
+    return `${theme.fg("toolTitle", theme.bold("vision"))} ${theme.fg("accent", shortenPath(args.path || "..."))}${follow}${q ? ` ${theme.fg("toolOutput", `"${q}"`)}` : ""}`;
+  },
+  soloExpanded(entry: any, _args: any, theme: any) {
+    if (!entry.result) return "";
+    const txt = answerText(entry.result);
+    if (!txt) return "";
+    return entry.isError ? theme.fg("error", txt) : theme.fg("toolOutput", txt);
+  },
+};
 
 export default function (pi: ExtensionAPI): void {
   pi.registerCommand("vision", {
@@ -148,6 +208,10 @@ export default function (pi: ExtensionAPI): void {
         }),
       ),
     }),
+    // Burst-style rows while clean-tui is active (flag is settled before this
+    // loads — index.ts registers clean-tui first); pi's default rendering
+    // otherwise. Read at registration time, like the pi-codex contract.
+    ...(isCleanTuiActive() ? createBurstRenderer(visionBurstSpec) : {}),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       // Delegate image loading to pi's own read tool: photon resize,
       // magic-byte mime detection, size caps — battle-tested behavior.

@@ -103,7 +103,7 @@ function getBuiltInTools(cwd: string): BuiltInTools {
   return tools;
 }
 
-function shortenPath(path: string): string {
+export function shortenPath(path: string): string {
   const home = homedir();
   // Only a real subpath of home shortens: a bare startsWith turns a sibling
   // like `/home/me-other/x` into `~-other/x`.
@@ -1359,6 +1359,106 @@ function makeBox(
   return box;
 }
 
+/** While set, sibling extension tools in this package render in burst style
+ *  (same contract @bermudi/pi-codex mirrors via Symbol.for). Set at load,
+ *  cleared when the feature is disabled, so /reload converges. Consumers must
+ *  read it at registration time — rendering never happens before all
+ *  extensions load. */
+export function isCleanTuiActive(): boolean {
+  return (globalThis as Record<symbol, unknown>)[CLEAN_TUI_ACTIVE] === true;
+}
+
+/** Format spec for a burst-style tool. The shared skeleton below carries the
+ *  grouped/solo/pending/error rules once for every tool that uses it. */
+export type BurstToolSpec = {
+  name: string;
+  /** Required when registering via registerBurstTool (built-in override);
+   *  createBurstRenderer ignores these — the tool keeps its own definition. */
+  description?: any;
+  parameters?: any;
+  /** Bullet line for one entry inside a grouped header. */
+  bullet: (entry: Entry, theme: any) => string;
+  /** Extra lines appended to the grouped header when expanded (or ""). */
+  groupedDetails: (entries: Entry[], theme: any) => string;
+  /** Solo (ungrouped) header line, without expanded output. */
+  soloHeader: (args: any, theme: any, ctx: any) => string;
+  /** Extra lines appended to the solo header when expanded (or ""). */
+  soloExpanded: (entry: Entry, args: any, theme: any) => string;
+  /** Hook run right after upsertEntry (bash: request a summary). */
+  onUpsert?: (entry: Entry, args: any, ctx: any) => void;
+};
+
+/** The shared burst render hooks (renderShell + renderCall + renderResult),
+ *  split out of registerBurstTool so extension-owned tools in this package
+ *  (vision) can attach the identical skeleton to their own registration —
+ *  one implementation of the grouped/solo/pending/error rules, no copy. */
+export function createBurstRenderer(spec: BurstToolSpec): {
+  renderShell: "self";
+  renderCall: (args: any, theme: any, ctx: any) => any;
+  renderResult: (result: any, _opts: any, _theme: any, ctx: any) => Container;
+} {
+  return {
+    renderShell: "self",
+    renderCall(args: any, theme: any, ctx: any) {
+      const entry = upsertEntry(
+        ctx.toolCallId,
+        spec.name,
+        args,
+        ctx.invalidate,
+      );
+      spec.onUpsert?.(entry, args, ctx);
+      const burst = getBurstForId(ctx.toolCallId);
+      const isGrouped = burst && burst.entries.length > 1;
+      const isLeader =
+        isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
+      // The burst box is shared by every call in the group, so its background
+      // never takes the error color — a failure (the leader included) is
+      // marked on its own bullet instead. Pending does aggregate: the box
+      // stays in its running state until every call in the burst has landed.
+      // (b80a14d "follow the leader" painted the whole block red whenever the
+      // first call itself failed; this rule — formerly only on bash — now
+      // applies to every burst tool.)
+      const pending = isGrouped
+        ? burst.entries.some((e) => !e.result)
+        : !entry.result;
+      const isError = isGrouped ? false : !!entry.isError;
+
+      if (isGrouped && !isLeader) {
+        // Refresh the leader's header/count. Single hop: a leader's renderCall
+        // never invalidates anything, so this cannot loop.
+        const lead = invalidateById.get(burst.entries[0].toolCallId);
+        if (lead) lead();
+        return new Container();
+      }
+
+      if (isGrouped && isLeader) {
+        let header = `${theme.fg("toolTitle", theme.bold(spec.name))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
+        header += `\n${burst.entries.map((e) => spec.bullet(e, theme)).join("\n")}`;
+        if (ctx.expanded) {
+          const details = spec.groupedDetails(burst.entries, theme);
+          if (details) header += details;
+        }
+        return makeBox(theme, pending, isError, header);
+      }
+
+      // solo
+      let line = spec.soloHeader(args, theme, ctx);
+      if (ctx.expanded) {
+        const extra = spec.soloExpanded(entry, args, theme);
+        if (extra) line += `\n${extra}`;
+      }
+      return makeBox(theme, pending, isError, line);
+    },
+    renderResult(result: any, _opts: any, _theme: any, ctx: any) {
+      recordResult(entryById.get(ctx.toolCallId), result, ctx);
+      // All visual work is done in renderCall (unified box); keep the result
+      // slot empty. Images are rendered by Pi's ToolExecutionComponent image
+      // layer even when we return empty here.
+      return new Container();
+    },
+  };
+}
+
 // ── Per-tool helpers ────────────────────────────────────────────
 function formatReadHeader(args: any, theme: any): string {
   const path = shortenPath(args.path || "");
@@ -1637,97 +1737,24 @@ export default function cleanTui(pi: ExtensionAPI): void {
   });
 
   // ── Shared burst-tool skeleton ─────────────────────────────────
-  // Every burst tool (read/bash/write/edit/find/grep/ls) shares one render
-  // skeleton: upsert → burst → leader/follower split → grouped box or solo
-  // box. Per-tool behavior is a spec of formatters. This deletes ~450 lines of
-  // copy-paste and, more importantly, makes the divergence class impossible:
-  // the "one failed row paints the whole burst red" bug was fixed twice for
-  // bash (b80a14d, then the isGrouped?false rule) but the other six tools still
+  // registerBurstTool = createBurstRenderer (module-level, shared with
+  // vision's own registration) + execute delegation to the cached built-in
+  // tool. Every burst tool (read/bash/write/edit/find/grep/ls) shares that one
+  // render skeleton, which makes the divergence class impossible: the "one
+  // failed row paints the whole burst red" bug was fixed twice for bash
+  // (b80a14d, then the isGrouped?false rule) but the other six tools still
   // shipped `isGrouped ? entries.some(e => e.isError)` — the shared skeleton
   // carries the single correct rule for all of them.
-  type BurstToolSpec = {
-    name: string;
-    description: any;
-    parameters: any;
-    /** Bullet line for one entry inside a grouped header. */
-    bullet: (entry: Entry, theme: any) => string;
-    /** Extra lines appended to the grouped header when expanded (or ""). */
-    groupedDetails: (entries: Entry[], theme: any) => string;
-    /** Solo (ungrouped) header line, without expanded output. */
-    soloHeader: (args: any, theme: any, ctx: any) => string;
-    /** Extra lines appended to the solo header when expanded (or ""). */
-    soloExpanded: (entry: Entry, args: any, theme: any) => string;
-    /** Hook run right after upsertEntry (bash: request a summary). */
-    onUpsert?: (entry: Entry, args: any, ctx: any) => void;
-  };
-
   function registerBurstTool(spec: BurstToolSpec): void {
     pi.registerTool({
       name: spec.name,
       label: spec.name,
       description: spec.description,
       parameters: spec.parameters,
-      renderShell: "self",
+      ...createBurstRenderer(spec),
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         const tool = (getBuiltInTools(ctx.cwd) as any)[spec.name];
         return tool.execute(toolCallId, params, signal, onUpdate);
-      },
-      renderCall(args, theme, ctx: any) {
-        const entry = upsertEntry(
-          ctx.toolCallId,
-          spec.name,
-          args,
-          ctx.invalidate,
-        );
-        spec.onUpsert?.(entry, args, ctx);
-        const burst = getBurstForId(ctx.toolCallId);
-        const isGrouped = burst && burst.entries.length > 1;
-        const isLeader =
-          isGrouped && burst.entries[0].toolCallId === ctx.toolCallId;
-        // The burst box is shared by every call in the group, so its background
-        // never takes the error color — a failure (the leader included) is
-        // marked on its own bullet instead. Pending does aggregate: the box
-        // stays in its running state until every call in the burst has landed.
-        // (b80a14d "follow the leader" painted the whole block red whenever the
-        // first call itself failed; this rule — formerly only on bash — now
-        // applies to every burst tool.)
-        const pending = isGrouped
-          ? burst.entries.some((e) => !e.result)
-          : !entry.result;
-        const isError = isGrouped ? false : !!entry.isError;
-
-        if (isGrouped && !isLeader) {
-          // Refresh the leader's header/count. Single hop: a leader's renderCall
-          // never invalidates anything, so this cannot loop.
-          const lead = invalidateById.get(burst.entries[0].toolCallId);
-          if (lead) lead();
-          return new Container();
-        }
-
-        if (isGrouped && isLeader) {
-          let header = `${theme.fg("toolTitle", theme.bold(spec.name))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
-          header += `\n${burst.entries.map((e) => spec.bullet(e, theme)).join("\n")}`;
-          if (ctx.expanded) {
-            const details = spec.groupedDetails(burst.entries, theme);
-            if (details) header += details;
-          }
-          return makeBox(theme, pending, isError, header);
-        }
-
-        // solo
-        let line = spec.soloHeader(args, theme, ctx);
-        if (ctx.expanded) {
-          const extra = spec.soloExpanded(entry, args, theme);
-          if (extra) line += `\n${extra}`;
-        }
-        return makeBox(theme, pending, isError, line);
-      },
-      renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-        recordResult(entryById.get(ctx.toolCallId), result, ctx);
-        // All visual work is done in renderCall (unified box); keep the result
-        // slot empty. Images are rendered by Pi's ToolExecutionComponent image
-        // layer even when we return empty here.
-        return new Container();
       },
     });
   }

@@ -17,6 +17,7 @@ import cleanTui, {
   convertSummaryResponse,
   setCleanTuiActive,
 } from "./clean-tui";
+import vision from "./vision";
 import { PiHarness, type Theme } from "pi-harness";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -80,6 +81,113 @@ describe("clean-tui pi-codex integration flag", () => {
     expect(globals[FLAG]).toBe(true);
     setCleanTuiActive(false);
     expect(globals[FLAG]).toBeUndefined();
+  });
+});
+
+describe("clean-tui vision rows", () => {
+  /** Harness with both extensions loaded, mirroring index.ts order: clean-tui
+   *  first (sets the flag), vision second (reads it at registration). The
+   *  harness api only implements on/registerTool; vision also registers a
+   *  command and toggles active tools — stub those (prototype delegation
+   *  keeps the harness's own arrows working). */
+  function visionHarness(): PiHarness {
+    const h = freshHarness();
+    const api = Object.create(h.api) as Record<string, unknown>;
+    api.registerCommand = () => {};
+    api.getActiveTools = () => ["vision"];
+    api.setActiveTools = () => {};
+    vision(api as never);
+    return h;
+  }
+
+  test("solo row: path + question in header, answer only when expanded", () => {
+    const h = visionHarness();
+    const row = h.row("vision", "v1");
+    row.setArgs({ path: "/tmp/shot.png", prompt: "what does the banner say?" });
+    row.setResult({
+      content: [{ type: "text", text: 'The banner reads "Token expired".' }],
+    });
+    const collapsed = textOf(row.lastCallComponent);
+    expect(collapsed).toContain("vision");
+    expect(collapsed).toContain("shot.png");
+    expect(collapsed).toContain("what does the banner say?");
+    expect(collapsed).not.toContain("Token expired"); // hidden until expanded
+    row.setExpanded(true);
+    expect(textOf(row.lastCallComponent)).toContain("Token expired");
+  });
+
+  test("follow-up annotated in the header", () => {
+    const h = visionHarness();
+    const row = h.row("vision", "v1");
+    row.setArgs({
+      path: "/tmp/shot.png",
+      prompt: "and the button?",
+      followUp: true,
+    });
+    row.setResult({ content: [{ type: "text", text: "Cancel" }] });
+    const text = textOf(row.lastCallComponent);
+    expect(text).toContain("(follow-up)");
+    expect(text).toContain("and the button?");
+  });
+
+  test("consecutive vision calls group (vision ×2); answers in expanded details", () => {
+    const h = visionHarness();
+    h.ctx.sessionManager.branch = [
+      assistantMessage(
+        { id: "a", name: "vision" },
+        { id: "b", name: "vision" },
+      ),
+    ];
+    h.emit("session_start", { reason: "resume" });
+    const a = h.row("vision", "a");
+    const b = h.row("vision", "b");
+    a.setArgs({ path: "/tmp/one.png", prompt: "q1" });
+    b.setArgs({ path: "/tmp/two.png", prompt: "q2", followUp: true });
+    a.setResult({ content: [{ type: "text", text: "answer one" }] });
+    b.setResult({ content: [{ type: "text", text: "answer two" }] });
+    expect(b.lastCallComponent instanceof Container).toBe(true); // follower hides
+    const header = textOf(a.lastCallComponent);
+    expect(header).toContain("vision ×2");
+    expect(header).toContain("one.png");
+    expect(header).toContain("two.png");
+    expect(header).toContain("(follow-up)");
+    expect(header).not.toContain("answer one");
+    a.setExpanded(true);
+    const expanded = textOf(a.lastCallComponent);
+    expect(expanded).toContain("answer one");
+    expect(expanded).toContain("answer two");
+  });
+
+  test("solo error row keeps the error out of the collapsed header", () => {
+    const h = visionHarness();
+    const row = h.row("vision", "e1");
+    row.setArgs({ path: "missing.png", prompt: "q" });
+    row.setResult({
+      content: [{ type: "text", text: "[vision error] read failed" }],
+      isError: true,
+    });
+    expect(textOf(row.lastCallComponent)).not.toContain("read failed");
+    row.setExpanded(true);
+    expect(textOf(row.lastCallComponent)).toContain("read failed");
+  });
+
+  test("clean-tui disabled → vision renders via pi's default fallback", () => {
+    const FLAG = Symbol.for("bermudis-pi-goodies.clean-tui.active.v1");
+    const globals = globalThis as Record<symbol, unknown>;
+    delete globals[FLAG]; // simulate /goodies disable clean-tui + /reload
+    const h = new PiHarness();
+    const api = Object.create(h.api) as Record<string, unknown>;
+    api.registerCommand = () => {};
+    api.getActiveTools = () => ["vision"];
+    api.setActiveTools = () => {};
+    vision(api as never);
+    const row = h.row("vision", "v1");
+    row.setArgs({ path: "/tmp/shot.png", prompt: "q" });
+    // No renderCall attached → harness records no component (pi falls back
+    // to its default tool row).
+    expect(row.lastCallComponent).toBeUndefined();
+    expect(row.fallbacks).toBe(0);
+    globals[FLAG] = true; // restore for other tests in this file
   });
 });
 

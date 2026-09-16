@@ -328,5 +328,9 @@ Behavior notes:
   capped at 8 threads / 10 turns, in-memory only.
 - Answers return as plain text (same trust model as any tool output); the
   vision model's own system prompt refuses instructions embedded in the image.
+- Rows render in the clean-tui burst style while that feature is enabled
+  (header = path + question, follow-ups annotated, answers on expand,
+  same-tool calls group as `vision ×N`); with clean-tui disabled the tool
+  falls back to pi's default rendering.
 - Nested completion usage is reported back, so pi's session stats stay
   accurate.
