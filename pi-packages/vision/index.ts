@@ -16,14 +16,18 @@
  * Show/reset: /vision show | /vision reset
  */
 import { existsSync, rmSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createReadToolDefinition } from "@earendil-works/pi-coding-agent";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import {
+  applyVisionToolVisibility,
   configPath,
+  createConversationStore,
   loadConfig,
+  modelSupportsImages,
   parseVisionArgs,
   readRawImage,
   resetConfigCache,
@@ -31,7 +35,11 @@ import {
   runVisionTool,
   saveConfig,
   type ContentBlockLike,
+  type ModelLike,
 } from "./vision-core.ts";
+
+/** Follow-up threads live per pi process: capped, in-memory, never persisted. */
+const conversations = createConversationStore();
 
 export default function (pi: ExtensionAPI): void {
   pi.registerCommand("vision", {
@@ -98,17 +106,33 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
+  // Self-hide: the tool only earns its place when the ACTIVE model cannot
+  // see images. Hide it from vision models (removes the tool schema AND its
+  // prompt-guideline bullet); restore it on a switch to a visionless model.
+  function syncVisionToolVisibility(model: ModelLike | undefined): void {
+    const visible = !modelSupportsImages(model);
+    const next = applyVisionToolVisibility(pi.getActiveTools(), visible);
+    if (next) pi.setActiveTools(next);
+  }
+  pi.on("session_start", (_event, ctx) => {
+    syncVisionToolVisibility(ctx.model);
+  });
+  pi.on("model_select", (event) => {
+    syncVisionToolVisibility(event.model);
+  });
+
   pi.registerTool({
     name: "vision",
     label: "vision",
     description:
-      "Ask a vision-capable model a specific question about an image file (jpg, png, gif, webp, bmp) and get a text answer. " +
-      "Works even when the active model cannot see images. Each call is independent — ask targeted questions " +
-      "('what error does the dialog show?', 'which element is highlighted?', 'read the chart axis labels') " +
-      "rather than 'describe this image'; follow-up questions are new calls.",
+      "Ask a vision model a specific question about an image file (jpg, png, gif, webp, bmp) and get a text answer. " +
+      "The active model cannot view images itself — this is how it looks at one. Ask targeted questions " +
+      "('what error does the dialog show?', 'which element is highlighted?'). Set followUp=true to build on the " +
+      "previous Q&A about the same image — the vision model remembers its earlier answers, so relative references " +
+      "('the smaller button below it') work.",
     promptSnippet: "Ask a vision model targeted questions about image files",
     promptGuidelines: [
-      "Use the vision tool to ask targeted questions about images (screenshots, diagrams, charts) when you need visual details — it answers even when the active model cannot see images.",
+      "Use the vision tool to ask targeted questions about images (screenshots, diagrams, charts) — the active model cannot view images directly. Pass followUp=true to continue the previous thread about the same image.",
     ],
     parameters: Type.Object({
       path: Type.String({
@@ -117,18 +141,29 @@ export default function (pi: ExtensionAPI): void {
       prompt: Type.String({
         description: "The specific question to answer about the image",
       }),
+      followUp: Type.Optional(
+        Type.Boolean({
+          description:
+            "Continue the previous thread about this image (the vision model sees its earlier answers). Omit for a clean slate.",
+        }),
+      ),
     }),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       // Delegate image loading to pi's own read tool: photon resize,
       // magic-byte mime detection, size caps — battle-tested behavior.
       const reader = createReadToolDefinition(ctx.cwd);
       return runVisionTool(
-        { path: params.path, prompt: params.prompt },
+        { path: params.path, prompt: params.prompt, followUp: params.followUp },
         {
           cwd: ctx.cwd,
           cfg: loadConfig(),
           signal,
           registry: ctx.modelRegistry,
+          conversations,
+          statFile: (path) =>
+            stat(path)
+              .then((s) => ({ size: s.size, mtimeMs: s.mtimeMs }))
+              .catch(() => null),
           readImage: (path) =>
             reader.execute(
               toolCallId,

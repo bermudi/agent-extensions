@@ -21,7 +21,11 @@ pi-packages/
   session-summarizer/     # INACTIVE (source kept; not linked in .pi/extensions — verify install state before claiming it runs)
   vision/                 # CREATED, NOT INSTALLED (pending bermudi's call): separate `vision` tool — ask a vision model
                          # from pi's registry targeted questions about an image (gemini-media-mcp pattern; read stays
-                         # untouched). Config: /vision set model=provider/id (~/.pi/agent/vision.json via pi's
+                         # untouched). Self-hides via setActiveTools when the active model declares image input
+                         # (session_start + model_select). followUp=true continues in-memory threads keyed by
+                         # abs path + size + mtime (rewritten file → clean thread), capped 8 threads/10 turns.
+                         # Answers return raw text — no untrusted banner, no model label in content
+                         # (provenance in details only); the vision-model system prompt keeps the injection refusal. Config: /vision set model=provider/id (~/.pi/agent/vision.json via pi's
                          # getAgentDir rule incl. PI_CODING_AGENT_DIR, VISION_MODEL env).
                          # Pins pi ^0.85.1 (createReadToolDefinition); registry auth via getApiKeyAndHeaders +
                          # completeSimple — the goodies summary-model pattern, copied deliberately.
