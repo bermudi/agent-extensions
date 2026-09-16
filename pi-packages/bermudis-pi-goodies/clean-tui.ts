@@ -460,10 +460,13 @@ interface SummaryUi {
       // Themed factory so the widget can match pi's own Thinking... styling
       // (italic thinkingText) instead of rendering as plain white text that
       // reads like assistant prose. Mirrors pi's setWidget overload.
-      | ((tui: unknown, theme: {
-          fg: (color: string, text: string) => string;
-          italic: (text: string) => string;
-        }) => { render: (width: number) => string[]; invalidate: () => void })
+      | ((
+          tui: unknown,
+          theme: {
+            fg: (color: string, text: string) => string;
+            italic: (text: string) => string;
+          },
+        ) => { render: (width: number) => string[]; invalidate: () => void })
       | undefined,
   ): void;
 }
@@ -1203,8 +1206,10 @@ function setThinkingWidget(summary: string): void {
   // default body text (white), which is why bare summaries cosplayed as
   // assistant messages.
   const line = `\u2026 ${summary}`;
-  summaryUi.setWidget(THINKING_WIDGET_KEY, (_tui, theme) =>
-    new Text(theme.italic(theme.fg("thinkingText", line)), 0, 0),
+  summaryUi.setWidget(
+    THINKING_WIDGET_KEY,
+    (_tui, theme) =>
+      new Text(theme.italic(theme.fg("thinkingText", line)), 0, 0),
   );
   thinkingWidgetShown = true;
 }

@@ -6,7 +6,11 @@ Personal repo for Pi coding agent extensions.
 
 ```
 pi-packages/
-  bermudis-pi-goodies/   # ACTIVE (npm/global): commands/hooks + Kilo provider & balance footer
+  bermudis-pi-goodies/   # ACTIVE (npm/global): commands/hooks + Kilo provider & balance footer + vision tool (query-driven
+                         # image Q&A for visionless models: /vision set model, self-hides via setActiveTools when the active
+                         # model declares image input, followUp=true threads keyed by path+size+mtime, answers raw text —
+                         # provenance in details; vision-model system prompt keeps the injection refusal).
+                         # Needs pi ^0.85.x at runtime (vision uses createReadToolDefinition); peers bumped in lockstep.
                          # clean-tui render paths MUST follow the render-safety rules in its
                          # README (pi-tui fullRender escalation: clearOnShrink + above-viewport
                          # changes wipe the screen in regular mode; fullscreen has neither)
@@ -19,16 +23,6 @@ pi-packages/
   ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
   pi-harness/             # ACTIVE (dev-only): test harness for TUI extensions; faithful ToolExecutionComponent render semantics
   session-summarizer/     # INACTIVE (source kept; not linked in .pi/extensions — verify install state before claiming it runs)
-  vision/                 # CREATED, NOT INSTALLED (pending bermudi's call): separate `vision` tool — ask a vision model
-                         # from pi's registry targeted questions about an image (gemini-media-mcp pattern; read stays
-                         # untouched). Self-hides via setActiveTools when the active model declares image input
-                         # (session_start + model_select). followUp=true continues in-memory threads keyed by
-                         # abs path + size + mtime (rewritten file → clean thread), capped 8 threads/10 turns.
-                         # Answers return raw text — no untrusted banner, no model label in content
-                         # (provenance in details only); the vision-model system prompt keeps the injection refusal. Config: /vision set model=provider/id (~/.pi/agent/vision.json via pi's
-                         # getAgentDir rule incl. PI_CODING_AGENT_DIR, VISION_MODEL env).
-                         # Pins pi ^0.85.1 (createReadToolDefinition); registry auth via getApiKeyAndHeaders +
-                         # completeSimple — the goodies summary-model pattern, copied deliberately.
   zen-relay/              # ACTIVE (standalone, not a pi extension): all-local multi-IP relay for OpenCode Zen. Per-gateway SSH SOCKS tunnels + one local relay; pi uses it via models.json baseUrl override.
   experiments/            # ARCHIVE — unused/exploratory. Not typechecked, not in default test run.
 herdr-plugins/           # Herdr plugins (python3, stdlib-only), linked via `herdr plugin link`

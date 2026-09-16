@@ -447,7 +447,12 @@ describe("restore sanitization", () => {
             baseUrl: "https://api.kilo.ai/api/gateway",
             reasoning: false,
             input: ["text"],
-            cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0.5 },
+            cost: {
+              input: 1.25,
+              output: 10,
+              cacheRead: 0.125,
+              cacheWrite: 0.5,
+            },
             contextWindow: 32_000,
             maxTokens: 8_000,
           },

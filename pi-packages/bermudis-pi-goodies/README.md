@@ -17,6 +17,7 @@ extensions. One entry point, twelve independent features.
 | `kilo`             | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                 |
 | `provider-balance` | footer (no command)           | Show remaining Kilo, OpenRouter, or CommandCode credits, z.ai token-plan quota, or OpenAI Codex quota on the right side of the working-directory footer line. |
 | `tps`              | hook (no command)             | Notify tokens/sec and in/out/cache token usage at the end of each agent turn.                                                                   |
+| `vision`           | `vision` tool, `/vision`      | Ask a vision model targeted questions about an image file and get a text answer — for models that can't see images. Follow-ups via `followUp: true`. Self-hides when the active model has image input. |
 | `goodies`          | `/goodies`                    | Toggle individual features on/off without losing the rest. Also supports `/goodies summary-model [provider/model]` to pick the model used for AI bash-command summaries, and `/goodies thinking-summaries <on\|off>` for live thinking summaries. State persists to `~/.pi/agent/goodies.json`. |
 
 ## Install
@@ -24,7 +25,7 @@ extensions. One entry point, twelve independent features.
 After publishing the package to npm:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.21.0
+pi install npm:bermudis-pi-goodies@0.22.0
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
@@ -293,3 +294,39 @@ production mapping code; exit 0 means all models still map. `DRIFT` lines are
 informational: they flag that kilo.ts's hardcoded knowledge (Responses-API
 routing metadata, anthropic cache control, `:free` conventions) may need a
 review. It never touches the device-auth endpoint.
+
+## Vision tool
+
+`vision` is a query-driven image Q&A tool for models that can't see images:
+the agent asks a **specific question** ("which element has focus?", "what does
+the error banner say?") and a vision model from pi's own catalogue answers.
+pi's built-in `read` is untouched. Image loading delegates to it (resize,
+magic-byte mime detection, size caps); auth flows through pi's registry —
+this feature never stores credentials.
+
+```bash
+/vision set google/gemini-2.5-flash          # or model=provider/id, maxTokens=N
+/vision show                                 # current config + source
+/vision reset
+```
+
+`/vision set` live-validates: typos get "did you mean" suggestions, text-only
+models and missing auth are rejected immediately. Config lives in
+`~/.pi/agent/vision.json` (0600, follows `PI_CODING_AGENT_DIR`); env fallback
+`VISION_MODEL=provider/model`.
+
+Behavior notes:
+
+- **Self-hiding**: when the active model declares image input, the tool is
+  removed from the active set (schema and prompt guideline both vanish) and
+  comes back on a switch to a visionless model.
+- **Follow-ups**: `followUp: true` continues the previous thread for the same
+  image — the vision model sees its earlier Q&A, so relative references ("the
+  button below it") work. Prior turns replay as plain text with the image in
+  the final turn only, so a follow-up costs the same image tokens as a fresh
+  call. Threads key on path + size + mtime (a rewritten image starts clean),
+  capped at 8 threads / 10 turns, in-memory only.
+- Answers return as plain text (same trust model as any tool output); the
+  vision model's own system prompt refuses instructions embedded in the image.
+- Nested completion usage is reported back, so pi's session stats stay
+  accurate.

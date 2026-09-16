@@ -49,7 +49,8 @@ type FeatureName =
   | "review"
   | "kilo"
   | "provider-balance"
-  | "tps";
+  | "tps"
+  | "vision";
 
 const FEATURES: FeatureName[] = [
   "copy-with-model",
@@ -64,6 +65,7 @@ const FEATURES: FeatureName[] = [
   "kilo",
   "provider-balance",
   "tps",
+  "vision",
 ];
 
 type Config = Partial<Record<FeatureName, boolean>> & {
