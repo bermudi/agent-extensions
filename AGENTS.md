@@ -32,7 +32,7 @@ pi-packages/
                          #   published, not installed anywhere; own tests (58, run green).
 herdr-plugins/           # Herdr plugins (python3, stdlib-only), linked via `herdr plugin link`
   pane-layouts/           # ACTIVE: apply pane layouts (columns/rows/quad/main+stack) from a popup picker
-  pi-reload/              # ACTIVE: send /reload to every idle pi instance in the session
+  pi-reload/              # ACTIVE: send /reload to every pi instance in the session (waits out busy panes by default; never types into blocked/draft panes)
 ```
 
 ## Herdr plugins
@@ -40,14 +40,27 @@ herdr-plugins/           # Herdr plugins (python3, stdlib-only), linked via `her
 `herdr-plugins/<name>/` each hold a `herdr-plugin.toml` + scripts; install with
 `herdr plugin link <path>` (reversible via `herdr plugin unlink <id>`). Actions
 run with `HERDR_BIN_PATH`, `HERDR_SOCKET_PATH`, and cwd = plugin root; stdout
-lands in `herdr plugin log list --plugin <id>`.
+lands in `herdr plugin log list --plugin <id>`. `HERDR_BIN_PATH` is the
+RUNNING server's own binary path and goes stale ("<path> (deleted)") after a
+`herdr update` while the server stays up — verify it before use, fall back to
+PATH (pi-reload does). Every `agent prompt` also costs ~300ms: herdr
+intentionally sleeps between typing the text and pressing Enter
+(AGENT_PROMPT_SUBMIT_DELAY, paste-boundary guard) — serial per-pane loops pay
+it N times, so run per-pane work concurrently when targeting many panes.
 
 SAFETY RULE for any plugin that types into agent panes: herdr 0.8.2
-`agent prompt` does NOT refuse blocked agents. pi's dialogs confirm the
+`agent prompt` does NOT refuse blocked agents (0.9.1-fork's --help claims a
+blocked pane is now rejected with `agent_blocked` pre-send — UNVERIFIED,
+don't rely on it; keep plugin-side guards). pi's dialogs confirm the
 highlighted option on Enter, so typing into a `blocked` pane can answer an
 approval dialog. Never send input to `blocked` or `unknown` panes.
-`working` is fine (pi refuses /reload mid-turn with a warning and drops the
-text — bermudi accepted that). pi's status is authoritative — it self-reports
+`working` panes: pi refuses /reload typed mid-turn with a warning ("Wait for
+the current response to finish before reloading.") and drops the text —
+verified live and in pi 0.85.1 source (built-in commands are dispatched by
+the TUI before the steer/followUp queue; only ordinary messages queue). So
+pi-reload waits busy panes out by default (`agent wait --until idle --until
+done`, then reloads; --no-wait sends anyway). pi's status is authoritative —
+it self-reports
 via the `herdr:pi` hook (`~/.pi/agent/extensions/herdr-agent-state.ts`).
 pi-reload also skips panes with a draft in the input box: detected from
 `agent read --source detection` — the editor is the lines between the last

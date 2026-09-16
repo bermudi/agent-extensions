@@ -34,12 +34,13 @@ time between the re-check and the keystrokes — which herdr's unguarded
 | pi state      | action                                                                     |
 |---------------|----------------------------------------------------------------------------|
 | `idle` / `done` | `/reload` is typed into the editor and takes effect immediately           |
-| `working`     | sent anyway — pi warns ("Wait for the current response to finish before reloading.") and drops the text; run the action again after the turn ends |
+| `working`     | pi refuses `/reload` mid-turn ("Wait for the current response to finish before reloading.") and drops the text, so the plugin **waits** for the turn to settle (`herdr agent wait --until idle --until done`, up to `--wait-timeout` seconds, default 120) and then reloads. `--no-wait` reverts to send-anyway (pi warns and drops it) |
 | `blocked`     | skipped — an approval dialog is open; pressing Enter would **confirm the highlighted option**, so blocked panes are never typed into |
 | `unknown`     | skipped — state hook not authoritative, a dialog cannot be ruled out       |
 
-The toast calls out how many were mid-turn so you know whether a rerun is
-needed. Blocked panes are the one hard skip: typing into a pi pane that is
+The toast calls out how many panes it waited for and how many were still
+busy when the wait timed out (rerun those, or raise `--wait-timeout`).
+Blocked panes are the one hard skip: typing into a pi pane that is
 showing a dialog can answer it.
 
 ## Draft guard

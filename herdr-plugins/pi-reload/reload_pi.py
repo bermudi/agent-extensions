@@ -3,7 +3,7 @@
 
 Invoked by Herdr as the plugin action `pi.reload.reload-all`, or by hand:
 
-    python3 reload_pi.py [--dry-run]
+    python3 reload_pi.py [--dry-run] [--no-wait] [--wait-timeout SEC]
 
 How it works
 ------------
@@ -12,9 +12,14 @@ How it works
 2. pi reports its own lifecycle state to Herdr through the `herdr:pi`
    extension hook, so `agent_status` is authoritative:
        idle / done  -> editor is free: /reload takes effect immediately
-       working      -> sent anyway: pi refuses mid-turn with a warning
-                       ("Wait for the current response to finish before
-                       reloading.") and drops the text; rerun when idle
+       working      -> typing /reload now would be refused mid-turn with
+                       a warning ("Wait for the current response to
+                       finish before reloading.") and the text dropped,
+                       so by default the plugin WAITS for the turn to
+                       settle (`herdr agent wait --until idle --until
+                       done`, up to --wait-timeout seconds) and then
+                       reloads; --no-wait reverts to send-anyway (pi
+                       warns and drops the text)
        blocked      -> pi is showing an approval/question dialog; Enter
                        would CONFIRM the highlighted dialog option, so
                        these panes are never typed into; skipped
@@ -50,29 +55,51 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 PROMPT_TIMEOUT = 30  # seconds per herdr CLI call
 TOAST_BODY_MAX = 240  # herdr truncates notification bodies to 240 chars
 
+_BIN_WARNED = False  # warn once per run about a stale HERDR_BIN_PATH
+
 
 def herdr_bin():
-    """Plugins should call Herdr through HERDR_BIN_PATH; fall back to PATH."""
-    return os.environ.get("HERDR_BIN_PATH") or "herdr"
+    """Plugins should call Herdr through HERDR_BIN_PATH; fall back to PATH.
+
+    The env var is exported by the RUNNING server and points at its own
+    binary. After `herdr update` that file is gone, and the server (read
+    from /proc/self/exe) exports "<path> (deleted)" — so verify before
+    trusting it, and warn (lands in the plugin log) when falling back.
+    """
+    global _BIN_WARNED
+    candidate = os.environ.get("HERDR_BIN_PATH", "").strip()
+    if candidate.endswith(" (deleted)"):
+        candidate = candidate[: -len(" (deleted)")]
+    if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    if candidate and not _BIN_WARNED:
+        _BIN_WARNED = True
+        print(
+            f"warning: HERDR_BIN_PATH {candidate!r} is missing or not executable; "
+            "falling back to 'herdr' on PATH (restart the herdr server to refresh it)",
+            file=sys.stderr,
+        )
+    return "herdr"
 
 
-def run_cli(args):
+def run_cli(args, timeout=PROMPT_TIMEOUT):
     """Run a herdr CLI command, returning (returncode, stdout, stderr)."""
     try:
         proc = subprocess.run(
             [herdr_bin(), *args],
             capture_output=True,
             text=True,
-            timeout=PROMPT_TIMEOUT,
+            timeout=timeout,
         )
     except FileNotFoundError:
         raise RuntimeError(f"herdr CLI not found ({herdr_bin()!r}); is Herdr installed?")
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"herdr {' '.join(args[:2])} timed out after {PROMPT_TIMEOUT}s")
+        raise RuntimeError(f"herdr {' '.join(args[:2])} timed out after {timeout}s")
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -183,6 +210,25 @@ def current_status(pane_id):
     return status, None
 
 
+def wait_for_settle(pane_id, timeout_s):
+    """Block until a working pane settles. Returns (ok, detail).
+
+    Safety-relevant detail: only idle/done count as settled. A pane that
+    hits an approval dialog while we wait must NOT match — the send path
+    types Enter, and Enter confirms dialogs. `herdr agent wait` without
+    --until would match blocked too, hence the explicit --until flags.
+    """
+    rc, stdout, stderr = run_cli(
+        ["agent", "wait", pane_id, "--until", "idle", "--until", "done",
+         "--timeout", str(timeout_s * 1000)],
+        timeout=timeout_s + 5,  # CLI enforces its own --timeout; add buffer
+    )
+    if rc == 0:
+        return True, "settled"
+    detail = (stderr.strip() or stdout.strip())[:120]
+    return False, f"still busy after {timeout_s}s" + (f" ({detail})" if detail else "")
+
+
 def reload_one(pane_id):
     """Submit /reload to one pi instance. Returns (ok, detail)."""
     rc, stdout, stderr = run_cli(["agent", "prompt", pane_id, "/reload"])
@@ -254,6 +300,18 @@ def main(argv=None):
         action="store_true",
         help="show what would be sent, change nothing",
     )
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="don't wait for busy panes; send anyway (pi warns and drops the command)",
+    )
+    parser.add_argument(
+        "--wait-timeout",
+        type=int,
+        default=120,
+        metavar="SEC",
+        help="max seconds to wait for a busy pane to settle before giving up (default 120)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -273,12 +331,40 @@ def main(argv=None):
         action, reason = classify(agent["status"])
         rows.append({**agent, "outcome": action, "detail": reason or ""})
 
-    # Per-pane and interleaved, so each pane's checks run as close to its
-    # own prompt as possible: a check done up front for all panes would be
-    # seconds stale by the time the last pane is reached.
-    for row in rows:
-        if row["outcome"] != "reload":
-            continue
+    # Per-pane work (wait -> draft guard -> status re-check -> prompt) runs
+    # in a thread pool: each pane keeps its own strict ordering, while the
+    # panes run concurrently. Two reasons this matters:
+    # - herdr's `agent prompt` deliberately sleeps ~300ms between typing the
+    #   text and pressing Enter (paste-boundary guard, see herdr's
+    #   AGENT_PROMPT_SUBMIT_DELAY); serially that is 0.3s x N panes before
+    #   the last /reload lands. Concurrently it's ~0.3s total.
+    # - checks run as close to their own prompt as possible; a check done
+    #   up front for all panes would be seconds stale by the time the last
+    #   pane is reached.
+    def process_row(row):
+        if row["status"] == "working":
+            if args.dry_run:
+                row["detail"] = (
+                    f"mid-turn — would wait for settle (up to {args.wait_timeout}s) then reload"
+                    if not args.no_wait
+                    else "mid-turn — pi will warn and drop it; rerun when idle"
+                )
+                return
+            if not args.no_wait:
+                # pi refuses /reload mid-turn and drops the text, so make
+                # the "jiffy" explicit: wait for the turn to end, then fall
+                # through to the normal guards and send.
+                ok_wait, wait_detail = wait_for_settle(row["pane_id"], args.wait_timeout)
+                if not ok_wait:
+                    row["outcome"] = "skip"
+                    row["skip_kind"] = "wait"
+                    row["detail"] = f"{wait_detail} — rerun when idle"
+                    return
+                row["waited"] = True
+                row["detail"] = "mid-turn — waited for settle, then reloaded"
+            else:
+                # Send-anyway escape hatch: pi warns and drops the text.
+                row["detail"] = "mid-turn — pi will warn and drop it; rerun when idle"
         # Draft guard: typing into a pane whose input box has content
         # would append to the draft and Enter would submit it.
         try:
@@ -296,7 +382,7 @@ def main(argv=None):
                 else f"could not read input box ({err or 'empty/unparseable snapshot'})"
             )
             row["detail"] = f"{reason} — not touched"
-            continue
+            return
         # TOCTOU guard: the listing status is stale, and a pane that was
         # `working` can be sitting at a fresh approval dialog now — exactly
         # the pane Enter must never touch.
@@ -309,10 +395,17 @@ def main(argv=None):
             row["skip_kind"] = "status"
             shown = status or "unreadable"
             row["detail"] = f"status now {shown}" + (f" ({err})" if err else "") + " — not touched"
-            continue
+            return
         row["status_now"] = status
+        if row.get("waited") and status == "working":
+            # The turn we waited on ended, but a NEW turn started in the
+            # gap before the send; same refusal would apply.
+            row["outcome"] = "skip"
+            row["skip_kind"] = "status"
+            row["detail"] = "settled, but busy again before the send — rerun when idle"
+            return
         if args.dry_run:
-            continue  # checks passed; would send
+            return  # checks passed; would send
         try:
             ok, detail = reload_one(row["pane_id"])
         except RuntimeError as exc:
@@ -322,6 +415,12 @@ def main(argv=None):
         else:
             row["outcome"] = "failed"
             row["detail"] = detail
+
+    targets = [row for row in rows if row["outcome"] == "reload"]
+    if targets:
+        with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+            for _ in pool.map(process_row, targets):
+                pass
 
     if args.dry_run:
         print(f"dry run — {len(agents)} pi instance(s) found:")
@@ -337,13 +436,19 @@ def main(argv=None):
     skipped = [r for r in rows if r["outcome"] == "skip"]
     editor_skips = [r for r in skipped if r.get("skip_kind") == "editor"]
     unreadable = [r for r in skipped if r.get("skip_kind") == "editor-unreadable"]
-    status_skips = [r for r in skipped if r.get("skip_kind") not in ("editor", "editor-unreadable")]
-    midturn = [r for r in reloaded if r.get("status_now", r["status"]) == "working"]
+    status_skips = [r for r in skipped if r.get("skip_kind") not in ("editor", "editor-unreadable", "wait")]
+    wait_skips = [r for r in skipped if r.get("skip_kind") == "wait"]
+    waited = [r for r in reloaded if r.get("waited")]
+    dropped = [r for r in reloaded if not r.get("waited") and r.get("status_now", r["status"]) == "working"]
     total = len(rows)
 
     summary = f"sent /reload to {len(reloaded)}/{total} pi instances"
-    if midturn:
-        summary += f", {len(midturn)} mid-turn (rerun when idle)"
+    if waited:
+        summary += f", {len(waited)} waited for busy panes"
+    if dropped:
+        summary += f", {len(dropped)} mid-turn (pi will drop them)"
+    if wait_skips:
+        summary += f", {len(wait_skips)} still busy"
     if editor_skips:
         summary += f", {len(editor_skips)} had draft text"
     if unreadable:
