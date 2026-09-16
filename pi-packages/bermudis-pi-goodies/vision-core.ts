@@ -214,6 +214,96 @@ export function parseVisionArgs(args: string): {
   return { action: "set", values };
 }
 
+// --- argument completion -------------------------------------------------------
+
+export interface CompletionItem {
+  value: string;
+  label: string;
+}
+
+/** Sort candidates by match quality against q: startsWith, then contains,
+ *  then alphabetical. Stable and predictable — completion must not jump. */
+function rankCandidates(candidates: string[], q: string): string[] {
+  const lower = candidates.map((c) => ({ c, l: c.toLowerCase() }));
+  return lower
+    .map((e) => {
+      const rank = e.l.startsWith(q) ? 0 : e.l.includes(q) ? 1 : 2;
+      return { c: e.c, rank };
+    })
+    .filter((e) => e.rank < 2)
+    .sort((a, b) => a.rank - b.rank || a.c.localeCompare(b.c))
+    .map((e) => e.c);
+}
+
+const VISION_SUBCOMMANDS = ["set", "show", "status", "reset"];
+
+/**
+ * Complete /vision arguments from `candidates` (vision models as
+ * "provider/id"). Pure: the caller supplies candidates, so this is testable
+ * without a registry. Returns null when nothing matches (pi then falls back).
+ *
+ * Shapes completed:
+ *   "" | "s"            → subcommands ("set " keeps its trailing space)
+ *   "set "              → keys (model=, maxTokens=2000) + model candidates
+ *   "set zai"           → bare model candidates matching "zai"
+ *   "set model=goog"    → model= candidates
+ *   "set model=x maxTo" → maxTokens=2000
+ * A model already given (model= or bare) suppresses further model items;
+ * maxTokens= given → null (nothing left to complete).
+ */
+export function completeVisionArgument(
+  prefix: string,
+  candidates: string[],
+  limit = 20,
+): CompletionItem[] | null {
+  // No whitespace yet → completing the subcommand itself (empty and partial
+  // words alike; the verb regex below only makes sense past the first space).
+  if (!/\s/.test(prefix)) {
+    const query = prefix.trim();
+    const subs = VISION_SUBCOMMANDS.filter((s) => s.startsWith(query));
+    return subs.length
+      ? subs.map((s) => ({ value: s === "set" ? "set " : s, label: s }))
+      : null;
+  }
+  const verbMatch = prefix.match(/^(\S+)\s+([\s\S]*)$/);
+  if (!verbMatch || verbMatch[1] !== "set") return null;
+  const rest = verbMatch[2] ?? "";
+
+  // Completed tokens vs the trailing partial ("" right after a space), so
+  // "set a/b " completes the next key instead of a second model.
+  const tokens = rest.split(/\s+/).filter(Boolean);
+  const trailingSpace = /\s$/.test(rest);
+  const cur = trailingSpace ? "" : (tokens[tokens.length - 1] ?? "");
+  const earlier = trailingSpace ? tokens : tokens.slice(0, -1);
+
+  const hasModel = earlier.some(
+    (t) => t.startsWith("model=") || !/^[a-zA-Z]+=/.test(t),
+  );
+  if (earlier.some((t) => t.startsWith("maxTokens="))) return null;
+
+  const q = cur.toLowerCase();
+  const items: CompletionItem[] = [];
+  if (cur.startsWith("model=")) {
+    if (!hasModel) {
+      for (const c of rankCandidates(candidates, cur.slice(6).toLowerCase()))
+        items.push({ value: `model=${c}`, label: `model=${c}` });
+    }
+  } else if (/^maxtokens/i.test(cur)) {
+    if ("maxtokens=2000".startsWith(q))
+      items.push({ value: "maxTokens=2000", label: "maxTokens=2000" });
+  } else {
+    if (!hasModel && "model=".startsWith(q))
+      items.push({ value: "model=", label: "model=" });
+    if ("maxtokens=2000".startsWith(q))
+      items.push({ value: "maxTokens=2000", label: "maxTokens=2000" });
+    if (!hasModel) {
+      for (const c of rankCandidates(candidates, q))
+        items.push({ value: c, label: c });
+    }
+  }
+  return items.length ? items.slice(0, limit) : null;
+}
+
 // --- model resolution ----------------------------------------------------------
 
 /**

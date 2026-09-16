@@ -24,6 +24,7 @@ import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import {
   applyVisionToolVisibility,
+  completeVisionArgument,
   configPath,
   createConversationStore,
   loadConfig,
@@ -37,6 +38,10 @@ import {
   type ContentBlockLike,
   type ModelLike,
 } from "./vision-core.ts";
+import type {
+  AutocompleteItem,
+  AutocompleteProvider,
+} from "@earendil-works/pi-tui";
 import {
   createBurstRenderer,
   isCleanTuiActive,
@@ -45,6 +50,74 @@ import {
 
 /** Follow-up threads live per pi process: capped, in-memory, never persisted. */
 const conversations = createConversationStore();
+
+// ── /vision argument completion ─────────────────────────────────
+// Image-capable models as "provider/id", stashed at session start — the
+// completion callbacks are synchronous and receive no context, so the
+// registry must be captured beforehand (same shape as clean-tui's stash).
+let completionModels: string[] = [];
+let autocompleteWrapped = false;
+
+/** The argument text of a /vision line, or null outside that context. */
+function visionArgumentText(
+  lines: string[],
+  cursorLine: number,
+  cursorCol: number,
+): string | null {
+  if (cursorLine !== 0) return null;
+  const match = /^\/vision\s+(.*)$/.exec((lines[0] ?? "").slice(0, cursorCol));
+  return match ? match[1] : null;
+}
+
+/**
+ * Pi's editor turns Tab in slash-command argument context into a forced file
+ * completion that never consults the command's getArgumentCompletions, so Tab
+ * after "/vision set " would list cwd paths. Claim that context and answer
+ * from the command's own completions — mirrors goodies' wrapGoodiesAutocomplete.
+ */
+export function wrapVisionAutocomplete(
+  current: AutocompleteProvider,
+): AutocompleteProvider {
+  return {
+    async getSuggestions(lines, cursorLine, cursorCol, options) {
+      if (options.force) {
+        const argumentText = visionArgumentText(lines, cursorLine, cursorCol);
+        if (argumentText !== null) {
+          const items = completeVisionArgument(argumentText, completionModels);
+          return items ? { items, prefix: argumentText } : null;
+        }
+      }
+      return current.getSuggestions(lines, cursorLine, cursorCol, options);
+    },
+    applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+      return current.applyCompletion(
+        lines,
+        cursorLine,
+        cursorCol,
+        item,
+        prefix,
+      );
+    },
+    shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+      if (visionArgumentText(lines, cursorLine, cursorCol) !== null) {
+        return true;
+      }
+      return (
+        current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ??
+        true
+      );
+    },
+  };
+}
+
+/** Live completion for /vision arguments (non-forced path). */
+function completeVisionArguments(prefix: string): AutocompleteItem[] | null {
+  return completeVisionArgument(prefix, completionModels);
+}
+
+export function __setCompletionModelsForTesting(models: string[]): void {
+  completionModels = models;
+}
 
 /** First line of a question, hard-capped — prompts can be long/multi-line. */
 function questionPreview(prompt: unknown, cap: number): string {
@@ -105,6 +178,7 @@ export default function (pi: ExtensionAPI): void {
   pi.registerCommand("vision", {
     description:
       "Configure the vision tool (set/show/reset the vision model used for image Q&A)",
+    getArgumentCompletions: completeVisionArguments,
     handler: async (args, ctx) => {
       let parsed: ReturnType<typeof parseVisionArgs>;
       try {
@@ -176,6 +250,30 @@ export default function (pi: ExtensionAPI): void {
   }
   pi.on("session_start", (_event, ctx) => {
     syncVisionToolVisibility(ctx.model);
+    // Stash image-capable models for argument completion (only when a
+    // registry exists — stub contexts without one keep the previous stash).
+    if (ctx.modelRegistry) {
+      completionModels = ctx.modelRegistry
+        .getAvailable()
+        .filter(modelSupportsImages)
+        .map((m) => `${m.provider}/${m.id}`);
+    }
+    // Claim the /vision forced-Tab context once per extension load (guarded:
+    // harness stubs and limited contexts lack addAutocompleteProvider).
+    const ui = (
+      ctx as {
+        ui?: {
+          addAutocompleteProvider?: (
+            factory: (current: AutocompleteProvider) => AutocompleteProvider,
+          ) => void;
+        };
+      }
+    ).ui;
+    const add = ui?.addAutocompleteProvider;
+    if (!autocompleteWrapped && typeof add === "function") {
+      autocompleteWrapped = true;
+      add(wrapVisionAutocomplete);
+    }
   });
   pi.on("model_select", (event) => {
     syncVisionToolVisibility(event.model);

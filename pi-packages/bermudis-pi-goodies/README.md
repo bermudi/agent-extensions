@@ -311,7 +311,9 @@ this feature never stores credentials.
 ```
 
 `/vision set` live-validates: typos get "did you mean" suggestions, text-only
-models and missing auth are rejected immediately. Config lives in
+models and missing auth are rejected immediately. Arguments tab-complete:
+subcommands, then `model=` / bare model ids (image-capable models from pi's
+registry, ranked), then `maxTokens=`. Config lives in
 `~/.pi/agent/vision.json` (0600, follows `PI_CODING_AGENT_DIR`); env fallback
 `VISION_MODEL=provider/model`.
 

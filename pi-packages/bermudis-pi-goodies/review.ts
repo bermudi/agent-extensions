@@ -384,6 +384,27 @@ async function getLocalBranches(pi: ExtensionAPI): Promise<string[]> {
 }
 
 /**
+ * Get list of remote-tracking branches (e.g. origin/main, origin/master).
+ *
+ * Filters out the bare remote name (`origin`), the symbolic HEAD refs
+ * (origin/HEAD), and any non-origin remotes — origin is the conventional
+ * upstream and the only one the merge-base fallback path is meaningful for.
+ */
+async function getRemoteBranches(pi: ExtensionAPI): Promise<string[]> {
+  const { stdout, code } = await pi.exec("git", [
+    "branch",
+    "--remotes",
+    "--format=%(refname:short)",
+  ]);
+  if (code !== 0) return [];
+  return stdout
+    .trim()
+    .split("\n")
+    .map((b) => b.trim())
+    .filter((b) => b.startsWith("origin/") && !b.endsWith("/HEAD"));
+}
+
+/**
  * Get list of recent commits
  */
 async function getRecentCommits(
@@ -722,7 +743,7 @@ const REVIEW_PRESETS = [
   {
     value: "baseBranch",
     label: "Review against a base branch",
-    description: "(local)",
+    description: "(local or origin/*)",
   },
   { value: "commit", label: "Review a commit", description: "" },
   {
@@ -1022,14 +1043,29 @@ export default function reviewExtension(pi: ExtensionAPI) {
   async function showBranchSelector(
     ctx: ExtensionContext,
   ): Promise<ReviewTarget | null> {
-    const branches = await getLocalBranches(pi);
+    const [localBranches, remoteBranches] = await Promise.all([
+      getLocalBranches(pi),
+      getRemoteBranches(pi),
+    ]);
     const currentBranch = await getCurrentBranch(pi);
     const defaultBranch = await getDefaultBranch(pi);
 
-    // Never offer the current branch as a base branch (reviewing against itself is meaningless).
+    // Combine local and remote-tracking branches. Dedupe by name (a local
+    // branch and its origin/<name> counterpart are distinct refs, so both
+    // stay — the user explicitly asked for origin/main | origin/master).
+    const seen = new Set<string>();
+    const combined = [...localBranches, ...remoteBranches].filter((b) => {
+      if (seen.has(b)) return false;
+      seen.add(b);
+      return true;
+    });
+
+    // Never offer the current branch as a base branch (reviewing against
+    // itself is meaningless). Remote-tracking branches are never equal to a
+    // local current-branch name, so they pass through untouched.
     const candidateBranches = currentBranch
-      ? branches.filter((b) => b !== currentBranch)
-      : branches;
+      ? combined.filter((b) => b !== currentBranch)
+      : combined;
 
     if (candidateBranches.length === 0) {
       ctx.ui.notify(
@@ -1041,18 +1077,28 @@ export default function reviewExtension(pi: ExtensionAPI) {
       return null;
     }
 
-    // Sort branches with default branch first
+    const defaultRemote = `origin/${defaultBranch}`;
+
+    // Sort: default local branch first, then its origin/<default> counterpart,
+    // then remaining locals, then remaining remotes — each group alphabetical.
     const sortedBranches = candidateBranches.sort((a, b) => {
       if (a === defaultBranch) return -1;
       if (b === defaultBranch) return 1;
+      if (a === defaultRemote) return -1;
+      if (b === defaultRemote) return 1;
+      const aRemote = a.startsWith("origin/");
+      const bRemote = b.startsWith("origin/");
+      if (aRemote !== bRemote) return aRemote ? 1 : -1;
       return a.localeCompare(b);
     });
 
-    const items: SelectItem[] = sortedBranches.map((branch) => ({
-      value: branch,
-      label: branch,
-      description: branch === defaultBranch ? "(default)" : "",
-    }));
+    const items: SelectItem[] = sortedBranches.map((branch) => {
+      let description = "";
+      if (branch === defaultBranch) description = "(default)";
+      else if (branch === defaultRemote) description = "(remote default)";
+      else if (branch.startsWith("origin/")) description = "(remote)";
+      return { value: branch, label: branch, description };
+    });
 
     const result = await ctx.ui.custom<string | null>(
       (tui, theme, keybindings, done) => {

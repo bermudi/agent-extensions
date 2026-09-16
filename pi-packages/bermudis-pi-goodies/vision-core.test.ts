@@ -8,6 +8,7 @@ import {
   buildVisionContext,
   configPath,
   convertVisionResponse,
+  completeVisionArgument,
   createConversationStore,
   defaultConfigPath,
   findVisionModel,
@@ -430,6 +431,89 @@ describe("buildVisionContext", () => {
       type: "text",
       text: "next question",
     });
+  });
+});
+
+describe("completeVisionArgument", () => {
+  const CANDIDATES = [
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-pro",
+    "zai/glm-5.3-flash",
+  ];
+
+  test('subcommands; "set " keeps its trailing space', () => {
+    expect(completeVisionArgument("", []).map((i) => i.value)).toEqual([
+      "set ",
+      "show",
+      "status",
+      "reset",
+    ]);
+    expect(completeVisionArgument("s", []).map((i) => i.value)).toEqual([
+      "set ",
+      "show",
+      "status",
+    ]);
+    expect(completeVisionArgument("re", [])).toEqual([
+      { value: "reset", label: "reset" },
+    ]);
+    expect(completeVisionArgument("x", [])).toBeNull();
+  });
+
+  test("empty token after set → keys first, then models; limit applies", () => {
+    const items = completeVisionArgument("set ", CANDIDATES)!;
+    expect(items[0]).toEqual({ value: "model=", label: "model=" });
+    expect(items[1]).toEqual({
+      value: "maxTokens=2000",
+      label: "maxTokens=2000",
+    });
+    expect(items.slice(2).map((i) => i.value)).toEqual(CANDIDATES); // startsWith("") → alphabetical
+    const capped = completeVisionArgument("set ", CANDIDATES, 3)!;
+    expect(capped).toHaveLength(3);
+  });
+
+  test("bare model token matches by prefix then contains", () => {
+    expect(completeVisionArgument("set zai/g", CANDIDATES)).toEqual([
+      { value: "zai/glm-5.3-flash", label: "zai/glm-5.3-flash" },
+    ]); // "zai/g" prefix-fails, contains-matches — ranked after nothing else
+    const g = completeVisionArgument("set google/g", CANDIDATES)!.map(
+      (i) => i.value,
+    );
+    expect(g).toEqual(["google/gemini-2.5-flash", "google/gemini-2.5-pro"]);
+  });
+
+  test("model= token completes candidates after the =", () => {
+    const items = completeVisionArgument("set model=google/g", CANDIDATES)!;
+    expect(items.map((i) => i.value)).toEqual([
+      "model=google/gemini-2.5-flash",
+      "model=google/gemini-2.5-pro",
+    ]);
+  });
+
+  test("second position: maxTokens only once a model is given", () => {
+    expect(
+      completeVisionArgument("set google/gemini-2.5-flash ", CANDIDATES)!.map(
+        (i) => i.value,
+      ),
+    ).toEqual(["maxTokens=2000"]);
+    expect(
+      completeVisionArgument(
+        "set google/gemini-2.5-flash maxTo",
+        CANDIDATES,
+      )!.map((i) => i.value),
+    ).toEqual(["maxTokens=2000"]);
+  });
+
+  test("no duplicate models; nothing left after maxTokens=", () => {
+    // "mod" would prefix model= but a model is already given → suppressed.
+    expect(completeVisionArgument("set model=a/b mod", CANDIDATES)).toBeNull();
+    expect(
+      completeVisionArgument("set a/b maxTokens=300", CANDIDATES),
+    ).toBeNull();
+    // A model given, then typing a fresh bare token: models suppressed, but
+    // maxTokens still completes.
+    expect(
+      completeVisionArgument("set a/b ", CANDIDATES)!.map((i) => i.value),
+    ).toEqual(["maxTokens=2000"]);
   });
 });
 

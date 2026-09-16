@@ -1,5 +1,6 @@
 import { describe, expect, test, afterEach, beforeEach } from "bun:test";
 import { Box, Container } from "@earendil-works/pi-tui";
+import type { AutocompleteProvider } from "@earendil-works/pi-tui";
 import type { Model } from "@earendil-works/pi-ai";
 import cleanTui, {
   __clearSummaryCache,
@@ -17,7 +18,10 @@ import cleanTui, {
   convertSummaryResponse,
   setCleanTuiActive,
 } from "./clean-tui";
-import vision from "./vision";
+import vision, {
+  __setCompletionModelsForTesting,
+  wrapVisionAutocomplete,
+} from "./vision";
 import { PiHarness, type Theme } from "pi-harness";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -188,6 +192,73 @@ describe("clean-tui vision rows", () => {
     expect(row.lastCallComponent).toBeUndefined();
     expect(row.fallbacks).toBe(0);
     globals[FLAG] = true; // restore for other tests in this file
+  });
+
+  test("/vision tab completion: forced Tab claims arguments, other lines delegate", async () => {
+    __setCompletionModelsForTesting(["zai/glm-5.3-flash"]);
+    const h = freshHarness();
+    const added: unknown[] = [];
+    const api = Object.create(h.api) as Record<string, unknown>;
+    api.registerCommand = () => {};
+    api.getActiveTools = () => ["vision"];
+    api.setActiveTools = () => {};
+    // clean-tui's session_start also reads ctx.ui.setWidget — provide both.
+    (h.ctx as { ui?: unknown }).ui = {
+      setWidget: () => {},
+      addAutocompleteProvider: (w: unknown) => {
+        added.push(w);
+      },
+    };
+    vision(api as never);
+    h.emit("session_start", { reason: "startup" });
+    expect(added).toHaveLength(1); // installed once per extension load
+    // pi hands the factory the current provider chain; apply it to a stub.
+    const factory = added[0] as (
+      current: AutocompleteProvider,
+    ) => AutocompleteProvider;
+    const wrapper = factory({
+      getSuggestions: async () => ({
+        items: [{ value: "cwd/path", label: "cwd/path" }],
+        prefix: "",
+      }),
+      applyCompletion: async () => "delegated-apply",
+    } as unknown as AutocompleteProvider);
+
+    // Forced Tab on a /vision line → argument completions, never file paths.
+    const forced = await wrapper.getSuggestions!(["/vision set zai"], 0, 14, {
+      force: true,
+    } as never);
+    expect(forced?.items.map((i) => i.value)).toContain("zai/glm-5.3-flash");
+
+    // Unforced (live typing) → delegates to the wrapped provider.
+    const live = await wrapper.getSuggestions!(
+      ["/vision set zai"],
+      0,
+      14,
+      {} as never,
+    );
+    expect(live?.items.map((i) => i.value)).toEqual(["cwd/path"]);
+
+    // Forced Tab on a non-/vision line → delegates too (goodies owns that).
+    const other = await wrapper.getSuggestions!(["/goodies enable "], 0, 16, {
+      force: true,
+    } as never);
+    expect(other?.items.map((i) => i.value)).toEqual(["cwd/path"]);
+
+    // applyCompletion delegates unchanged.
+    const applied = await wrapper.applyCompletion!(
+      [],
+      0,
+      0,
+      { value: "x", label: "x" },
+      "x",
+    );
+    expect(applied).toBe("delegated-apply");
+
+    __setCompletionModelsForTesting([]);
+    // The ui stub made clean-tui cache summaryUi (hasUI: true) — reset it so
+    // later summary tests keep their console/log failure path.
+    __setSummaryUiForTesting(undefined);
   });
 });
 
