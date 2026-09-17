@@ -647,6 +647,25 @@ async function summarizeThinkingViaProvider(
  * thing a raw endpoint could never do. Safe to call fire-and-forget
  * (pi-codex makes OAuth-refreshing calls the same way).
  */
+/**
+ * Summaries are best-effort: an unconfigured model (or a session whose model
+ * registry never arrived) means the feature is OFF, not failing. Those
+ * conditions throw this sentinel so every failure path can drop them
+ * silently — no log line, no backoff, no pause widget. Config can flip
+ * underneath a session at any moment (another pi session rewrites
+ * goodies.json on every write), so this must be checked at the failure
+ * boundary, not only at the enqueue gates.
+ */
+function summariesOffError(reason: string): Error {
+  const err = new Error(reason);
+  err.name = "SummariesOffError";
+  return err;
+}
+
+function isSummariesOffError(err: unknown): boolean {
+  return (err as Error | undefined)?.name === "SummariesOffError";
+}
+
 async function resolveSummaryTransport(): Promise<{
   model: Model<Api>;
   label: string;
@@ -654,10 +673,10 @@ async function resolveSummaryTransport(): Promise<{
   headers?: Record<string, string | null>;
 }> {
   const configured = getSummaryModel();
-  if (!configured) throw new Error("no summary model configured");
+  if (!configured) throw summariesOffError("no summary model configured");
   const registry = summaryModelRegistry;
   if (!registry)
-    throw new Error("model registry not captured yet this session");
+    throw summariesOffError("model registry not captured yet this session");
   const found = findSummaryModel(registry, configured);
   if (!found)
     throw new Error(`summary model "${configured}" not found in registry`);
@@ -968,8 +987,14 @@ function startSummaryRequest(cmd: string): void {
       // concurrency slot with zero log output.
       if (!signal.aborted) pendingSummaries.delete(cmd);
       // Switching sessions aborts in-flight summaries deliberately: that is
-      // not a provider failure — neither penalize nor log it.
-      if (signal.aborted || (result.err as Error)?.name === "AbortError")
+      // not a provider failure — neither penalize nor log it. Same for the
+      // feature being switched off underneath the request (config rewrite by
+      // another session): drop silently, no backoff, no pause widget.
+      if (
+        signal.aborted ||
+        (result.err as Error)?.name === "AbortError" ||
+        isSummariesOffError(result.err)
+      )
         return;
       const pauseMs = noteSummaryFailure(result.err);
       logSummaryFailure(
@@ -1102,6 +1127,14 @@ async function summarizeWithRetries(job: {
 
 /** Start queued requests while capacity allows and no backoff is active. */
 function drainSummaryQueue(): void {
+  // The feature can be switched off between enqueue and drain — config is
+  // re-read from disk on every write and any pi session can rewrite it. Off
+  // means off: drop the deferred requests instead of draining them into
+  // requests that resolveSummaryTransport can only refuse.
+  if (!getSummaryModel()) {
+    summaryRequestQueue.length = 0;
+    return;
+  }
   while (
     summaryRequestQueue.length > 0 &&
     pendingSummaries.size < SUMMARY_MAX_INFLIGHT &&
@@ -1354,7 +1387,11 @@ function maybeRequestThinkingSummary(text: string): void {
         }
         return;
       }
-      if (!signal.aborted && (result.err as Error)?.name !== "AbortError") {
+      if (
+        !signal.aborted &&
+        (result.err as Error)?.name !== "AbortError" &&
+        !isSummariesOffError(result.err)
+      ) {
         const pauseMs = noteSummaryFailure(result.err);
         logSummaryFailure(
           text,

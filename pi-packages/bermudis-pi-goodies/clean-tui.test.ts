@@ -1256,6 +1256,88 @@ describe("clean-tui AI summary", () => {
     );
   });
 
+  test("config flipping to unset drops queued summaries silently", async () => {
+    // Regression for "⏸ summaries paused 480s — no summary model configured":
+    // commands queued while a summary-model was set, then another pi session
+    // rewrote goodies.json without one. The queue must be dropped as the
+    // feature being OFF — not drained into requests whose refusal is then
+    // classified as a failure with escalating backoff and a pause widget.
+    const logPath = useScratchSummaryLog();
+    const widgets: Array<[string, string[] | undefined]> = [];
+    __setSummaryUiForTesting({
+      hasUI: true,
+      setWidget: (key, content) => widgets.push([key, content]),
+    });
+    cleanupFns.push(() => __setSummaryUiForTesting(undefined));
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const calls = scriptedBackend(async () => {
+      await gate; // hold both in-flight slots so the third command queues
+      return "Held summary lands";
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    for (const name of ["q1", "q2", "q3"]) {
+      const row = h.row("bash", name);
+      row.setArgs({ command: `${heredoc} ${name}` });
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    expect(calls).toHaveLength(2); // two in flight, the third deferred
+    // Another session rewrites the config without a summary-model.
+    setSummaryModel(undefined);
+    release(); // in-flight requests settle; the deferred one drains
+    await new Promise((r) => setTimeout(r, 30));
+    // The deferred request was dropped, never attempted.
+    expect(calls).toHaveLength(2);
+    // Nothing was logged as a failure and no pause widget ever appeared.
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.type === "summary_request");
+    expect(events.filter((e) => e.outcome === "failed")).toHaveLength(0);
+    for (const [, content] of widgets)
+      expect(content?.[0] ?? "").not.toContain("⏸");
+  });
+
+  test("a summary refused because the feature is off logs nothing and never pauses", async () => {
+    // The transport refuses (no model / no registry) with the sentinel; the
+    // failure handler must treat it as "feature off", not a provider failure.
+    const logPath = useScratchSummaryLog();
+    const widgets: Array<[string, string[] | undefined]> = [];
+    __setSummaryUiForTesting({
+      hasUI: true,
+      setWidget: (key, content) => widgets.push([key, content]),
+    });
+    cleanupFns.push(() => __setSummaryUiForTesting(undefined));
+    scriptedBackend(() => {
+      const off = new Error("no summary model configured");
+      off.name = "SummariesOffError";
+      throw off;
+    });
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "off");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 30));
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.type === "summary_request");
+    expect(events.filter((e) => e.outcome === "failed")).toHaveLength(0);
+    for (const [, content] of widgets)
+      expect(content?.[0] ?? "").not.toContain("⏸");
+  });
+
   test("session_start wires the widget from a realistic context", async () => {
     // Regression: the capture used to store ctx.ui itself, whose type has no
     // hasUI flag — summaryUi.hasUI was always undefined, so every TUI failure
