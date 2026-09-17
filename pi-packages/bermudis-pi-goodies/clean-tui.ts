@@ -414,6 +414,10 @@ interface SummaryBackend {
   summarizeThinking?(text: string, signal: AbortSignal): Promise<string>;
 }
 
+// Hard floor: commands at or under 80 chars are cheap to read as-is, so no
+// summary no matter how many lines. Above that, any command qualifies —
+// single-line pipelines benefit at least as much as heredocs.
+const SUMMARY_THRESHOLD_CHARS = 80;
 // Up to ~a dozen words fit in a handful of tokens, but on OpenAI-compatible
 // endpoints reasoning and the answer SHARE max_tokens (pi-ai: "a reasoning-
 // heavy turn can consume the whole response and emit no answer") — at the
@@ -557,12 +561,7 @@ export function __clearSummaryCache(): void {
 }
 
 function isSummarizable(cmd: string): boolean {
-  // Intent: a summary exists for commands that won't display nicely —
-  // multi-line blocks (heredocs, loops, pipelines-with-newlines) whose first
-  // line alone says nothing. Single-line commands of any length display fine
-  // (bullets keep ~100 chars, then ellipsize; expandable), so they never
-  // cost a request, no matter how long they are.
-  return cmd.includes("\n");
+  return cmd.length > SUMMARY_THRESHOLD_CHARS;
 }
 
 function normalizeSummary(text: string): string {

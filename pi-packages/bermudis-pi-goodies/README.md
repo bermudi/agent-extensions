@@ -78,8 +78,7 @@ Two practical notes:
   pin the model's lowest reasoning effort and carry a 512-token budget that
   covers thinking plus the answer, so reasoning models work; a quick
   chat-class model still costs the least.
-- **Privacy:** qualifying commands (multi-line commands only — single-line
-  commands of any length display fine and never cost a request) are sent —
+- **Privacy:** qualifying commands (longer than 80 characters) are sent —
   first ~2000 characters — to whichever provider hosts the model you chose.
   That is the same trust decision as running an agent session against that
   provider, made explicit here because it happens outside normal turns.
