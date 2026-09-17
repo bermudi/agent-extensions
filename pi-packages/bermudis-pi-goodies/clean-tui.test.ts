@@ -988,7 +988,7 @@ describe("clean-tui AI summary", () => {
     // not (floor 120). At 110 cols with the old 120-char header cap this
     // 112-char command wrapped to two lines until the summary collapsed it.
     const cmd =
-      "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies && rm -rf node_modules/.cache && bun run typecheck";
+      "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies\nrm -rf node_modules/.cache && bun run typecheck";
     expect(cmd.length).toBeGreaterThan(105);
     expect(cmd.length).toBeLessThanOrEqual(120);
     row.setArgs({ command: cmd });
@@ -1014,7 +1014,7 @@ describe("clean-tui AI summary", () => {
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
     const cmd =
-      "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies && bun run typecheck && bun run test";
+      "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies && bun run typecheck\nbun run test";
     const row = h.row("bash", "fast");
     row.setArgs({ command: cmd }); // request fires here
     row.setResult({ content: [{ type: "text", text: "132 pass" }] }); // finishes mid-flight
@@ -1036,7 +1036,7 @@ describe("clean-tui AI summary", () => {
     cleanTui(h.api);
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
-    const cmd = "echo " + "x".repeat(90); // >80: summarizable, single line
+    const cmd = "echo " + "x".repeat(90) + "\necho done"; // multi-line: summarizable
     const row = h.row("bash", "expand-swap");
     row.setArgs({ command: cmd });
     row.setResult({ content: [{ type: "text", text: "ran fine" }] });
@@ -1070,7 +1070,7 @@ describe("clean-tui AI summary", () => {
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
     const cmd =
-      "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies && bun run typecheck && bun run test";
+      "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies && bun run typecheck\nbun run test";
     const done = h.row("bash", "done");
     done.setArgs({ command: cmd });
     done.setResult({ content: [{ type: "text", text: "132 pass" }] });
@@ -1214,6 +1214,27 @@ describe("clean-tui AI summary", () => {
     const consoleLine = logged.find((l) => l.includes("[clean-tui]"));
     expect(consoleLine).toContain("HTTP 429 (kilo/x)");
     expect(consoleLine).toContain("details in ~/.pi/agent/goodies.log");
+  });
+
+  test("single-line commands never summarize; multi-line ones do", async () => {
+    // The trigger is the DISPLAY problem (multi-line blocks whose first line
+    // says nothing), not command length. A 400-char one-liner ellipsizes
+    // fine and must cost zero requests; a tiny heredoc qualifies.
+    captureConsoleError();
+    const calls = scriptedBackend(() => "Summarizes the multi-line block");
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const single = h.row("bash", "single");
+    single.setArgs({ command: "git fetch upstream && " + "x".repeat(400) });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toHaveLength(0);
+    const multi = h.row("bash", "multi");
+    multi.setArgs({ command: "cat > f << 'EOF'\ncontent\nEOF" });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toHaveLength(1);
   });
 
   test("failures show a pause widget; recovery clears it", async () => {
@@ -1862,7 +1883,7 @@ describe("clean-tui AI summary", () => {
     const row = h.row("bash", "retry");
     row.setArgs({
       command:
-        "bun run test --flaky --reporter dot --coverage # " + "x".repeat(90),
+        "bun run test --flaky --reporter dot --coverage\n# " + "x".repeat(90),
     });
     await new Promise((r) => setTimeout(r, 60));
     // First attempt at goodies' lowest effort, retry at the enum floor.
@@ -1977,7 +1998,7 @@ describe("clean-tui AI summary", () => {
     cleanTui(h.api);
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
-    const cmd = "echo " + "x".repeat(90);
+    const cmd = "echo " + "x".repeat(90) + "\necho done";
     const row = h.row("bash", "rl");
     row.setArgs({ command: cmd });
     await new Promise((r) => setTimeout(r, 10));
@@ -2027,8 +2048,8 @@ describe("clean-tui AI summary", () => {
     cleanTui(h.api);
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
-    const cmdA = "echo " + "a".repeat(90);
-    const cmdB = "echo " + "b".repeat(90);
+    const cmdA = "echo " + "a".repeat(90) + "\necho done";
+    const cmdB = "echo " + "b".repeat(90) + "\necho done";
     const rowA = h.row("bash", "a");
     rowA.setArgs({ command: cmdA });
     await new Promise((r) => setTimeout(r, 10)); // failure 1 → paused 100ms
@@ -2070,7 +2091,7 @@ describe("clean-tui AI summary", () => {
     cleanTui(h.api);
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
-    const cmd = "echo " + "y".repeat(90);
+    const cmd = "echo " + "y".repeat(90) + "\necho done";
     const row = h.row("bash", "ra");
     row.setArgs({ command: cmd });
     await new Promise((r) => setTimeout(r, 10));
@@ -2114,7 +2135,7 @@ describe("clean-tui AI summary", () => {
     const [rowP, rowQ, rowR, rowS] = ["p", "q", "r", "s"].map((id) =>
       h.row("bash", id),
     );
-    const cmdOf = (tag: string) => `echo ${"z".repeat(85)}-${tag}`;
+    const cmdOf = (tag: string) => `echo ${"z".repeat(85)}-\n${tag}`;
     // Visible prose is the burst boundary; emit text between rows so these
     // four commands render solo instead of chaining into one burst.
     const nextSegment = () => {
@@ -2154,7 +2175,7 @@ describe("clean-tui AI summary", () => {
     resolvers[3]("ss");
     await settle();
     await settle(); // one hop for the result, one for the re-render
-    expect(textOf(rowR.lastCallComponent)).toContain("s(92)");
+    expect(textOf(rowR.lastCallComponent)).toContain("s(93)");
   });
 
   test("burst rows beyond the inflight cap queue and still get summaries", async () => {
@@ -2174,7 +2195,7 @@ describe("clean-tui AI summary", () => {
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
     const rows = ["b1", "b2", "b3", "b4"].map((id) => h.row("bash", id));
-    const cmdOf = (tag: string) => `echo ${"y".repeat(85)}-${tag}`;
+    const cmdOf = (tag: string) => `echo ${"y".repeat(85)}-\n${tag}`;
     // All four render back-to-back (one textless segment → one burst).
     for (const [i, row] of rows.entries())
       row.setArgs({ command: cmdOf(`v${i}`) });
@@ -2212,7 +2233,7 @@ describe("clean-tui AI summary", () => {
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
     const rows = ["s1", "s2"].map((id) => h.row("bash", id));
-    const cmdOf = (tag: string) => `echo ${"y".repeat(130)}-${tag}`;
+    const cmdOf = (tag: string) => `echo ${"y".repeat(130)}-\n${tag}`;
     for (const [i, row] of rows.entries()) {
       const full = cmdOf(`v${i}`);
       for (const cut of [20, 45, 70, 100, 130, full.length])
@@ -2252,7 +2273,7 @@ describe("clean-tui AI summary", () => {
     cleanTui(h.api);
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
-    const cmd = "echo " + "k".repeat(90);
+    const cmd = "echo " + "k".repeat(90) + "\necho done";
     const row = h.row("bash", "abandon");
     row.setArgs({ command: cmd });
     await new Promise((r) => setTimeout(r, 10));
