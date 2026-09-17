@@ -341,13 +341,18 @@ export function completeGoodiesArguments(
   if (verb === "summary-model") {
     // Single value token (model ids contain no spaces): "off"/"default"
     // clear the setting; anything else matches the catalogue, ranked.
+    // Values MUST carry the verb: pi applies a selection by replacing the
+    // whole argument-text span with item.value (both its slash-argument
+    // path and the forced-Tab wrapper use prefix: argumentText), so bare
+    // values wipe "summary-model" off the line. enable/disable and
+    // thinking-summaries already follow this pattern.
     const q = valuePrefix.toLowerCase();
     const items: AutocompleteItem[] = [];
     for (const w of ["off", "default"]) {
-      if (w.startsWith(q)) items.push({ value: w, label: w });
+      if (w.startsWith(q)) items.push({ value: `${verb} ${w}`, label: w });
     }
     for (const c of rankCandidates(completionModels, q).slice(0, 20)) {
-      items.push({ value: c, label: c });
+      items.push({ value: `${verb} ${c}`, label: c });
     }
     return items.length ? items : null;
   }
