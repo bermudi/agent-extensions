@@ -44,7 +44,12 @@ import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
-import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessage,
+  Model,
+  ThinkingLevel,
+} from "@earendil-works/pi-ai";
 import { logGoodiesEvent, setGoodiesLogPathForTesting } from "./goodies-log.ts";
 import { describeError } from "./json-file.ts";
 import {
@@ -596,8 +601,8 @@ async function summarizeViaProvider(
   signal: AbortSignal,
 ): Promise<string> {
   const t = await resolveSummaryTransport();
-  const response = await completeSimple(
-    t.model,
+  const response = await completeSummaryTurn(
+    t,
     {
       messages: [
         {
@@ -609,13 +614,7 @@ async function summarizeViaProvider(
         },
       ],
     },
-    {
-      apiKey: t.apiKey,
-      headers: t.headers,
-      maxTokens: SUMMARY_MAX_TOKENS,
-      signal,
-      reasoning: summaryReasoning(t.model),
-    },
+    signal,
   );
   return convertSummaryResponse(response, t.label);
 }
@@ -625,8 +624,8 @@ async function summarizeThinkingViaProvider(
   signal: AbortSignal,
 ): Promise<string> {
   const t = await resolveSummaryTransport();
-  const response = await completeSimple(
-    t.model,
+  const response = await completeSummaryTurn(
+    t,
     {
       messages: [
         {
@@ -636,13 +635,7 @@ async function summarizeThinkingViaProvider(
         },
       ],
     },
-    {
-      apiKey: t.apiKey,
-      headers: t.headers,
-      maxTokens: SUMMARY_MAX_TOKENS,
-      signal,
-      reasoning: summaryReasoning(t.model),
-    },
+    signal,
   );
   return convertSummaryResponse(response, t.label);
 }
@@ -746,6 +739,46 @@ function summaryReasoning(model: Model<Api>): ThinkingLevel | undefined {
   if (!model.reasoning) return undefined;
   if (typeof model.thinkingLevelMap?.off === "string") return undefined;
   return "minimal";
+}
+
+/**
+ * Run one summary completion through pi-ai, shared by both summary kinds so
+ * the reasoning_effort compatibility retry lives in exactly one place.
+ *
+ * Some OpenAI-compatible endpoints validate reasoning_effort against their
+ * own enum and reject "minimal" outright — observed on Command Code
+ * (commandcode/poolside/*): 400 invalid_request_error, param:"reasoning_effort",
+ * accepted values low|medium|high|xhigh|max. "low" is the floor of every known
+ * enum, so retry once there before surfacing the failure; an endpoint that
+ * rejects "low" too would pause as before.
+ */
+async function completeSummaryTurn(
+  t: Awaited<ReturnType<typeof resolveSummaryTransport>>,
+  context: Parameters<typeof completeSimple>[1],
+  signal: AbortSignal,
+): Promise<AssistantMessage> {
+  const options = (reasoning: ThinkingLevel | undefined) => ({
+    apiKey: t.apiKey,
+    headers: t.headers,
+    maxTokens: SUMMARY_MAX_TOKENS,
+    signal,
+    reasoning,
+  });
+  // completeSimple does NOT throw for HTTP errors — it returns an
+  // AssistantMessage with stopReason:"error" + errorMessage, so the
+  // compatibility check inspects the response, not a catch block.
+  const response = await completeSimple(
+    t.model,
+    context,
+    options(summaryReasoning(t.model)),
+  );
+  if (
+    response.stopReason === "error" &&
+    (response.errorMessage ?? "").includes("reasoning_effort")
+  ) {
+    return await completeSimple(t.model, context, options("low"));
+  }
+  return response;
 }
 
 // Summaries are best-effort polish over the heuristic hint, but failures must

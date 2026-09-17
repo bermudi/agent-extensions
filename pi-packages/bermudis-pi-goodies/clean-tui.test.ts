@@ -1701,6 +1701,103 @@ describe("clean-tui AI summary", () => {
     expect(readFileSync(logPath, "utf-8")).not.toContain("MIGRATION-LOG");
   });
 
+  test("endpoints rejecting effort 'minimal' retry once at 'low' and land", async () => {
+    // Regression: Command Code endpoints validate reasoning_effort against
+    // their own enum (low|medium|high|xhigh|max) and 400-reject the
+    // lowest-effort "minimal" goodies sends for OpenAI-compatible reasoning
+    // models — summaries paused with Invalid option instead of ever landing.
+    // The request must retry once at "low" (every known enum's floor) and
+    // only surface a failure if that fails too.
+    const logPath = useScratchSummaryLog();
+    const origFetch = globalThis.fetch;
+    const efforts: Array<string | undefined> = [];
+    let calls = 0;
+    globalThis.fetch = (async (_url: any, init: any) => {
+      calls++;
+      const body = JSON.parse(init.body);
+      efforts.push(body.reasoning_effort);
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message:
+                'Invalid option: expected one of "low"|"medium"|"high"|"xhigh"|"max"',
+              type: "invalid_request_error",
+              param: "reasoning_effort",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      const sse = [
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant" } }] })}`,
+        `data: ${JSON.stringify({
+          choices: [
+            { index: 0, delta: { content: "Retries the flaky test suite" } },
+          ],
+        })}`,
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}`,
+        "data: [DONE]",
+      ].join("\n\n");
+      return new Response(sse + "\n\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+    cleanupFns.push(() => {
+      globalThis.fetch = origFetch;
+    });
+    const reasoningModel: Model<"openai-completions"> = {
+      id: "laguna-s-2.1-free",
+      name: "Laguna",
+      api: "openai-completions",
+      provider: "commandcode",
+      baseUrl: "https://mock.local/v1",
+      reasoning: true, // no thinkingLevelMap.off: summaryReasoning sends "minimal"
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 8000,
+      maxTokens: 100,
+    };
+    __setSummaryModelRegistryForTesting({
+      find: (provider, id) =>
+        provider === "commandcode" && id === "laguna-s-2.1-free"
+          ? reasoningModel
+          : undefined,
+      getAvailable: () => [reasoningModel],
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "test-key" };
+      },
+    });
+    useScratchConfig();
+    setSummaryModel("commandcode/laguna-s-2.1-free");
+    __clearSummaryCache();
+    __setSummaryEnabled(true);
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "retry");
+    row.setArgs({
+      command:
+        "bun run test --flaky --reporter dot --coverage # " + "x".repeat(90),
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    // First attempt at goodies' lowest effort, retry at the enum floor.
+    expect(efforts).toEqual(["minimal", "low"]);
+    expect(calls).toBe(2);
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Retries the flaky test suite",
+    );
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.type === "summary_request");
+    expect(events).toHaveLength(1);
+    expect(events[0].outcome).toBe("ok");
+  });
+
   test("reasoning-only models get their lowest effort, not the API default", async () => {
     // Groq's gpt-oss maps off and minimal to null: thinking cannot be
     // disabled, and with no reasoning parameter the endpoint runs its
