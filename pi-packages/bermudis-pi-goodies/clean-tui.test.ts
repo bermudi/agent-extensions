@@ -1880,6 +1880,199 @@ describe("clean-tui AI summary", () => {
     expect(events[0].outcome).toBe("ok");
   });
 
+  test("router upstream that thinks through the budget retries once with headroom and lands", async () => {
+    // kilo-auto/free routes each request to a per-request free upstream, and
+    // thinking ones can ignore the effort hint entirely ("minimal" is not
+    // even a documented OpenRouter reasoning.effort value): reasoning eats
+    // the shared 512-token budget, no answer text is emitted, and summaries
+    // paused 30s on the empty-summary diagnosis. The wire shape is a
+    // reasoning-only stream cut off at the cap — the retry must raise the
+    // cap so the answer fits after the reasoning.
+    const logPath = useScratchSummaryLog();
+    const origFetch = globalThis.fetch;
+    const bodies: any[] = [];
+    let calls = 0;
+    globalThis.fetch = (async (_url: any, init: any) => {
+      calls++;
+      bodies.push(JSON.parse(init.body));
+      const delta =
+        calls === 1
+          ? { reasoning_content: "parsing the command line..." }
+          : { content: "Parses the command line tokens" };
+      const finish = calls === 1 ? "length" : "stop";
+      const sse = [
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant" } }] })}`,
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta }] })}`,
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: finish }] })}`,
+        "data: [DONE]",
+      ].join("\n\n");
+      return new Response(sse + "\n\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+    cleanupFns.push(() => {
+      globalThis.fetch = origFetch;
+    });
+    // Mirrors kilo.ts's bootstrap entry: reasoning-capable router on the
+    // OpenAI-completions API with the gateway's openrouter thinking format
+    // and no thinkingLevelMap (no off to map — the router cannot promise
+    // thinking control over its upstreams).
+    const routerModel: Model<"openai-completions"> = {
+      id: "kilo-auto/free",
+      name: "Auto Free",
+      api: "openai-completions",
+      provider: "kilo",
+      baseUrl: "https://mock.local/v1",
+      reasoning: true,
+      compat: { thinkingFormat: "openrouter", supportsStore: false },
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 256_000, // mirrors the kilo-auto/free bootstrap
+      maxTokens: 10_000, // mirrors the kilo-auto/free bootstrap (top_provider 10k)
+    };
+    __setSummaryModelRegistryForTesting({
+      find: (provider, id) =>
+        provider === "kilo" && id === "kilo-auto/free"
+          ? routerModel
+          : undefined,
+      getAvailable: () => [routerModel],
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "test-key" };
+      },
+    });
+    useScratchConfig();
+    setSummaryModel("kilo/kilo-auto/free");
+    __clearSummaryCache();
+    __setSummaryEnabled(true);
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "router");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(calls).toBe(2);
+    // First attempt: lean cap, goodies' lowest effort. Retry: raised cap,
+    // and the effort upgraded to the enum floor every gateway documents.
+    expect(bodies[0].reasoning).toEqual({ effort: "minimal" });
+    expect(bodies[0].max_completion_tokens).toBe(512);
+    expect(bodies[1].reasoning).toEqual({ effort: "low" });
+    expect(bodies[1].max_completion_tokens).toBe(4096);
+    expect(textOf(row.lastCallComponent)).toContain(
+      "Parses the command line tokens",
+    );
+    // Signal trail: the retry is visible even on the success path.
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(events.filter((e) => e.type === "summary_reasoning_retry")).toEqual([
+      expect.objectContaining({ model: "kilo/kilo-auto/free" }),
+    ]);
+    const summaryEvents = events.filter((e) => e.type === "summary_request");
+    expect(summaryEvents).toHaveLength(1);
+    expect(summaryEvents[0].outcome).toBe("ok");
+  });
+
+  test("router upstream that returns reasoning-only twice fails once, loudly", async () => {
+    // The headroom retry is a single second chance, not a budget-burning
+    // loop: still no answer after 4096 tokens means the upstream cannot
+    // answer at any sane cap. One structured failure with the raised-budget
+    // diagnosis, then the ordinary 30s backoff — no quick-retry hammering.
+    const logPath = useScratchSummaryLog();
+    const widgets: Array<[string, string[] | undefined]> = [];
+    __setSummaryUiForTesting({
+      hasUI: true,
+      setWidget: (key, content) => widgets.push([key, content]),
+    });
+    cleanupFns.push(() => __setSummaryUiForTesting(undefined));
+    const origFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async (_url: any, init: any) => {
+      calls++;
+      void init;
+      const sse = [
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant" } }] })}`,
+        `data: ${JSON.stringify({
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: "endlessly reasoning..." },
+            },
+          ],
+        })}`,
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "length" }] })}`,
+        "data: [DONE]",
+      ].join("\n\n");
+      return new Response(sse + "\n\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+    cleanupFns.push(() => {
+      globalThis.fetch = origFetch;
+    });
+    const routerModel: Model<"openai-completions"> = {
+      id: "kilo-auto/free",
+      name: "Auto Free",
+      api: "openai-completions",
+      provider: "kilo",
+      baseUrl: "https://mock.local/v1",
+      reasoning: true,
+      compat: { thinkingFormat: "openrouter", supportsStore: false },
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 256_000,
+      maxTokens: 10_000,
+    };
+    __setSummaryModelRegistryForTesting({
+      find: (provider, id) =>
+        provider === "kilo" && id === "kilo-auto/free"
+          ? routerModel
+          : undefined,
+      getAvailable: () => [routerModel],
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "test-key" };
+      },
+    });
+    useScratchConfig();
+    setSummaryModel("kilo/kilo-auto/free");
+    __clearSummaryCache();
+    __setSummaryEnabled(true);
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "router-stubborn");
+    row.setArgs({ command: heredoc });
+    await new Promise((r) => setTimeout(r, 60));
+    // Exactly two wire calls — the raised-cap retry — then give up.
+    expect(calls).toBe(2);
+    // The row keeps the heuristic hint; the pause widget carries the
+    // raised-budget diagnosis (truncated to its first 80 chars, which cover
+    // the "spent ... reasoning" phrase).
+    expect(textOf(row.lastCallComponent)).toContain("(+3 lines)");
+    const pause = widgets.find(([, content]) => content?.[0]?.includes("⏸"));
+    expect(pause?.[1]?.[0]).toContain(
+      "spent the raised token budget on reason",
+    );
+    const events = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(
+      events.filter((e) => e.type === "summary_reasoning_retry"),
+    ).toHaveLength(1);
+    const summaryEvents = events.filter((e) => e.type === "summary_request");
+    expect(summaryEvents).toHaveLength(1);
+    expect(summaryEvents[0].outcome).toBe("failed");
+    expect(summaryEvents[0].pauseMs).toBe(30000);
+    expect(String(summaryEvents[0].error)).toContain(
+      "kilo/kilo-auto/free spent the raised token budget on reasoning; try a summary model that can disable thinking",
+    );
+  });
+
   test("reasoning-only models get their lowest effort, not the API default", async () => {
     // Groq's gpt-oss maps off and minimal to null: thinking cannot be
     // disabled, and with no reasoning parameter the endpoint runs its
@@ -2995,22 +3188,52 @@ describe("convertSummaryResponse — production error conversion", () => {
     );
   });
 
-  test("stopReason 'stop' with only non-text blocks (thinking) throws empty-summary error", () => {
+  test("stopReason 'stop' with only thinking blocks throws the raised-budget error", () => {
     // A reasoning model that burns the whole budget on thinking emits no text
-    // content — the exact failure the empty-summary error diagnoses.
+    // content. Thinking blocks carry their text in `thinking` (pi-ai's
+    // ThinkingContent shape), and completeSummaryTurn has already retried at
+    // the raised cap by the time this error surfaces — so the diagnosis says
+    // so, and points at a model switch instead of implying a bug.
     expect(() =>
       convertSummaryResponse(
         {
           stopReason: "stop",
           content: [
-            { type: "thinking", text: "reasoning about the command..." },
+            { type: "thinking", thinking: "reasoning about the command..." },
           ],
         },
         LABEL,
       ),
     ).toThrow(
-      `empty summary — is ${LABEL} a thinking model that cannot disable thinking?`,
+      `empty summary — ${LABEL} spent the raised token budget on reasoning; try a summary model that can disable thinking`,
     );
+  });
+
+  test("stopReason 'length' with only thinking blocks throws the raised-budget error", () => {
+    expect(() =>
+      convertSummaryResponse(
+        {
+          stopReason: "length",
+          content: [{ type: "thinking", thinking: "still reasoning..." }],
+        },
+        LABEL,
+      ),
+    ).toThrow("spent the raised token budget on reasoning");
+  });
+
+  test("a redacted thinking block counts as reasoning activity", () => {
+    // Some providers elide reasoning content entirely (safety redaction,
+    // encrypted payloads) but the budget was still spent — the response is
+    // textless with an empty thinking field, only the redacted marker set.
+    expect(() =>
+      convertSummaryResponse(
+        {
+          stopReason: "stop",
+          content: [{ type: "thinking", thinking: "", redacted: true }],
+        },
+        LABEL,
+      ),
+    ).toThrow("spent the raised token budget on reasoning");
   });
 
   test("stopReason 'length' with text content returns text (not an error)", () => {

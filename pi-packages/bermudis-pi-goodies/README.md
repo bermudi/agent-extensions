@@ -60,7 +60,11 @@ widget line above the editor shows the cause and clears itself on the first
 success. Transient provider failures (upstream 5xx, stalls, network blips)
 are retried in place — up to three tries with a progressive pause of 1s,
 5s, then 10s — before any of that engages, so a single blip costs nothing;
-rate limits and other 4xx go straight to the pause. Summary log events carry
+rate limits and other 4xx go straight to the pause. A response whose whole
+budget went to reasoning (thinking blocks but no answer — how router models
+like `kilo-auto/free` fail when they land on a thinking upstream that
+ignores effort hints) gets one in-place retry at a raised 4096-token cap
+before the pause, logged as a `summary_reasoning_retry` event. Summary log events carry
 a `kind` field — `bash` or `thinking` — so `jq -r 'select(.type ==
 "summary_request") | [.kind, .outcome] | @tsv'` splits request counts by
 feature. The log at
@@ -76,8 +80,10 @@ Two practical notes:
 
 - **Thinking models are handled, non-thinking ones are cheaper.** Requests
   pin the model's lowest reasoning effort and carry a 512-token budget that
-  covers thinking plus the answer, so reasoning models work; a quick
-  chat-class model still costs the least.
+  covers thinking plus the answer, so reasoning models work; if an upstream
+  out-thinks that cap (routers make this per-request nondeterministic), the
+  raised-cap retry above buys it headroom. A quick chat-class model still
+  costs the least and can't fail this way.
 - **Privacy:** qualifying commands (longer than 80 characters) are sent —
   first ~2000 characters — to whichever provider hosts the model you chose.
   That is the same trust decision as running an agent session against that

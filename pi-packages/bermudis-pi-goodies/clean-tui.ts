@@ -424,7 +424,12 @@ const SUMMARY_THRESHOLD_CHARS = 80;
 // old 30-token cap, gpt-oss running its API-default effort returned an empty
 // summary every time. 512 gives reasoning headroom; non-reasoning models
 // stop at the answer's natural end, so the raised cap costs them nothing.
+// When even 512 is out-thought — router models (kilo-auto/free, openrouter
+// routers) hop between upstreams per request and some ignore effort hints
+// entirely — completeSummaryTurn escalates once to the cap below before
+// declaring the empty-summary failure.
 const SUMMARY_MAX_TOKENS = 512;
+const SUMMARY_REASONING_RETRY_MAX_TOKENS = 4096;
 const SUMMARY_PROMPT =
   "Summarize this shell command in less than 13 words, plain English, no quotes, no formatting. " +
   'Examples: "cat >> file << \'EOF\' with 20 lines of log" -> "Appends reboot log to migration file". ' +
@@ -692,6 +697,41 @@ async function resolveSummaryTransport(): Promise<{
   return { model: found, label, apiKey: auth.apiKey, headers };
 }
 
+/** Whether any content block carries non-empty answer text. */
+function hasAnswerText(response: {
+  content: Array<{ type: string; text?: string }>;
+}): boolean {
+  return response.content.some(
+    (c) => c.type === "text" && (c.text ?? "").trim() !== "",
+  );
+}
+
+/**
+ * Whether a textless response looks like "reasoning consumed the shared
+ * completion budget": thinking blocks arrived (their text lives in the
+ * `thinking` field, not `text`), or the provider hit the token ceiling
+ * before any answer existed. Routers (kilo-auto/free, openrouter/*) make
+ * this nondeterministic — every request can land on a different upstream,
+ * and thinking upstreams may ignore reasoning-effort hints outright.
+ */
+function reasoningAteBudget(response: {
+  stopReason: string;
+  content: Array<{
+    type: string;
+    text?: string;
+    thinking?: string;
+    redacted?: boolean;
+  }>;
+}): boolean {
+  if (hasAnswerText(response)) return false;
+  if (response.stopReason === "length") return true;
+  return response.content.some(
+    (c) =>
+      c.type === "thinking" &&
+      ((c.thinking ?? c.text ?? "").trim() !== "" || c.redacted === true),
+  );
+}
+
 /**
  * Convert a pi-ai completion response into a summary string or throw the
  * error shape the shared backoff/log/widget path expects. Extracted from
@@ -702,14 +742,17 @@ async function resolveSummaryTransport(): Promise<{
  *
  * - "aborted" → AbortError (per-request abort, not a provider failure)
  * - "error"   → Error with the provider's errorMessage (truncated) + label
- * - empty text content → Error diagnosing a thinking-model that ate the budget
+ * - empty text after reasoning activity → Error naming the eaten budget
+ *   (completeSummaryTurn has already retried at a raised cap by this point)
+ * - empty text without reasoning activity → the generic thinking-model
+ *   diagnosis
  * - anything else → the joined text content
  */
 export function convertSummaryResponse(
   response: {
     stopReason: string;
     errorMessage?: string;
-    content: Array<{ type: string; text?: string }>;
+    content: Array<{ type: string; text?: string; thinking?: string }>;
   },
   label: string,
 ): string {
@@ -726,10 +769,16 @@ export function convertSummaryResponse(
     .filter((c): c is { type: "text"; text: string } => c.type === "text")
     .map((c) => c.text)
     .join("\n");
-  if (!text.trim())
+  if (!text.trim()) {
+    if (reasoningAteBudget(response)) {
+      throw new Error(
+        `empty summary — ${label} spent the raised token budget on reasoning; try a summary model that can disable thinking`,
+      );
+    }
     throw new Error(
       `empty summary — is ${label} a thinking model that cannot disable thinking?`,
     );
+  }
   return text;
 }
 
@@ -762,40 +811,65 @@ function summaryReasoning(model: Model<Api>): ThinkingLevel | undefined {
 
 /**
  * Run one summary completion through pi-ai, shared by both summary kinds so
- * the reasoning_effort compatibility retry lives in exactly one place.
+ * the reasoning-effort compatibility retry and the reasoning-budget retry
+ * live in exactly one place.
  *
- * Some OpenAI-compatible endpoints validate reasoning_effort against their
- * own enum and reject "minimal" outright — observed on Command Code
- * (commandcode/poolside/*): 400 invalid_request_error, param:"reasoning_effort",
- * accepted values low|medium|high|xhigh|max. "low" is the floor of every known
- * enum, so retry once there before surfacing the failure; an endpoint that
- * rejects "low" too would pause as before.
+ * Retry 1 — enum compatibility: some OpenAI-compatible endpoints validate
+ * reasoning_effort against their own enum and reject "minimal" outright —
+ * observed on Command Code (commandcode/poolside/*): 400 invalid_request_error,
+ * param:"reasoning_effort", accepted values low|medium|high|xhigh|max. "low"
+ * is the floor of every known enum, so retry once there before surfacing the
+ * failure; an endpoint that rejects "low" too would pause as before.
+ *
+ * Retry 2 — reasoning budget: a response with no answer text whose budget
+ * went to thinking (thinking blocks present, or a length cutoff) gets one
+ * second chance at a raised cap. This is the router case (kilo-auto/free):
+ * each request may land on a different free upstream, and thinking ones may
+ * ignore the effort hint entirely — effort "minimal" is not even a documented
+ * OpenRouter reasoning.effort value, so the only reliable lever left is
+ * headroom. The retry upgrades the effort to "low" (valid everywhere that
+ * accepts an effort at all) — except where summaryReasoning sent none, since
+ * for non-OpenAI adapters a truthy effort ENABLES thinking. Still empty after
+ * this lands as the raised-budget diagnosis in convertSummaryResponse; the
+ * outer timeout still bounds the whole turn, so a slow retry degrades to the
+ * ordinary retryable-timeout path.
  */
 async function completeSummaryTurn(
   t: Awaited<ReturnType<typeof resolveSummaryTransport>>,
   context: Parameters<typeof completeSimple>[1],
   signal: AbortSignal,
 ): Promise<AssistantMessage> {
-  const options = (reasoning: ThinkingLevel | undefined) => ({
+  const firstEffort = summaryReasoning(t.model);
+  const options = (
+    reasoning: ThinkingLevel | undefined,
+    maxTokens: number = SUMMARY_MAX_TOKENS,
+  ) => ({
     apiKey: t.apiKey,
     headers: t.headers,
-    maxTokens: SUMMARY_MAX_TOKENS,
+    maxTokens,
     signal,
     reasoning,
   });
   // completeSimple does NOT throw for HTTP errors — it returns an
   // AssistantMessage with stopReason:"error" + errorMessage, so the
   // compatibility check inspects the response, not a catch block.
-  const response = await completeSimple(
-    t.model,
-    context,
-    options(summaryReasoning(t.model)),
-  );
+  let response = await completeSimple(t.model, context, options(firstEffort));
   if (
     response.stopReason === "error" &&
     (response.errorMessage ?? "").includes("reasoning_effort")
   ) {
-    return await completeSimple(t.model, context, options("low"));
+    response = await completeSimple(t.model, context, options("low"));
+  }
+  if (reasoningAteBudget(response)) {
+    logGoodiesEvent({ type: "summary_reasoning_retry", model: t.label });
+    response = await completeSimple(
+      t.model,
+      context,
+      options(
+        firstEffort === undefined ? undefined : "low",
+        SUMMARY_REASONING_RETRY_MAX_TOKENS,
+      ),
+    );
   }
   return response;
 }
