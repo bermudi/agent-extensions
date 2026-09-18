@@ -118,11 +118,12 @@ commands it is logged as a digest, never raw text.
 
 Two honest trade-offs:
 
-- **Separate opt-in, default off every launch.** A bash summary is one request per unique
+- **Separate opt-in, off until you enable it.** A bash summary is one request per unique
   command; a thinking summary recurs for as long as the model reasons.
-  Same provider, different volume — so `thinking-summaries on` asks for
-  that explicitly, for this pi run only (off again next launch, never saved).
-  It takes effect immediately, no `/reload`.
+  Same provider, different volume — so thinking summaries are a separate
+  toggle (`/goodies thinking-summaries on|off`), default off, persisted to
+  `goodies.json` like every other toggle. It takes effect immediately, no
+  `/reload`.
 - **It does not replace the `Thinking...` row itself.** Pi's only seam for
   that text is one global label applied to every assistant message at
   once — updating it mid-stream would rewrite every past thinking row, and

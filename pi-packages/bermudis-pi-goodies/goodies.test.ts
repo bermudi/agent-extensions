@@ -103,8 +103,8 @@ describe("goodies feature toggles", () => {
     // config it loaded at startup. A write from a long-lived session must not
     // revert what a newer one stored — that is how a configured summary-model
     // kept disappearing behind an unrelated /goodies toggle.
-    // Thinking summaries are session-only: enabling them must not touch the
-    // file, so other sessions' persisted settings always survive.
+    // Thinking summaries persist through the same updateConfig path, so
+    // enabling one must also preserve the other session's settings.
     writeFileSync(
       CONFIG_PATH,
       JSON.stringify({ "summary-model": "other/session-model", tps: false }),
@@ -114,7 +114,7 @@ describe("goodies feature toggles", () => {
     const config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
     expect(config["summary-model"]).toBe("other/session-model");
     expect(config.tps).toBe(false);
-    expect(config["thinking-summaries"]).toBeUndefined();
+    expect(config["thinking-summaries"]).toBe(true);
   });
 
   test("corrupt config logs a failure and falls back to defaults", () => {
@@ -401,31 +401,46 @@ describe("/goodies thinking-summaries handler", () => {
     __setConfigPathForTesting(thinkingConfigPath);
   });
 
-  test("on/off is session-only; default is off", async () => {
-    expect(getThinkingSummariesEnabled()).toBe(false);
+  test("on persists to the config file; off clears it", async () => {
+    expect(getThinkingSummariesEnabled()).toBe(false); // unset = off
     const cmd = registerGoodies();
     const { ctx, notices } = fakeCtx();
 
     await cmd.handler("thinking-summaries on", ctx as never);
     expect(getThinkingSummariesEnabled()).toBe(true);
     expect(notices[0].level).toBe("info");
-    // Session-only: the file never carries the key.
-    if (existsSync(thinkingConfigPath)) {
-      expect(
-        JSON.parse(readFileSync(thinkingConfigPath, "utf-8"))[
-          "thinking-summaries"
-        ],
-      ).toBeUndefined();
-    }
+    // Persisted: the file carries the key.
+    expect(
+      JSON.parse(readFileSync(thinkingConfigPath, "utf-8"))[
+        "thinking-summaries"
+      ],
+    ).toBe(true);
     // No summary model on the scratch config: says so.
     expect(notices[0].msg).toContain("summary-model");
-    expect(notices[0].msg).toContain("this pi run only");
+    expect(notices[0].msg).toContain("persisted");
 
     await cmd.handler("thinking-summaries off", ctx as never);
     expect(getThinkingSummariesEnabled()).toBe(false);
+    expect(
+      JSON.parse(readFileSync(thinkingConfigPath, "utf-8"))[
+        "thinking-summaries"
+      ],
+    ).toBe(false);
   });
 
-  test("a fresh config scope resets to off", async () => {
+  test("the setting survives a restart (persists across sessions)", async () => {
+    // Regression: the flag used to live in a session variable that reset
+    // to off on every pi launch, and the persisted key was actively deleted
+    // on every toggle. It must survive a fresh load of the same config.
+    const cmd = registerGoodies();
+    const { ctx } = fakeCtx();
+    await cmd.handler("thinking-summaries on", ctx as never);
+    expect(getThinkingSummariesEnabled()).toBe(true);
+    __setConfigPathForTesting(thinkingConfigPath); // simulate next pi launch
+    expect(getThinkingSummariesEnabled()).toBe(true);
+  });
+
+  test("a config without the key defaults to off", async () => {
     const cmd = registerGoodies();
     const { ctx } = fakeCtx();
     await cmd.handler("thinking-summaries on", ctx as never);
