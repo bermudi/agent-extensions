@@ -137,10 +137,10 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(reload_pi.classify("idle"), ("reload", None))
         self.assertEqual(reload_pi.classify("done"), ("reload", None))
 
-    def test_working_is_sent_with_a_note(self):
+    def test_working_is_skipped(self):
         action, reason = reload_pi.classify("working")
-        self.assertEqual(action, "reload")
-        self.assertIn("mid-turn", reason)
+        self.assertEqual(action, "skip")
+        self.assertIn("rerun when idle", reason)
 
     def test_blocked_is_never_sent(self):
         action, _ = reload_pi.classify("blocked")
@@ -151,54 +151,7 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(action, "skip")
 
 
-class WaitForSettleTests(unittest.TestCase):
-    """wait_for_settle wraps `herdr agent wait`. The safety-relevant part:
-    only idle/done may count as settled — a pane that hits an approval
-    dialog while waiting must NOT match, or the later send would Enter it.
-    """
-
-    def setUp(self):
-        self._orig = reload_pi.run_cli
-
-    def tearDown(self):
-        reload_pi.run_cli = self._orig
-
-    @staticmethod
-    def fake(rc=0, out="", err=""):
-        calls = []
-
-        def run_cli(args, timeout=None):
-            calls.append((args, timeout))
-            return rc, out, err
-
-        run_cli.calls = calls
-        return run_cli
-
-    def test_settled_only_matches_idle_done(self):
-        fake = self.fake()
-        reload_pi.run_cli = fake
-        ok, _ = reload_pi.wait_for_settle("p1", 7)
-        self.assertTrue(ok)
-        args, timeout = fake.calls[0]
-        untils = [args[i + 1] for i, a in enumerate(args) if a == "--until"]
-        self.assertEqual(untils, ["idle", "done"])  # blocked must not match
-        self.assertEqual(args[args.index("--timeout") + 1], "7000")
-        self.assertGreaterEqual(timeout, 12)  # CLI --timeout plus buffer
-
-    def test_timeout_is_not_ok(self):
-        reload_pi.run_cli = self.fake(rc=1)
-        ok, detail = reload_pi.wait_for_settle("p1", 5)
-        self.assertFalse(ok)
-        self.assertIn("still busy after 5s", detail)
-
-    def test_cli_error_surfaces(self):
-        reload_pi.run_cli = self.fake(rc=2, err="socket gone")
-        ok, detail = reload_pi.wait_for_settle("p1", 5)
-        self.assertFalse(ok)
-        self.assertIn("socket gone", detail)
-
-
-class MainWaitTests(unittest.TestCase):
+class MainFlowTests(unittest.TestCase):
     """End-to-end through main() with a scripted herdr CLI."""
 
     def setUp(self):
@@ -208,7 +161,7 @@ class MainWaitTests(unittest.TestCase):
         reload_pi.run_cli = self._orig
 
     @staticmethod
-    def scripted(wait_rc, calls):
+    def scripted(list_status, calls):
         def run_cli(args, timeout=None):
             calls.append(args)
             if args[:2] == ["agent", "list"]:
@@ -219,7 +172,7 @@ class MainWaitTests(unittest.TestCase):
                                 "agent": "pi",
                                 "pane_id": "p1",
                                 "cwd": "/x/proj",
-                                "agent_status": "working",
+                                "agent_status": list_status,
                                 "workspace_id": "w1",
                                 "tab_id": "t1",
                             }
@@ -227,8 +180,6 @@ class MainWaitTests(unittest.TestCase):
                     }
                 }
                 return 0, json.dumps(payload), ""
-            if args[:2] == ["agent", "wait"]:
-                return wait_rc, "", ""
             if args[:2] == ["agent", "read"]:
                 # valid empty-editor snapshot: two border rules, blank line between
                 return 0, f"banner\n\n{R}\n\n{R}\nstats\n", ""
@@ -244,40 +195,33 @@ class MainWaitTests(unittest.TestCase):
             code = reload_pi.main(argv)
         return code, buf.getvalue()
 
-    def test_busy_pane_wait_timeout_skips_and_fails(self):
+    def test_busy_pane_is_skipped_without_waiting(self):
         calls = []
-        reload_pi.run_cli = self.scripted(wait_rc=1, calls=calls)
+        reload_pi.run_cli = self.scripted("working", calls)
         code, out = self.run_main([])
         self.assertEqual(code, 1)  # nothing reloaded
-        self.assertIn("still busy after 120s", out)
-        self.assertIn("rerun when idle", out)
-        self.assertTrue(any(a[:2] == ["agent", "wait"] for a in calls))
+        self.assertFalse(any(a[:2] == ["agent", "wait"] for a in calls))
         self.assertFalse(any(a[:2] == ["agent", "prompt"] for a in calls))
+        self.assertFalse(any(a[:2] == ["agent", "read"] for a in calls))  # skipped before any checks
+        self.assertIn("rerun when idle", out)
+        self.assertIn("1 busy", out)
 
-    def test_dry_run_reports_wait_without_waiting(self):
+    def test_dry_run_reports_busy_as_skip(self):
         calls = []
-        reload_pi.run_cli = self.scripted(wait_rc=1, calls=calls)
+        reload_pi.run_cli = self.scripted("working", calls)
         code, out = self.run_main(["--dry-run"])
-        self.assertEqual(code, 0)  # would send to the busy pane
-        self.assertIn("would wait for settle", out)
+        self.assertEqual(code, 1)  # nothing would be sent
+        self.assertIn("skipped", out)
+        self.assertIn("would send /reload to 0 of 1", out)
         self.assertFalse(any(a[:2] == ["agent", "wait"] for a in calls))
 
-    def test_no_wait_sends_without_waiting(self):
+    def test_idle_pane_reloads(self):
         calls = []
-        reload_pi.run_cli = self.scripted(wait_rc=1, calls=calls)
-        code, out = self.run_main(["--no-wait"])
-        self.assertEqual(code, 0)  # sent (even though pi will drop it)
-        self.assertIn("reloaded", out)
-        self.assertFalse(any(a[:2] == ["agent", "wait"] for a in calls))
-        self.assertTrue(any(a[:2] == ["agent", "prompt"] for a in calls))
-
-    def test_waited_pane_reloads(self):
-        calls = []
-        reload_pi.run_cli = self.scripted(wait_rc=0, calls=calls)
+        reload_pi.run_cli = self.scripted("idle", calls)
         code, out = self.run_main([])
         self.assertEqual(code, 0)
-        self.assertIn("waited for settle, then reloaded", out)
-        self.assertIn("1 waited for busy panes", out)
+        self.assertIn("reloaded", out)
+        self.assertTrue(any(a[:2] == ["agent", "read"] for a in calls))
         self.assertTrue(any(a[:2] == ["agent", "prompt"] for a in calls))
 
 

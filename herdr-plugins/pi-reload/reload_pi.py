@@ -3,7 +3,7 @@
 
 Invoked by Herdr as the plugin action `pi.reload.reload-all`, or by hand:
 
-    python3 reload_pi.py [--dry-run] [--no-wait] [--wait-timeout SEC]
+    python3 reload_pi.py [--dry-run]
 
 How it works
 ------------
@@ -12,14 +12,9 @@ How it works
 2. pi reports its own lifecycle state to Herdr through the `herdr:pi`
    extension hook, so `agent_status` is authoritative:
        idle / done  -> editor is free: /reload takes effect immediately
-       working      -> typing /reload now would be refused mid-turn with
-                       a warning ("Wait for the current response to
-                       finish before reloading.") and the text dropped,
-                       so by default the plugin WAITS for the turn to
-                       settle (`herdr agent wait --until idle --until
-                       done`, up to --wait-timeout seconds) and then
-                       reloads; --no-wait reverts to send-anyway (pi
-                       warns and drops the text)
+       working      -> pi refuses /reload mid-turn ("Wait for the
+                       current response to finish before reloading.")
+                       and drops the text; skipped — rerun when idle
        blocked      -> pi is showing an approval/question dialog; Enter
                        would CONFIRM the highlighted dialog option, so
                        these panes are never typed into; skipped
@@ -134,9 +129,7 @@ def classify(status):
     if status in ("idle", "done"):
         return "reload", None
     if status == "working":
-        # bermudi's call: send anyway. pi warns ("Wait for the current
-        # response to finish before reloading.") and drops the text.
-        return "reload", "mid-turn — pi will warn and drop it; rerun when idle"
+        return "skip", "busy (mid-turn) — pi would drop /reload; rerun when idle"
     if status == "blocked":
         return "skip", "blocked — approval dialog open, not touched (Enter would confirm it)"
     return "skip", f"unknown state ({status}) — cannot rule out a dialog; not touched"
@@ -210,25 +203,6 @@ def current_status(pane_id):
     return status, None
 
 
-def wait_for_settle(pane_id, timeout_s):
-    """Block until a working pane settles. Returns (ok, detail).
-
-    Safety-relevant detail: only idle/done count as settled. A pane that
-    hits an approval dialog while we wait must NOT match — the send path
-    types Enter, and Enter confirms dialogs. `herdr agent wait` without
-    --until would match blocked too, hence the explicit --until flags.
-    """
-    rc, stdout, stderr = run_cli(
-        ["agent", "wait", pane_id, "--until", "idle", "--until", "done",
-         "--timeout", str(timeout_s * 1000)],
-        timeout=timeout_s + 5,  # CLI enforces its own --timeout; add buffer
-    )
-    if rc == 0:
-        return True, "settled"
-    detail = (stderr.strip() or stdout.strip())[:120]
-    return False, f"still busy after {timeout_s}s" + (f" ({detail})" if detail else "")
-
-
 def reload_one(pane_id):
     """Submit /reload to one pi instance. Returns (ok, detail)."""
     rc, stdout, stderr = run_cli(["agent", "prompt", pane_id, "/reload"])
@@ -300,18 +274,6 @@ def main(argv=None):
         action="store_true",
         help="show what would be sent, change nothing",
     )
-    parser.add_argument(
-        "--no-wait",
-        action="store_true",
-        help="don't wait for busy panes; send anyway (pi warns and drops the command)",
-    )
-    parser.add_argument(
-        "--wait-timeout",
-        type=int,
-        default=120,
-        metavar="SEC",
-        help="max seconds to wait for a busy pane to settle before giving up (default 120)",
-    )
     args = parser.parse_args(argv)
 
     try:
@@ -329,9 +291,12 @@ def main(argv=None):
     rows = []
     for agent in agents:
         action, reason = classify(agent["status"])
-        rows.append({**agent, "outcome": action, "detail": reason or ""})
+        row = {**agent, "outcome": action, "detail": reason or ""}
+        if action == "skip":
+            row["skip_kind"] = "busy" if agent["status"] == "working" else "status"
+        rows.append(row)
 
-    # Per-pane work (wait -> draft guard -> status re-check -> prompt) runs
+    # Per-pane work (draft guard -> status re-check -> prompt) runs
     # in a thread pool: each pane keeps its own strict ordering, while the
     # panes run concurrently. Two reasons this matters:
     # - herdr's `agent prompt` deliberately sleeps ~300ms between typing the
@@ -342,29 +307,6 @@ def main(argv=None):
     #   up front for all panes would be seconds stale by the time the last
     #   pane is reached.
     def process_row(row):
-        if row["status"] == "working":
-            if args.dry_run:
-                row["detail"] = (
-                    f"mid-turn — would wait for settle (up to {args.wait_timeout}s) then reload"
-                    if not args.no_wait
-                    else "mid-turn — pi will warn and drop it; rerun when idle"
-                )
-                return
-            if not args.no_wait:
-                # pi refuses /reload mid-turn and drops the text, so make
-                # the "jiffy" explicit: wait for the turn to end, then fall
-                # through to the normal guards and send.
-                ok_wait, wait_detail = wait_for_settle(row["pane_id"], args.wait_timeout)
-                if not ok_wait:
-                    row["outcome"] = "skip"
-                    row["skip_kind"] = "wait"
-                    row["detail"] = f"{wait_detail} — rerun when idle"
-                    return
-                row["waited"] = True
-                row["detail"] = "mid-turn — waited for settle, then reloaded"
-            else:
-                # Send-anyway escape hatch: pi warns and drops the text.
-                row["detail"] = "mid-turn — pi will warn and drop it; rerun when idle"
         # Draft guard: typing into a pane whose input box has content
         # would append to the draft and Enter would submit it.
         try:
@@ -390,19 +332,15 @@ def main(argv=None):
             status, err = current_status(row["pane_id"])
         except RuntimeError as exc:
             status, err = None, str(exc)
-        if status not in ("idle", "done", "working"):
+        if status not in ("idle", "done"):
             row["outcome"] = "skip"
-            row["skip_kind"] = "status"
-            shown = status or "unreadable"
-            row["detail"] = f"status now {shown}" + (f" ({err})" if err else "") + " — not touched"
-            return
-        row["status_now"] = status
-        if row.get("waited") and status == "working":
-            # The turn we waited on ended, but a NEW turn started in the
-            # gap before the send; same refusal would apply.
-            row["outcome"] = "skip"
-            row["skip_kind"] = "status"
-            row["detail"] = "settled, but busy again before the send — rerun when idle"
+            row["skip_kind"] = "busy" if status == "working" else "status"
+            if status == "working":
+                # Turn started in the gap between the listing and the send.
+                row["detail"] = "busy before the send — rerun when idle"
+            else:
+                shown = status or "unreadable"
+                row["detail"] = f"status now {shown}" + (f" ({err})" if err else "") + " — not touched"
             return
         if args.dry_run:
             return  # checks passed; would send
@@ -436,19 +374,13 @@ def main(argv=None):
     skipped = [r for r in rows if r["outcome"] == "skip"]
     editor_skips = [r for r in skipped if r.get("skip_kind") == "editor"]
     unreadable = [r for r in skipped if r.get("skip_kind") == "editor-unreadable"]
-    status_skips = [r for r in skipped if r.get("skip_kind") not in ("editor", "editor-unreadable", "wait")]
-    wait_skips = [r for r in skipped if r.get("skip_kind") == "wait"]
-    waited = [r for r in reloaded if r.get("waited")]
-    dropped = [r for r in reloaded if not r.get("waited") and r.get("status_now", r["status"]) == "working"]
+    busy_skips = [r for r in skipped if r.get("skip_kind") == "busy"]
+    status_skips = [r for r in skipped if r.get("skip_kind") == "status"]
     total = len(rows)
 
     summary = f"sent /reload to {len(reloaded)}/{total} pi instances"
-    if waited:
-        summary += f", {len(waited)} waited for busy panes"
-    if dropped:
-        summary += f", {len(dropped)} mid-turn (pi will drop them)"
-    if wait_skips:
-        summary += f", {len(wait_skips)} still busy"
+    if busy_skips:
+        summary += f", {len(busy_skips)} busy"
     if editor_skips:
         summary += f", {len(editor_skips)} had draft text"
     if unreadable:

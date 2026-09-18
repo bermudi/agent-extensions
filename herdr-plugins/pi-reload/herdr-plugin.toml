@@ -1,6 +1,6 @@
 id = "pi.reload"
 name = "Pi Reload"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.8.0"
 description = "Send /reload to every idle pi instance in this Herdr session"
 platforms = ["linux", "macos"]
@@ -8,6 +8,6 @@ platforms = ["linux", "macos"]
 [[actions]]
 id = "reload-all"
 title = "Reload all pi instances"
-description = "Send /reload to every pi coding agent in this session; waits out busy panes, and skips panes at an approval dialog, of unknown state, or with a draft in the input box"
+description = "Send /reload to every idle pi coding agent in this session; skips busy panes, panes at an approval dialog or of unknown state, and panes with a draft in the input box"
 contexts = ["global"]
 command = ["python3", "reload_pi.py"]

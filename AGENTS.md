@@ -32,7 +32,7 @@ pi-packages/
                          #   published, not installed anywhere; own tests (58, run green).
 herdr-plugins/           # Herdr plugins (python3, stdlib-only), linked via `herdr plugin link`
   pane-layouts/           # ACTIVE: apply pane layouts (columns/rows/quad/main+stack) from a popup picker
-  pi-reload/              # ACTIVE: send /reload to every pi instance in the session (waits out busy panes by default; never types into blocked/draft panes)
+  pi-reload/              # ACTIVE: send /reload to every pi instance in the session (skips busy/blocked/draft panes)
 ```
 
 ## Herdr plugins
@@ -58,8 +58,10 @@ approval dialog. Never send input to `blocked` or `unknown` panes.
 the current response to finish before reloading.") and drops the text —
 verified live and in pi 0.85.1 source (built-in commands are dispatched by
 the TUI before the steer/followUp queue; only ordinary messages queue). So
-pi-reload waits busy panes out by default (`agent wait --until idle --until
-done`, then reloads; --no-wait sends anyway). pi's status is authoritative —
+pi-reload skips busy panes outright — typing /reload mid-turn just gets
+dropped, and waiting them out delayed the whole action for up to 2 minutes
+per pane (wait behavior removed in 0.2.0; recoverable at commit d452e7c).
+pi's status is authoritative —
 it self-reports
 via the `herdr:pi` hook (`~/.pi/agent/extensions/herdr-agent-state.ts`).
 pi-reload also skips panes with a draft in the input box: detected from
