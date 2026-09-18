@@ -44,11 +44,12 @@ import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
-import type {
-  Api,
-  AssistantMessage,
-  Model,
-  ThinkingLevel,
+import {
+  clampThinkingLevel,
+  type Api,
+  type AssistantMessage,
+  type Model,
+  type ThinkingLevel,
 } from "@earendil-works/pi-ai";
 import { logGoodiesEvent, setGoodiesLogPathForTesting } from "./goodies-log.ts";
 import { describeError } from "./json-file.ts";
@@ -791,21 +792,29 @@ function activeBackend(): SummaryBackend {
   );
 }
 
-// Lowest-effort reasoning, but only where silence is broken: on OpenAI-
-// compatible endpoints a reasoning model with no mapped "off" (Groq's
-// gpt-oss maps off and minimal to null) runs its API-default effort when no
-// reasoning parameter is sent — medium for gpt-oss — which burns the shared
-// completion budget and returns an empty answer. "minimal" clamps to the
-// model's lowest supported level ("low" for gpt-oss). Everything else keeps
-// the absent option: non-reasoning models clamp to "off" (no parameter),
-// models whose catalog maps "off" to a concrete value already disable
-// thinking when nothing is sent, and non-OpenAI adapters enable thinking on
-// truthy values (see the retired no-reasoning note in git history).
+// Lowest-effort reasoning, but only where silence is broken — and always the
+// model's OWN declared capability, never a hardcoded guess:
+//
+//  - Non-reasoning models, non-OpenAI adapters (a truthy effort ENABLES
+//    thinking there), and models whose map gives "off" a concrete wire
+//    value: send nothing. The adapter emits the declared off value itself.
+//  - Models with a capability map: request "minimal". completeSimple clamps
+//    against the map before anything reaches the wire (pi-ai streamSimple),
+//    so the model only ever sees a level it declares, translated to its own
+//    dialect word — whether the catalog says low..max, only off+high, or
+//    maps minimal to something else entirely.
+//  - Map-less models (routers: kilo-auto/free, openrouter/*): there is no
+//    translation layer, so the raw word must be one gateways actually
+//    document. "minimal" is not — OpenRouter-style wires silently drop it
+//    and the random upstream runs its DEFAULT effort, which is exactly the
+//    reasoning-eats-the-budget failure. Send the documented floor "low";
+//    the raised-cap retry absorbs upstreams that ignore even that.
 function summaryReasoning(model: Model<Api>): ThinkingLevel | undefined {
   if (model.api !== "openai-completions" && model.api !== "openai-responses")
     return undefined;
   if (!model.reasoning) return undefined;
   if (typeof model.thinkingLevelMap?.off === "string") return undefined;
+  if (model.thinkingLevelMap === undefined) return "low";
   return "minimal";
 }
 
@@ -824,15 +833,16 @@ function summaryReasoning(model: Model<Api>): ThinkingLevel | undefined {
  * Retry 2 — reasoning budget: a response with no answer text whose budget
  * went to thinking (thinking blocks present, or a length cutoff) gets one
  * second chance at a raised cap. This is the router case (kilo-auto/free):
- * each request may land on a different free upstream, and thinking ones may
- * ignore the effort hint entirely — effort "minimal" is not even a documented
- * OpenRouter reasoning.effort value, so the only reliable lever left is
- * headroom. The retry upgrades the effort to "low" (valid everywhere that
- * accepts an effort at all) — except where summaryReasoning sent none, since
- * for non-OpenAI adapters a truthy effort ENABLES thinking. Still empty after
- * this lands as the raised-budget diagnosis in convertSummaryResponse; the
- * outer timeout still bounds the whole turn, so a slow retry degrades to the
- * ordinary retryable-timeout path.
+ * each request lands on a random pool upstream (DeepSeek, Nemotron, Qwen,
+ * ...) that may ignore the effort hint entirely — no dialect word controls
+ * another vendor's thinking. The retry clamps the effort to the model's
+ * declared floor (never an undeclared word) and raises the cap — the cap is
+ * the lever that works regardless of dialect. Models where summaryReasoning
+ * sent no effort keep it absent: for non-OpenAI adapters a truthy effort
+ * ENABLES thinking. Still empty after this lands as the raised-budget
+ * diagnosis in convertSummaryResponse; the outer timeout still bounds the
+ * whole turn, so a slow retry degrades to the ordinary retryable-timeout
+ * path.
  */
 async function completeSummaryTurn(
   t: Awaited<ReturnType<typeof resolveSummaryTransport>>,
@@ -861,12 +871,22 @@ async function completeSummaryTurn(
     response = await completeSimple(t.model, context, options("low"));
   }
   if (reasoningAteBudget(response)) {
-    logGoodiesEvent({ type: "summary_reasoning_retry", model: t.label });
+    logGoodiesEvent({
+      type: "summary_reasoning_retry",
+      model: t.label,
+      // The upstream a router actually picked — the response's own model
+      // field is the only way to know who ate the budget.
+      ...(response.responseModel
+        ? { responseModel: response.responseModel }
+        : {}),
+    });
     response = await completeSimple(
       t.model,
       context,
       options(
-        firstEffort === undefined ? undefined : "low",
+        firstEffort === undefined
+          ? undefined
+          : (clampThinkingLevel(t.model, "low") as ThinkingLevel),
         SUMMARY_REASONING_RETRY_MAX_TOKENS,
       ),
     );

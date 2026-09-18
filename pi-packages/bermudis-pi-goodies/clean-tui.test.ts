@@ -1835,7 +1835,18 @@ describe("clean-tui AI summary", () => {
       api: "openai-completions",
       provider: "commandcode",
       baseUrl: "https://mock.local/v1",
-      reasoning: true, // no thinkingLevelMap.off: summaryReasoning sends "minimal"
+      reasoning: true,
+      // Declares its levels, minimal included — the summary request asks
+      // for minimal, and this endpoint's enum rejects it. (Map-less models
+      // never send minimal anymore: the dialect rule pins them to "low".)
+      thinkingLevelMap: {
+        minimal: "minimal",
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      },
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 8000,
@@ -1901,7 +1912,9 @@ describe("clean-tui AI summary", () => {
           : { content: "Parses the command line tokens" };
       const finish = calls === 1 ? "length" : "stop";
       const sse = [
-        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant" } }] })}`,
+        // "model": the router reports which upstream it picked — pi-ai
+        // captures it as responseModel.
+        `data: ${JSON.stringify({ model: "deepseek-v4-flash:free", choices: [{ index: 0, delta: { role: "assistant" } }] })}`,
         `data: ${JSON.stringify({ choices: [{ index: 0, delta }] })}`,
         `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: finish }] })}`,
         "data: [DONE]",
@@ -1953,22 +1966,28 @@ describe("clean-tui AI summary", () => {
     row.setArgs({ command: heredoc });
     await new Promise((r) => setTimeout(r, 60));
     expect(calls).toBe(2);
-    // First attempt: lean cap, goodies' lowest effort. Retry: raised cap,
-    // and the effort upgraded to the enum floor every gateway documents.
-    expect(bodies[0].reasoning).toEqual({ effort: "minimal" });
+    // Both attempts speak the documented floor word — map-less models get
+    // no dialect guess, the cap is what differs. "minimal" would be an
+    // undocumented value on an OpenRouter-style wire, silently dropped,
+    // and the upstream would run default effort (the bug).
+    expect(bodies[0].reasoning).toEqual({ effort: "low" });
     expect(bodies[0].max_completion_tokens).toBe(512);
     expect(bodies[1].reasoning).toEqual({ effort: "low" });
     expect(bodies[1].max_completion_tokens).toBe(4096);
     expect(textOf(row.lastCallComponent)).toContain(
       "Parses the command line tokens",
     );
-    // Signal trail: the retry is visible even on the success path.
+    // Signal trail: the retry is visible even on the success path, with
+    // the upstream the router actually picked.
     const events = readFileSync(logPath, "utf-8")
       .trim()
       .split("\n")
       .map((l) => JSON.parse(l) as Record<string, unknown>);
     expect(events.filter((e) => e.type === "summary_reasoning_retry")).toEqual([
-      expect.objectContaining({ model: "kilo/kilo-auto/free" }),
+      expect.objectContaining({
+        model: "kilo/kilo-auto/free",
+        responseModel: "deepseek-v4-flash:free",
+      }),
     ]);
     const summaryEvents = events.filter((e) => e.type === "summary_request");
     expect(summaryEvents).toHaveLength(1);
@@ -1993,7 +2012,7 @@ describe("clean-tui AI summary", () => {
       calls++;
       void init;
       const sse = [
-        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant" } }] })}`,
+        `data: ${JSON.stringify({ model: "nemotron-3-nano-omni-reasoning", choices: [{ index: 0, delta: { role: "assistant" } }] })}`,
         `data: ${JSON.stringify({
           choices: [
             {
@@ -2064,6 +2083,9 @@ describe("clean-tui AI summary", () => {
     expect(
       events.filter((e) => e.type === "summary_reasoning_retry"),
     ).toHaveLength(1);
+    expect(
+      events.find((e) => e.type === "summary_reasoning_retry")?.responseModel,
+    ).toBe("nemotron-3-nano-omni-reasoning");
     const summaryEvents = events.filter((e) => e.type === "summary_request");
     expect(summaryEvents).toHaveLength(1);
     expect(summaryEvents[0].outcome).toBe("failed");
