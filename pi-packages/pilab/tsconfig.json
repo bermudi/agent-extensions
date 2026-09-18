@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "lib": ["ESNext"],
+    "types": ["bun"]
+  },
+  "include": ["./pilab.ts"],
+  "exclude": ["node_modules", "pilab.test.ts", "dist"]
+}

@@ -24,6 +24,13 @@ pi-packages/
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
   ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
   pi-harness/             # ACTIVE (dev-only): test harness for TUI extensions; faithful ToolExecutionComponent render semantics
+  pilab/                  # ACTIVE (standalone, not a pi extension): sandboxed pi launcher. Named sandboxes in
+                         # ~/.pi/sandboxes/<name>/ run via PI_CODING_AGENT_DIR, so test providers/extensions/system
+                         # prompts never touch the real config. Borrows from ~/.pi/agent are symlinks (auth.json is
+                         # LIVE-linked on purpose — pi rewrites it on OAuth refresh); settings.json is an allowlist
+                         # copy that never carries packages/extensions/skills/prompts. Tests use PILAB_ROOT +
+                         # PILAB_REAL_AGENT_DIR temp dirs; Bun.which reads the process-start env snapshot, hence the
+                         # whichLive() PATH scan (don't "simplify" it back to Bun.which).
   session-summarizer/     # INACTIVE (source kept; not linked in .pi/extensions — verify install state before claiming it runs)
   zen-relay/              # ACTIVE (standalone, not a pi extension): all-local multi-IP relay for OpenCode Zen. Per-gateway SSH SOCKS tunnels + one local relay; pi uses it via models.json baseUrl override.
   experiments/            # ARCHIVE — unused/exploratory. Not typechecked, not in default test run.
