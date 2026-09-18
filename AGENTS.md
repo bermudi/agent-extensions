@@ -126,16 +126,11 @@ Both are auto-discovered by pi at session start. Symlink source files into the d
 Files in `~/.pi/agent/extensions/` that are *not* symlinked from this repo are bermudi's local
 infrastructure. Never move them into `pi-packages/`, publish them, or delete them.
 
-- **`1min-provider.ts`** — registers bermudi's personal "1min" OpenAI-compatible proxy
-  (`https://1min-proxy.bermudi.deno.net/v1`) as a pi provider via
-  `pi.registerProvider`, so it appears in `/models` and resolves through the normal registry.
-  The model list (85 entries) mirrors the proxy's `GET /v1/models` plus the qwen3.6/3.7
-  entries from docs.1min.ai the proxy hadn't picked up yet; context/output caps are
-  per-family approximations.
-  Consumed by clean-tui's smart summaries: `/goodies summary-model 1min/grok-4-fast-non-reasoning`.
-  Key resolution mirrors the pre-0.12.0 goodies behavior: `ONEMIN_API_KEY` env wins, otherwise the
-  file `~/.pi/agent/ONEMIN_API_KEY`; missing both logs a load-time warning. The key value itself is
-  never logged and must never enter agent context (RED LINE) — the extension reads it at runtime.
+- ~~`1min-provider.ts`~~ — removed 2026-09-18 at bermudi's request (the whole 1min
+  proxy provider is gone; pi packages 0.23.5 have no 1min-specific code — the summary
+  machinery is provider-agnostic). Leftovers, inert unless 1min returns: the Pass field
+  `ONEMIN_API_KEY` in item "pi provider keys", the pi-keys tmpfs cache file, and the
+  `extraNames` entry in the pass-keys pi profile.
 
 ## Releasing bermudis-pi-goodies
 
