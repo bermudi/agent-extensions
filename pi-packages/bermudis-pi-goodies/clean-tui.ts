@@ -761,6 +761,11 @@ const PROVIDER_STATUS_WORDS: Record<number, string> = {
 // line so the model label isn't always the part that gets cut.
 const PROVIDER_ERROR_DETAIL_CAP = 120;
 const PROVIDER_ERROR_JOINED_CAP = 160;
+// Wrapper phrases gateways put around the upstream error — zero information
+// (we know it's an error; that's why this code is running) and they waste
+// the widget's 80-char window that the actual reason needs.
+const PROVIDER_ERROR_NOISE_RE =
+  /^(?:provider returned (?:an )?error|an error occurred|request failed|error)\.?$/i;
 
 /**
  * Collect the human-readable sentences from a parsed provider error body,
@@ -833,6 +838,22 @@ function collectProviderErrorStrings(
  * JSON; returns the input (compacted) when there's no status prefix.
  */
 export function humanizeProviderError(errorMessage: string): string {
+  // pi's `!cmd` apiKey refs fail as "Failed to resolve API key for provider
+  // \"X\" from shell command: <cmd>" — the useful part is the tail (which
+  // command/file), the head is boilerplate the 80-char widget window
+  // otherwise eats.
+  const authMatch =
+    /^Failed to resolve API key for provider "([^"]+)" from shell command: (.+)$/s.exec(
+      errorMessage,
+    );
+  if (authMatch !== null) {
+    const [, provider, command] = authMatch;
+    const cmd =
+      command.length > PROVIDER_ERROR_JOINED_CAP
+        ? `${command.slice(0, PROVIDER_ERROR_JOINED_CAP)}…`
+        : command;
+    return `no API key for ${provider}: ${cmd} failed`;
+  }
   const statusMatch = /^(\d{3}):\s*/.exec(errorMessage);
   const status = statusMatch === null ? undefined : Number(statusMatch[1]);
   const body =
@@ -853,7 +874,12 @@ export function humanizeProviderError(errorMessage: string): string {
       // Not JSON — try the next candidate, then fall back to raw text.
     }
   }
-  let detail = [...new Set(strings)].join(": ");
+  // Drop wrapper noise ("Provider returned error") so the space goes to the
+  // actual upstream reason; if a body is ALL noise, keep it anyway.
+  const informative = strings.filter((s) => !PROVIDER_ERROR_NOISE_RE.test(s));
+  let detail = [
+    ...new Set(informative.length > 0 ? informative : strings),
+  ].join(": ");
   if (detail.length > PROVIDER_ERROR_JOINED_CAP) {
     detail = `${detail.slice(0, PROVIDER_ERROR_JOINED_CAP)}…`;
   }
@@ -1072,7 +1098,10 @@ function logSummaryFailure(
   attempt?: number,
   kind: "bash" | "thinking" = "bash",
 ) {
-  const msg = describeError(err);
+  // Humanize here too: errors that arrive thrown (timeouts, pi auth
+  // resolution) skip convertSummaryResponse's humanizer. Idempotent for
+  // messages that are already humanized.
+  const msg = humanizeProviderError(describeError(err));
   const pause = pauseMs
     ? `; pausing summaries ${Math.round(pauseMs / 1000)}s`
     : "";

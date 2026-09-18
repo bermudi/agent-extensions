@@ -3188,9 +3188,7 @@ describe("convertSummaryResponse — production error conversion", () => {
         { stopReason: "error", errorMessage, content: [] },
         LABEL,
       ),
-    ).toThrow(
-      `429 rate limited — Provider returned error: Insufficient credits (${LABEL})`,
-    );
+    ).toThrow(`429 rate limited — Insufficient credits (${LABEL})`);
   });
 
   test("stopReason 'stop' with text content returns the joined text", () => {
@@ -3330,6 +3328,28 @@ describe("humanizeProviderError — raw bodies to readable lines", () => {
     );
   });
 
+  test("wrapper phrases are dropped so the real reason gets the space", () => {
+    // "Provider returned error" tells the user nothing they don't know —
+    // the widget's 80-char window belongs to the upstream reason.
+    const errorMessage =
+      '429: {"message":"Provider returned error","code":429,"metadata":{"raw":"{\\"error\\":\\"Insufficient credits\\"}"}}';
+    expect(humanizeProviderError(errorMessage)).toBe(
+      "429 rate limited — Insufficient credits",
+    );
+  });
+
+  test("an all-noise body still renders (never blank)", () => {
+    // Filtered candidates fall back to the unfiltered set...
+    expect(humanizeProviderError('503: {"message":"request failed"}')).toBe(
+      "503 service unavailable — request failed",
+    );
+    // ...and a body with no sentence-like string at all falls back to the
+    // compacted raw text (single-word fields are skipped by the collector).
+    expect(humanizeProviderError('500: {"message":"error"}')).toBe(
+      '500 server error — {"message":"error"}',
+    );
+  });
+
   test("plain non-JSON 502 body falls back to compacted text", () => {
     expect(humanizeProviderError("502: upstream_error")).toBe(
       "502 bad gateway — upstream_error",
@@ -3358,6 +3378,19 @@ describe("humanizeProviderError — raw bodies to readable lines", () => {
     ).toBe("Provider finish_reason: content_filter");
     expect(humanizeProviderError("line one\nline two")).toBe(
       "line one line two",
+    );
+  });
+
+  test("pi apiKey-ref auth failure: boilerplate head dropped, command kept", () => {
+    // Regression: the path to the missing key file was cut off at
+    // `cat /run/user/…` by the widget's 80-char window; the useful tail
+    // must now fit.
+    expect(
+      humanizeProviderError(
+        'Failed to resolve API key for provider "1min" from shell command: cat /run/user/1000/pi-keys/ONEMIN_API_KEY',
+      ),
+    ).toBe(
+      "no API key for 1min: cat /run/user/1000/pi-keys/ONEMIN_API_KEY failed",
     );
   });
 
