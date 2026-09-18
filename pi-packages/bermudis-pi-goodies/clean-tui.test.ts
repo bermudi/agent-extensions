@@ -16,6 +16,7 @@ import cleanTui, {
   __setSummaryUiForTesting,
   __setThinkingThresholdsForTesting,
   convertSummaryResponse,
+  humanizeProviderError,
   setCleanTuiActive,
 } from "./clean-tui";
 import vision, {
@@ -3156,7 +3157,10 @@ describe("convertSummaryResponse — production error conversion", () => {
     ).toThrow(`request failed (${LABEL})`);
   });
 
-  test("errorMessage is truncated to SUMMARY_ERROR_SNIPPET_CHARS (200)", () => {
+  test("long non-JSON errorMessage is compacted and capped, label intact", () => {
+    // No status prefix, no JSON, no sentences — the raw text is compacted
+    // (whitespace collapsed) and capped at PROVIDER_ERROR_JOINED_CAP (160)
+    // before the label suffix, so the whole message stays bounded.
     const longMsg = "X".repeat(500);
     try {
       convertSummaryResponse(
@@ -3166,11 +3170,27 @@ describe("convertSummaryResponse — production error conversion", () => {
       throw new Error("should have thrown");
     } catch (err) {
       const msg = (err as Error).message;
-      // The error body is truncated to 200 chars before the label suffix.
       const body = msg.slice(0, msg.indexOf(` (${LABEL})`));
-      expect(body.length).toBe(200);
-      expect(body).toBe("X".repeat(200));
+      expect(body.length).toBe(160);
+      expect(body).toBe("X".repeat(160));
     }
+  });
+
+  test("a raw provider 429 body is humanized, not dumped as JSON", () => {
+    // Regression: the 1min proxy's real 429 body rendered as
+    // `429: {"message":"Provider returned error","code":429,"metadata":
+    // {"raw":"{\"code\…` in the pause widget — escaped, truncated, useless.
+    // The humanizer unwraps the nested JSON and names the failure class.
+    const errorMessage =
+      '429: {"message":"Provider returned error","code":429,"metadata":{"raw":"{\\"code\\":429,\\"error\\":\\"Insufficient credits\\"}"}}';
+    expect(() =>
+      convertSummaryResponse(
+        { stopReason: "error", errorMessage, content: [] },
+        LABEL,
+      ),
+    ).toThrow(
+      `429 rate limited — Provider returned error: Insufficient credits (${LABEL})`,
+    );
   });
 
   test("stopReason 'stop' with text content returns the joined text", () => {
@@ -3298,6 +3318,55 @@ describe("convertSummaryResponse — production error conversion", () => {
         LABEL,
       ),
     ).toBe("Cleans the build");
+  });
+});
+
+describe("humanizeProviderError — raw bodies to readable lines", () => {
+  test("OpenAI-shape 400: message survives, enum/param noise is dropped", () => {
+    const errorMessage =
+      '400: {"error":{"message":"Invalid option: expected one of \\"low\\"|\\"medium\\"|\\"high\\"","type":"invalid_request_error","param":"reasoning_effort"}}';
+    expect(humanizeProviderError(errorMessage)).toBe(
+      '400 bad request — Invalid option: expected one of "low"|"medium"|"high"',
+    );
+  });
+
+  test("plain non-JSON 502 body falls back to compacted text", () => {
+    expect(humanizeProviderError("502: upstream_error")).toBe(
+      "502 bad gateway — upstream_error",
+    );
+  });
+
+  test("appended metadata line does not break the body parse", () => {
+    // openai-completions.js appends a second line of raw metadata after the
+    // body when the body is not already contained in the message.
+    const errorMessage = '500: {"error":"upstream exploded"}\n{"retry":true}';
+    expect(humanizeProviderError(errorMessage)).toBe(
+      "500 server error — upstream exploded",
+    );
+  });
+
+  test("unknown status gets a neutral name; no detail stays clean", () => {
+    expect(humanizeProviderError("529: overloaded")).toBe(
+      "HTTP 529 — overloaded",
+    );
+    expect(humanizeProviderError("529: ")).toBe("HTTP 529");
+  });
+
+  test("no status prefix: the message passes through compacted", () => {
+    expect(
+      humanizeProviderError("Provider finish_reason: content_filter"),
+    ).toBe("Provider finish_reason: content_filter");
+    expect(humanizeProviderError("line one\nline two")).toBe(
+      "line one line two",
+    );
+  });
+
+  test("retry classification still sees 5xx status digits after humanizing", () => {
+    // isRetryableSummaryError matches \b5\d\d\b on the thrown message; the
+    // humanized form must keep the status code.
+    expect(humanizeProviderError('503: {"message":"paused"}')).toMatch(
+      /\b503\b/,
+    );
   });
 });
 

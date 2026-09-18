@@ -444,8 +444,9 @@ const THINKING_SUMMARY_PROMPT =
   "A coding agent is mid-reasoning about a task. Summarize what it is currently thinking about in less than 15 words, plain English, no quotes, no formatting. " +
   "Start with the word 'Thinking', e.g. 'Thinking through opcode cycles' or 'Thinking about render rules'. " +
   "Never start with an action verb like Writing or Implementing — it is only thinking, not doing.\nRecent thinking:\n";
-// Provider error bodies are not under our control and flow into console
-// output plus the log-once dedup set; keep both bounded.
+// Provider error bodies are not under our control; the humanizer bounds the
+// detail it extracts, and this caps the composed line before the model label
+// is appended — belt and braces for the log-once dedup set.
 const SUMMARY_ERROR_SNIPPET_CHARS = 200;
 
 const summaryCache = new Map<string, string>();
@@ -733,6 +734,143 @@ function reasoningAteBudget(response: {
   );
 }
 
+// ── Provider error humanizer ────────────────────────────────────
+//
+// pi-ai surfaces provider failures as `"<status>: <raw body>"` — the body
+// being whatever JSON the endpoint felt like returning, up to 4000 chars,
+// sometimes with a second metadata line appended. Slicing that for the
+// widget produced gems like `429: {"message":"Provider returned
+// error","code":429,"metadata":{"raw":"{\"code\…` — escaped, truncated
+// mid-token, and useless. These helpers dig the actual sentences out.
+
+// Plain-English names for the statuses summaries actually hit.
+const PROVIDER_STATUS_WORDS: Record<number, string> = {
+  400: "bad request",
+  401: "auth failed",
+  403: "forbidden",
+  404: "not found",
+  408: "timeout",
+  413: "payload too large",
+  429: "rate limited",
+  500: "server error",
+  502: "bad gateway",
+  503: "service unavailable",
+  504: "gateway timeout",
+};
+// Longest single sentence kept; longest joined detail. Bounds the widget
+// line so the model label isn't always the part that gets cut.
+const PROVIDER_ERROR_DETAIL_CAP = 120;
+const PROVIDER_ERROR_JOINED_CAP = 160;
+
+/**
+ * Collect the human-readable sentences from a parsed provider error body,
+ * most-general-first. Gateways commonly wrap the upstream error
+ * ("Provider returned error" outside, the real reason encoded as a JSON
+ * string inside `metadata.raw`), so JSON-looking strings are unwrapped and
+ * recursed. Strings without spaces are skipped as enum-ish tokens
+ * ("invalid_request_error", "rate_limit") — they repeat what the message
+ * already said. Bounded: 3 strings, depth 4, each length-capped.
+ */
+function collectProviderErrorStrings(
+  value: unknown,
+  out: string[] = [],
+  depth = 0,
+): string[] {
+  if (out.length >= 3 || depth > 4) return out;
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return out;
+    if (s.startsWith("{") || s.startsWith("[")) {
+      try {
+        return collectProviderErrorStrings(JSON.parse(s), out, depth + 1);
+      } catch {
+        // Not JSON after all — treat as a plain string below.
+      }
+    }
+    if (s.includes(" ")) {
+      out.push(
+        s.length > PROVIDER_ERROR_DETAIL_CAP
+          ? `${s.slice(0, PROVIDER_ERROR_DETAIL_CAP)}…`
+          : s,
+      );
+    }
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectProviderErrorStrings(item, out, depth + 1);
+      if (out.length >= 3) break;
+    }
+    return out;
+  }
+  if (typeof value === "object" && value !== null) {
+    const obj = value as Record<string, unknown>;
+    // Preferred keys first so the joined detail leads with the real
+    // message, not whatever random field iteration finds first.
+    const preferred = ["message", "error", "detail", "reason", "error_message"];
+    const visited = new Set<string>();
+    for (const key of preferred) {
+      if (key in obj) {
+        visited.add(key);
+        collectProviderErrorStrings(obj[key], out, depth + 1);
+        if (out.length >= 3) return out;
+      }
+    }
+    for (const [key, v] of Object.entries(obj)) {
+      if (visited.has(key) || ["code", "status", "type", "param"].includes(key))
+        continue;
+      collectProviderErrorStrings(v, out, depth + 1);
+      if (out.length >= 3) return out;
+    }
+  }
+  return out;
+}
+
+/**
+ * Turn pi-ai's `"<status>: <body>"` provider error string into one bounded,
+ * readable line: `429 rate limited — Provider returned error: quota
+ * exceeded`. Falls back to the whitespace-compacted body when it isn't
+ * JSON; returns the input (compacted) when there's no status prefix.
+ */
+export function humanizeProviderError(errorMessage: string): string {
+  const statusMatch = /^(\d{3}):\s*/.exec(errorMessage);
+  const status = statusMatch === null ? undefined : Number(statusMatch[1]);
+  const body =
+    statusMatch === null
+      ? errorMessage
+      : errorMessage.slice(statusMatch[0].length);
+  // formatProviderError composes the body alone, but callers may have
+  // appended a second metadata line after it — parse the first line first,
+  // then the whole body as a fallback.
+  let strings: string[] = [];
+  for (const candidate of [body.split("\n", 1)[0], body]) {
+    const text = candidate.trim();
+    if (!text) continue;
+    try {
+      strings = collectProviderErrorStrings(JSON.parse(text));
+      break;
+    } catch {
+      // Not JSON — try the next candidate, then fall back to raw text.
+    }
+  }
+  let detail = [...new Set(strings)].join(": ");
+  if (detail.length > PROVIDER_ERROR_JOINED_CAP) {
+    detail = `${detail.slice(0, PROVIDER_ERROR_JOINED_CAP)}…`;
+  }
+  if (!detail) {
+    // Non-JSON (or JSON with no sentences): keep the body, compacted, so a
+    // multi-line body still renders as one widget line.
+    detail = body
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, PROVIDER_ERROR_JOINED_CAP);
+  }
+  if (status === undefined) return detail || errorMessage;
+  const word = PROVIDER_STATUS_WORDS[status];
+  const head = word === undefined ? `HTTP ${status}` : `${status} ${word}`;
+  return detail ? `${head} — ${detail}` : head;
+}
+
 /**
  * Convert a pi-ai completion response into a summary string or throw the
  * error shape the shared backoff/log/widget path expects. Extracted from
@@ -742,7 +880,7 @@ function reasoningAteBudget(response: {
  * wire layer.
  *
  * - "aborted" → AbortError (per-request abort, not a provider failure)
- * - "error"   → Error with the provider's errorMessage (truncated) + label
+ * - "error"   → Error with the provider's errorMessage (humanized) + label
  * - empty text after reasoning activity → Error naming the eaten budget
  *   (completeSummaryTurn has already retried at a raised cap by this point)
  * - empty text without reasoning activity → the generic thinking-model
@@ -762,10 +900,14 @@ export function convertSummaryResponse(
     err.name = "AbortError";
     throw err;
   }
-  if (response.stopReason === "error")
+  if (response.stopReason === "error") {
+    const raw = response.errorMessage;
+    const detail =
+      raw === undefined ? "request failed" : humanizeProviderError(raw);
     throw new Error(
-      `${(response.errorMessage ?? "request failed").slice(0, SUMMARY_ERROR_SNIPPET_CHARS)} (${label})`,
+      `${detail.slice(0, SUMMARY_ERROR_SNIPPET_CHARS)} (${label})`,
     );
+  }
   const text = response.content
     .filter((c): c is { type: "text"; text: string } => c.type === "text")
     .map((c) => c.text)
