@@ -56,7 +56,6 @@
  *   PILAB_REAL_AGENT_DIR real agent dir override (default ~/.pi/agent)
  *   EDITOR / VISUAL      used by `pilab edit`
  */
-import { createInterface } from "node:readline/promises";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
@@ -77,7 +76,6 @@ import { basename, join, resolve } from "node:path";
 import { homedir } from "node:os";
 
 export class PilabError extends Error {}
-export class PilabInterrupt extends Error {}
 function fail(msg: string): never {
   throw new PilabError(msg);
 }
@@ -617,6 +615,8 @@ export async function runSandbox(
   note(`launching pi in sandbox "${name}"`);
   note(`  agent dir: ${tildePath(sb.agent)}`);
   if (piArgs.length) note(`  pi args:   ${piArgs.join(" ")}`);
+  // give the terminal back: pilab must not compete with pi for keystrokes
+  detachStdinPump();
   const proc = Bun.spawn([pi, ...piArgs], {
     stdin: "inherit",
     stdout: "inherit",
@@ -683,6 +683,61 @@ function editInEditor(sb: SandboxPaths, what: string): void {
 
 // ---------------------------------------------------------------------------
 // interactive picker
+//
+// One stdin pump for ALL ui sessions. bun's process.stdin silently stops
+// delivering "data" events if listeners are removed and re-added across raw
+// sessions (flakily spun the CPU at 100%+ when readline was involved, then
+// went deaf entirely) — so the dispatcher below is attached exactly once and
+// sessions only swap the active handler. detachStdinPump() removes it before
+// we hand the terminal to the pi child, so pilab never competes for input.
+
+interface RawSession {
+  stop(): void;
+}
+
+let pumpInstalled = false;
+let activeHandler: ((s: string) => boolean | void) | null = null;
+
+function ensureStdinPump(): void {
+  if (pumpInstalled) return;
+  pumpInstalled = true;
+  process.stdin.on("data", (chunk: Buffer): void => {
+    const h = activeHandler;
+    if (!h || chunk.length === 0) return;
+    if (h(chunk.toString("utf8")) === true) activeHandler = null;
+  });
+}
+
+export function detachStdinPump(): void {
+  if (!pumpInstalled) return;
+  pumpInstalled = false;
+  activeHandler = null;
+  process.stdin.removeAllListeners("data");
+  try {
+    process.stdin.pause();
+  } catch {
+    /* stdin may already be gone */
+  }
+}
+
+function startRawInput(onKey: (s: string) => boolean | void): RawSession {
+  ensureStdinPump();
+  try {
+    process.stdin.setRawMode(true);
+  } catch {
+    return { stop: (): void => {} };
+  }
+  activeHandler = onKey;
+  const stop = (): void => {
+    activeHandler = null;
+    try {
+      process.stdin.setRawMode(false);
+    } catch {
+      /* stdin may already be gone */
+    }
+  };
+  return { stop };
+}
 
 interface PickerCtx {
   rows: { text: string; checked?: boolean }[];
@@ -695,9 +750,11 @@ export async function pick(ctx: PickerCtx): Promise<number | null> {
     return null;
   let cursor = 0;
   let rendered = 0;
+  let done = false;
   const { rows, multi, title } = ctx;
 
   const draw = (): void => {
+    if (done) return;
     const lines: string[] = ["", title];
     rows.forEach((r, i) => {
       const sel = i === cursor;
@@ -718,65 +775,97 @@ export async function pick(ctx: PickerCtx): Promise<number | null> {
     process.stdout.write(out);
   };
 
-  process.stdin.setRawMode(true);
   process.stdout.write("\x1b[?25l");
   draw();
-  return new Promise<number | null>((resolveP) => {
-    const cleanup = (value: number | null): void => {
-      process.stdin.removeListener("data", onData);
-      try {
-        process.stdin.setRawMode(false);
-      } catch {
-        /* stdin may already be gone */
-      }
-      process.stdout.write("\x1b[?25h");
-      process.stdout.write("\x1b[2K\r");
-      resolveP(value);
-    };
-    const onData = (chunk: Buffer): void => {
-      const s = chunk.toString("utf8");
-      if (s === "\x03" || s === "\x04") {
-        cleanup(null);
-        throw new PilabInterrupt();
-      }
+  let session: RawSession | undefined;
+  const result: number | null = await new Promise<number | null>((resolveP) => {
+    session = startRawInput((s) => {
+      // escape sequences (arrows) arrive as multi-char chunks; everything
+      // else must be processed per char — "x\r" in one chunk is two keys
       if (s === "\x1b") {
-        cleanup(null);
-        return;
+        session?.stop();
+        done = true;
+        resolveP(null);
+        return true;
       }
-      if (s.startsWith("\x1b[")) {
+      if (s.startsWith("\x1b")) {
         const key = s.slice(2);
-        if (key === "A" || key === "D")
-          cursor = (cursor - 1 + rows.length) % rows.length;
-        if (key === "B" || key === "C") cursor = (cursor + 1) % rows.length;
-      } else if (s === "\r" || s === "\n") {
-        cleanup(cursor);
-        return;
-      } else if (s === " " && multi) {
-        rows[cursor]!.checked = !rows[cursor]!.checked;
-      } else if (s === "j") {
-        cursor = (cursor + 1) % rows.length;
-      } else if (s === "k") {
-        cursor = (cursor - 1 + rows.length) % rows.length;
+        if (s.startsWith("\x1b[")) {
+          if (key === "A" || key === "D")
+            cursor = (cursor - 1 + rows.length) % rows.length;
+          if (key === "B" || key === "C") cursor = (cursor + 1) % rows.length;
+        }
+        draw();
+        return false;
       }
-      draw();
+      for (const ch of s) {
+        if (ch === "\x03" || ch === "\x04" || ch === "\x1b") {
+          session?.stop();
+          done = true;
+          resolveP(null);
+          return true;
+        }
+        if (ch === "\r" || ch === "\n") {
+          session?.stop();
+          done = true;
+          resolveP(cursor);
+          return true;
+        }
+        if (ch === " " && multi) rows[cursor]!.checked = !rows[cursor]!.checked;
+        else if (ch === "j") cursor = (cursor + 1) % rows.length;
+        else if (ch === "k") cursor = (cursor - 1 + rows.length) % rows.length;
+        draw();
+      }
+      return false;
+    });
+  });
+  process.stdout.write("\x1b[?25h\x1b[2K\r");
+  return result;
+}
+
+function promptLine(question: string): Promise<string | null> {
+  return new Promise<string | null>((resolveP) => {
+    let value = "";
+    let session: RawSession | undefined;
+    const render = (): void => {
+      process.stdout.write(`\x1b[2K\r${question}${value}`);
     };
-    process.stdin.on("data", onData);
+    render();
+    session = startRawInput((s) => {
+      if (s === "\x1b") {
+        session?.stop();
+        process.stdout.write("\n");
+        resolveP(null);
+        return true;
+      }
+      if (s.startsWith("\x1b")) return; // arrows etc. are noise while typing
+      for (const ch of s) {
+        if (ch === "\r" || ch === "\n") {
+          session?.stop();
+          process.stdout.write("\n");
+          resolveP(value.trim());
+          return true;
+        }
+        if (ch === "\x7f" || ch === "\b") {
+          value = value.slice(0, -1);
+          render();
+        } else if (ch === "\x03" || ch === "\x04" || ch === "\x1b") {
+          session?.stop();
+          process.stdout.write("\n");
+          resolveP(null);
+          return true;
+        } else if (ch >= " ") {
+          value += ch;
+          render();
+        }
+      }
+      return;
+    });
   });
 }
-
-async function promptLine(question: string): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return (await rl.question(question)).trim();
-  } finally {
-    rl.close();
-  }
-}
-
 async function newSandboxFlow(): Promise<string | null> {
-  let name = "";
   for (;;) {
-    name = await promptLine("sandbox name: ");
+    const name = await promptLine("sandbox name: ");
     if (!name) return null;
     try {
       validateName(name);
@@ -784,27 +873,26 @@ async function newSandboxFlow(): Promise<string | null> {
         console.log(`  already exists — pick another name`);
         continue;
       }
-      break;
+      const rows = BORROW_ORDER.map((id) => ({
+        text: `${id.padEnd(12)} ${BORROW_DESC[id]}`,
+        checked: DEFAULT_BORROW.includes(id),
+      }));
+      const picked = await pick({
+        title: `borrow into "${name}":`,
+        rows,
+        multi: true,
+      });
+      if (picked === null) return null;
+      const borrow = new Set<BorrowId>(
+        BORROW_ORDER.filter((_, i) => rows[i]!.checked),
+      );
+      createSandbox(name, borrow);
+      return name;
     } catch (e) {
-      if (e instanceof PilabInterrupt) throw e;
-      console.log(`  ${(e as Error).message}`);
+      if (!(e instanceof PilabError)) throw e;
+      console.log(`  ${e.message}`);
     }
   }
-  const rows = BORROW_ORDER.map((id) => ({
-    text: `${id.padEnd(12)} ${BORROW_DESC[id]}`,
-    checked: DEFAULT_BORROW.includes(id),
-  }));
-  const picked = await pick({
-    title: `borrow into "${name}":`,
-    rows,
-    multi: true,
-  });
-  if (picked === null) throw new PilabInterrupt();
-  const borrow = new Set<BorrowId>(
-    BORROW_ORDER.filter((_, i) => rows[i]!.checked),
-  );
-  createSandbox(name, borrow);
-  return name;
 }
 
 async function pickerFlow(): Promise<number> {
@@ -1030,7 +1118,6 @@ if (import.meta.main) {
   try {
     process.exit(await main());
   } catch (e) {
-    if (e instanceof PilabInterrupt) process.exit(130);
     if (e instanceof PilabError) {
       console.error(`pilab: ${e.message}`);
       process.exit(1);
