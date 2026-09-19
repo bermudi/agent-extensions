@@ -565,6 +565,7 @@ export function __clearSummaryCache(): void {
   summaryRequestQueue.length = 0;
   summaryFailStreak = 0;
   summaryBlockedUntil = 0;
+  summaryFailureWaveObservedAt = 0;
 }
 
 function isSummarizable(cmd: string): boolean {
@@ -1153,6 +1154,10 @@ let summaryBackoffBaseMs = SUMMARY_BACKOFF_BASE_MS;
 let summaryBackoffCapMs = SUMMARY_BACKOFF_CAP_MS;
 let summaryFailStreak = 0;
 let summaryBlockedUntil = 0;
+// Settlement time of the failure that most recently advanced the streak.
+// Requests already started by then belong to that same concurrent wave,
+// even if a slow sibling settles after the resulting cooldown has expired.
+let summaryFailureWaveObservedAt = 0;
 
 export function __setSummaryBackoffForTesting(
   baseMs: number,
@@ -1162,8 +1167,30 @@ export function __setSummaryBackoffForTesting(
   summaryBackoffCapMs = capMs;
 }
 
-function noteSummaryFailure(err: unknown): number {
+function noteSummaryFailure(err: unknown, requestStartedAt: number): number {
+  // Two requests may already be in flight when the provider first says 429.
+  // They are one failure wave, not two independent probes: counting both
+  // used to turn a single pair of simultaneous 429s into 30s then 60s.
+  // A request that started before the current cooldown was established
+  // inherits that cooldown without advancing the streak.
+  if (
+    summaryFailStreak > 0 &&
+    requestStartedAt <= summaryFailureWaveObservedAt
+  ) {
+    // A sibling response can carry a stronger Retry-After than the first
+    // failure. It still does not advance the streak, but its provider hint
+    // must extend the shared cooldown.
+    const retryAfter = (err as { retryAfterMs?: unknown }).retryAfterMs;
+    if (typeof retryAfter === "number") {
+      summaryBlockedUntil = Math.max(
+        summaryBlockedUntil,
+        Date.now() + Math.min(summaryBackoffCapMs, retryAfter),
+      );
+    }
+    return Math.max(0, summaryBlockedUntil - Date.now());
+  }
   summaryFailStreak++;
+  summaryFailureWaveObservedAt = Date.now();
   const backoff = Math.min(
     summaryBackoffBaseMs * 2 ** (summaryFailStreak - 1),
     summaryBackoffCapMs,
@@ -1175,6 +1202,20 @@ function noteSummaryFailure(err: unknown): number {
   );
   summaryBlockedUntil = Date.now() + delay;
   return delay;
+}
+
+/** Only a request admitted after the latest failure is a recovery probe. */
+function noteSummarySuccess(requestStartedAt: number): boolean {
+  if (
+    summaryFailStreak > 0 &&
+    requestStartedAt <= summaryFailureWaveObservedAt
+  ) {
+    return false;
+  }
+  summaryFailStreak = 0;
+  summaryBlockedUntil = 0;
+  summaryFailureWaveObservedAt = 0;
+  return true;
 }
 
 function requestSummary(cmd: string): void {
@@ -1201,7 +1242,9 @@ function requestSummary(cmd: string): void {
   if (pendingSummaries.has(cmd) || summaryRequestQueue.includes(cmd)) return;
   if (
     Date.now() < summaryBlockedUntil ||
-    pendingSummaries.size >= SUMMARY_MAX_INFLIGHT
+    pendingSummaries.size >=
+      (summaryFailStreak > 0 ? 1 : SUMMARY_MAX_INFLIGHT) ||
+    (summaryFailStreak > 0 && thinkingInflight)
   ) {
     // Defer, don't drop: a burst of N commands renders faster than summaries
     // complete, and a dropped request would never retry (its row may not
@@ -1230,8 +1273,7 @@ function startSummaryRequest(cmd: string): void {
         // the set, so the abandoned branch needs no cleanup).
         if (signal.aborted) return;
         pendingSummaries.delete(cmd);
-        summaryFailStreak = 0;
-        summaryBlockedUntil = 0;
+        const recovered = noteSummarySuccess(requestStartedAt);
         summaryCache.set(cmd, normalizeSummary(result.text));
         logGoodiesEvent({
           type: "summary_request",
@@ -1241,7 +1283,7 @@ function startSummaryRequest(cmd: string): void {
           ...(result.attempts > 1 ? { attempt: result.attempts } : {}),
           ...redactCommandForLog(cmd),
         });
-        clearSummaryPauseWidget();
+        if (recovered) clearSummaryPauseWidget();
         invalidateRowsForCommand(cmd);
         return;
       }
@@ -1261,7 +1303,7 @@ function startSummaryRequest(cmd: string): void {
         isSummariesOffError(result.err)
       )
         return;
-      const pauseMs = noteSummaryFailure(result.err);
+      const pauseMs = noteSummaryFailure(result.err, requestStartedAt);
       logSummaryFailure(
         cmd,
         result.err,
@@ -1402,7 +1444,12 @@ function drainSummaryQueue(): void {
   }
   while (
     summaryRequestQueue.length > 0 &&
-    pendingSummaries.size < SUMMARY_MAX_INFLIGHT &&
+    pendingSummaries.size <
+      (summaryFailStreak > 0 ? 1 : SUMMARY_MAX_INFLIGHT) &&
+    // After a failure, recovery is half-open: only one provider request
+    // (bash or thinking) may probe at once. A success restores normal
+    // concurrency; another failure advances the cooldown exactly once.
+    (summaryFailStreak === 0 || !thinkingInflight) &&
     Date.now() >= summaryBlockedUntil
   ) {
     const cmd = summaryRequestQueue.shift()!;
@@ -1606,7 +1653,12 @@ function maybeRequestThinkingSummary(text: string): void {
     return;
   const backend = activeBackend();
   if (typeof backend.summarizeThinking !== "function") return;
-  if (thinkingInflight || Date.now() < summaryBlockedUntil) return;
+  if (
+    thinkingInflight ||
+    Date.now() < summaryBlockedUntil ||
+    (summaryFailStreak > 0 && pendingSummaries.size > 0)
+  )
+    return;
   if (text.length < thinkingMinChars) return;
   if (
     run.requestedLen > 0 &&
@@ -1633,8 +1685,7 @@ function maybeRequestThinkingSummary(text: string): void {
         if (signal.aborted) return;
         // Provider health is shared with bash summaries: one provider, one
         // recovery signal, one pause widget.
-        summaryFailStreak = 0;
-        summaryBlockedUntil = 0;
+        const recovered = noteSummarySuccess(requestStartedAt);
         logGoodiesEvent({
           type: "summary_request",
           outcome: "ok",
@@ -1643,7 +1694,7 @@ function maybeRequestThinkingSummary(text: string): void {
           ...(result.attempts > 1 ? { attempt: result.attempts } : {}),
           ...redactCommandForLog(text),
         });
-        clearSummaryPauseWidget();
+        if (recovered) clearSummaryPauseWidget();
         // Stale landings stay silent: the run moved on (or closed) while this
         // request was in flight, or a newer request already updated the line.
         if (thinkingRun?.head === head && seq > thinkingLandedSeq) {
@@ -1657,7 +1708,7 @@ function maybeRequestThinkingSummary(text: string): void {
         (result.err as Error)?.name !== "AbortError" &&
         !isSummariesOffError(result.err)
       ) {
-        const pauseMs = noteSummaryFailure(result.err);
+        const pauseMs = noteSummaryFailure(result.err, requestStartedAt);
         logSummaryFailure(
           text,
           result.err,
@@ -1669,7 +1720,13 @@ function maybeRequestThinkingSummary(text: string): void {
       }
     })
     .finally(() => {
-      if (!signal.aborted) thinkingInflight = false;
+      if (!signal.aborted) {
+        thinkingInflight = false;
+        // A thinking request may be the sole half-open recovery probe while
+        // completed bash rows wait in the queue. Its success restores normal
+        // concurrency, so release those rows without requiring a later render.
+        drainSummaryQueue();
+      }
     });
 }
 

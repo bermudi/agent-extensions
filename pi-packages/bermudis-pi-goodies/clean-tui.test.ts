@@ -2227,6 +2227,146 @@ describe("clean-tui AI summary", () => {
     expect(calls).toBe(2);
   });
 
+  test("concurrent 429s count as one failure wave and recovery uses one probe", async () => {
+    // Two requests can already be in flight when a provider starts rejecting
+    // traffic. They must share the base cooldown; otherwise one simultaneous
+    // pair doubles it twice. Once that cooldown expires, only one queued
+    // request may probe the provider until it succeeds.
+    const logPath = useScratchSummaryLog();
+    __setSummaryBackoffForTesting(50, 60_000);
+    cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
+    captureConsoleError();
+    const rejects: Array<() => void> = [];
+    let calls = 0;
+    scriptedBackend(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          calls++;
+          rejects.push(() =>
+            reject(new Error("summary request failed: HTTP 429 (test/model)")),
+          );
+        }),
+    );
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const rowA = h.row("bash", "wave-a");
+    const rowB = h.row("bash", "wave-b");
+    const cmdA = "echo " + "a".repeat(90);
+    const cmdB = "echo " + "b".repeat(90);
+    rowA.setArgs({ command: cmdA });
+    rowB.setArgs({ command: cmdB });
+    expect(calls).toBe(2);
+
+    rejects.shift()!();
+    rejects.shift()!();
+    await new Promise((r) => setTimeout(r, 10));
+    const firstWave = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.type === "summary_request" && e.outcome === "failed");
+    expect(firstWave).toHaveLength(2);
+    const firstPauses = firstWave.map((e) => e.pauseMs as number);
+    expect(firstPauses.every((pause) => pause > 0 && pause <= 50)).toBe(true);
+    expect(Math.max(...firstPauses)).toBe(50);
+
+    await new Promise((r) => setTimeout(r, 60));
+    rowA.setArgs({ command: cmdA });
+    rowB.setArgs({ command: cmdB });
+    expect(calls).toBe(3); // half-open: one probe, not another pair
+    rejects.shift()!();
+    await new Promise((r) => setTimeout(r, 10));
+    const failures = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.type === "summary_request" && e.outcome === "failed");
+    expect(failures.at(-1)?.pauseMs).toBe(100);
+  });
+
+  test("an old sibling success does not close a newly opened cooldown", async () => {
+    __setSummaryBackoffForTesting(50, 60_000);
+    cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
+    captureConsoleError();
+    const settle: Array<{
+      resolve: (value: string) => void;
+      reject: (error: Error) => void;
+    }> = [];
+    let calls = 0;
+    scriptedBackend(
+      () =>
+        new Promise<string>((resolve, reject) => {
+          calls++;
+          settle.push({ resolve, reject });
+        }),
+    );
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const rows = ["a", "b", "c"].map((id) => h.row("bash", id));
+    const commands = ["a", "b", "c"].map(
+      (letter) => `echo ${letter.repeat(90)}`,
+    );
+    rows[0].setArgs({ command: commands[0] });
+    rows[1].setArgs({ command: commands[1] });
+    expect(calls).toBe(2);
+    settle[0].reject(new Error("summary request failed: HTTP 429"));
+    await new Promise((r) => setTimeout(r, 5));
+    settle[1].resolve("Old sibling succeeded");
+    await new Promise((r) => setTimeout(r, 5));
+    rows[2].setArgs({ command: commands[2] });
+    expect(calls).toBe(2); // the pre-failure success was not a recovery probe
+  });
+
+  test("a slow sibling 429 does not advance the streak and honors Retry-After", async () => {
+    const logPath = useScratchSummaryLog();
+    __setSummaryBackoffForTesting(30, 60_000);
+    cleanupFns.push(() => __setSummaryBackoffForTesting(30_000, 15 * 60_000));
+    captureConsoleError();
+    const rejects: Array<(error: Error) => void> = [];
+    let calls = 0;
+    scriptedBackend(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          calls++;
+          rejects.push(reject);
+        }),
+    );
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const rowA = h.row("bash", "slow-a");
+    const rowB = h.row("bash", "slow-b");
+    const rowC = h.row("bash", "slow-c");
+    rowA.setArgs({ command: `echo ${"a".repeat(90)}` });
+    rowB.setArgs({ command: `echo ${"b".repeat(90)}` });
+    rejects.shift()!(new Error("summary request failed: HTTP 429"));
+    await new Promise((r) => setTimeout(r, 40)); // base cooldown has expired
+    rejects.shift()!(
+      Object.assign(new Error("summary request failed: HTTP 429"), {
+        retryAfterMs: 80,
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    rowC.setArgs({ command: `echo ${"c".repeat(90)}` });
+    expect(calls).toBe(2); // sibling extended the pause; it was not wave two
+    const failures = readFileSync(logPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.type === "summary_request" && e.outcome === "failed");
+    expect(failures).toHaveLength(2);
+    expect(failures[0].pauseMs).toBe(30);
+    expect(failures[1].pauseMs as number).toBeGreaterThan(60);
+  });
+
   test("a success resets the failure streak", async () => {
     // Without a reset, one old 429 would double every future cooldown forever.
     __setSummaryBackoffForTesting(100, 60_000);
