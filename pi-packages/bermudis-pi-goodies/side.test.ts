@@ -12,6 +12,7 @@ import {
   collectCoveredUpTo,
   deltaSideEntries,
   filterExitCompletions,
+  filterSideModelCompletions,
   findSideBoundary,
   parseExitMode,
   parseModelArg,
@@ -131,6 +132,7 @@ describe("findSideBoundary / parseSideMarkerData", () => {
     // mainModel is optional
     expect(
       parseSideMarkerData({
+        v: 1,
         sideModel: { provider: "k", id: "g" },
         mainTipId: "t",
       }),
@@ -142,6 +144,12 @@ describe("findSideBoundary / parseSideMarkerData", () => {
       sideThinkingLevel: undefined,
       mainTipId: "t",
     });
+  });
+
+  test("rejects unknown or missing format versions instead of misreading", () => {
+    expect(parseSideMarkerData({ ...markerData, v: 2 })).toBeNull();
+    const { v: _v, ...noVersion } = markerData;
+    expect(parseSideMarkerData(noVersion)).toBeNull();
   });
 
   test("round-trips parked thinking levels, rejects unknown ones", () => {
@@ -258,6 +266,44 @@ describe("buildLensMessages", () => {
     const messages = lens(entries, entries, [inFlight])!;
     expect(messages.length).toBe(2);
     expect(messages[messages.length - 1]).toBe(inFlight);
+  });
+
+  test("side-limb compaction is quoted with a who-is-who caveat, not native history", () => {
+    const raw: SessionEntry[] = [
+      userEntry("main question"),
+      assistantEntry("main answer", "anthropic/sonnet-4.5"),
+      markerEntry(markerData),
+      userEntry("side q1"),
+      assistantEntry("side a1", "kilo/glm-5.3"),
+      {
+        type: "compaction",
+        summary:
+          "The user consulted a side model; the assistant verified findings and disagreed on finding #1.",
+        firstKeptEntryId: "gone",
+        tokensBefore: 50000,
+        id: id(),
+        parentId: "root",
+        timestamp: new Date(8).toISOString(),
+      },
+      userEntry("side q2"),
+    ];
+    // Aware view: the latest compaction + entries after it only.
+    const compaction = raw[5]!;
+    const aware: SessionEntry[] = [compaction, raw[6]!];
+    const messages = lens(aware, raw)!;
+
+    expect(messages.length).toBe(2); // quote + native side q2
+    const quoteText = JSON.stringify(messages[0]);
+    expect(quoteText).toContain("machine-written");
+    expect(quoteText).toContain(
+      "may mix the main agent's and your own earlier turns",
+    );
+    expect(quoteText).toContain("disagreed on finding #1");
+    // The compaction summary must NOT survive as a native side message.
+    expect(JSON.stringify(messages[1])).not.toContain(
+      "disagreed on finding #1",
+    );
+    expect(messages[1]).toMatchObject({ role: "user" });
   });
 
   test("empty main trajectory still yields a coherent quote", () => {
@@ -456,5 +502,31 @@ describe("activeSideModel", () => {
   test("falls back to the marker's model when no model_change follows it", () => {
     const raw = branchWithSide();
     expect(activeSideModel(raw, markerData)).toEqual(markerData.sideModel);
+  });
+});
+
+describe("filterSideModelCompletions", () => {
+  const registry = {
+    getAvailable: () => [
+      { provider: "kilo", id: "glm-5.3" },
+      { provider: "kilo", id: "glm-5.3-flash" },
+      { provider: "anthropic", id: "sonnet-4.5" },
+      { provider: "kilo", id: "glm-5.3" }, // duplicate ref dedupes
+    ],
+  } as unknown as Parameters<typeof filterSideModelCompletions>[1];
+
+  test("prefix-filters available models as provider/id", () => {
+    expect(filterSideModelCompletions("kilo/", registry)).toEqual([
+      { value: "kilo/glm-5.3", label: "kilo/glm-5.3" },
+      { value: "kilo/glm-5.3-flash", label: "kilo/glm-5.3-flash" },
+    ]);
+    expect(filterSideModelCompletions("anthropic/son", registry)).toEqual([
+      { value: "anthropic/sonnet-4.5", label: "anthropic/sonnet-4.5" },
+    ]);
+  });
+
+  test("no registry or no matches yields null", () => {
+    expect(filterSideModelCompletions("kilo/", undefined)).toBeNull();
+    expect(filterSideModelCompletions("google/", registry)).toBeNull();
   });
 });

@@ -389,7 +389,10 @@ Details worth knowing:
 
 - The footer badge (`side: kilo/glm-5.3`) tracks the active side model,
   including manual ctrl+l switches; it is restored when pi reopens a session
-  that is already on a side limb.
+  that is already on a side limb. Handoffs speak for the model actually
+  active at exit (a mid-side `/side provider/x` swap changes the summarizer
+  and the handoff labels), while the transcript itself keeps per-turn model
+  attribution.
 - Thinking levels round-trip: pi's model switch applies the per-model default
   level, so the marker snapshots the session level at entry and `/side-exit`
   restores it explicitly — a session parked at `:low` comes back at `:low`,
@@ -404,6 +407,8 @@ Details worth knowing:
   the lens output, so it over-reports while a side session is active — by
   the full uncompacted main history at worst, shrinking after compaction
   (the lens renders compaction summaries into the quote rather than
-  resending summarized-away turns).
+  resending summarized-away turns). Compaction summaries that cover side
+  turns are quoted with an explicit who-is-who caveat instead of passing as
+  the consultant's own history.
 - Both quote directions carry an explicit untrusted-evidence preamble:
   a transcript is framing, not a security boundary.
