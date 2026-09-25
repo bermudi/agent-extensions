@@ -44,7 +44,7 @@ type Turn = {
 };
 
 /** Build the readable turns from a branch of session entries. */
-function buildTrajectory(
+export function buildTrajectory(
   entries: readonly SessionEntry[],
   includeThinking: boolean,
 ): Turn[] {
@@ -89,7 +89,7 @@ function buildTrajectory(
   return turns;
 }
 
-const renderTrajectory = (turns: readonly Turn[]): string =>
+export const renderTrajectory = (turns: readonly Turn[]): string =>
   turns
     .map((t) => {
       const header =

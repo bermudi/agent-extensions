@@ -16,6 +16,7 @@
  *   - provider-balance footer            show Kilo credits or Codex quota in the footer
  *   - tps              hook              notify tokens/sec and usage at each agent turn end
  *   - vision           tool              ask a vision model targeted questions about an image (self-hides for image-capable models)
+ *   - side             /side, /side-exit  consult a second model on an attributed quote of the session; deliver trajectory/summary/nothing at exit
  *
  * Per-model thinking levels were previously provided by a `model-thinking`
  * module with a `/levels` command and an extension-owned sidecar, retired in
@@ -35,6 +36,7 @@ import review from "./review.ts";
 import providerBalance from "./provider-balance.ts";
 import tps from "./tps.ts";
 import vision from "./vision.ts";
+import side from "./side.ts";
 import nameWithAi from "./name-with-ai.ts";
 import zed from "./zed.ts";
 import preferTools from "./prefer-tools.ts";
@@ -60,4 +62,5 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   if (isEnabled("kilo")) kilo(pi);
   if (isEnabled("tps")) tps(pi);
   if (isEnabled("vision")) vision(pi);
+  if (isEnabled("side")) side(pi);
 }
