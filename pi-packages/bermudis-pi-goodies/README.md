@@ -359,10 +359,10 @@ How it works:
 
 - **Entry**: `/side` opens pi's own model selector (falls back to a plain
   selector when pi's internal runtime is not reachable; in headless modes pass
-  the model explicitly as `/side provider/model-id`). The main agent's branch
-  tip and model are recorded in a `side-session` marker entry, the session
-  model switches, and the side conversation grows as its own limb of the
-  session tree — the main branch is never polluted.
+  the model explicitly as `/side provider/model-id[:level]`). The main agent's
+  branch tip, model, **and thinking level** are recorded in a `side-session`
+  marker entry, the session model switches, and the side conversation grows as
+  its own limb of the session tree — the main branch is never polluted.
 - **The quote, not the history**: a per-request context lens collapses
   everything before the marker into a single attributed user message — a
   transcript in the `/copy-trajectory` format, prefaced with "you were NOT a
@@ -389,6 +389,12 @@ Details worth knowing:
 - The footer badge (`side: kilo/glm-5.3`) tracks the active side model,
   including manual ctrl+l switches; it is restored when pi reopens a session
   that is already on a side limb.
+- Thinking levels round-trip: pi's model switch applies the per-model default
+  level, so the marker snapshots the session level at entry and `/side-exit`
+  restores it explicitly — a session parked at `:low` comes back at `:low`,
+  not at the model's default. `/side provider/model:low` sets the side
+  session's level directly (a full catalog id ending in a non-level suffix,
+  like kilo `:free`, still resolves as-is).
 - Handoff delivery uses `sendMessage({ triggerTurn: false })` while idle,
   which writes the session file synchronously. (`deliverAs: "nextTurn"`
   would only queue in memory and die with the process.)

@@ -116,7 +116,12 @@ describe("findSideBoundary / parseSideMarkerData", () => {
   });
 
   test("parses valid marker data and rejects malformed", () => {
-    expect(parseSideMarkerData(markerData)).toEqual(markerData);
+    expect(parseSideMarkerData(markerData)).toEqual({
+      ...markerData,
+      mainModel: markerData.mainModel,
+      mainThinkingLevel: undefined,
+      sideThinkingLevel: undefined,
+    });
     expect(parseSideMarkerData(null)).toBeNull();
     expect(parseSideMarkerData({ v: 1 })).toBeNull();
     expect(
@@ -128,7 +133,30 @@ describe("findSideBoundary / parseSideMarkerData", () => {
         sideModel: { provider: "k", id: "g" },
         mainTipId: "t",
       }),
-    ).toEqual({ v: 1, sideModel: { provider: "k", id: "g" }, mainTipId: "t" });
+    ).toEqual({
+      v: 1,
+      sideModel: { provider: "k", id: "g" },
+      mainModel: undefined,
+      mainThinkingLevel: undefined,
+      sideThinkingLevel: undefined,
+      mainTipId: "t",
+    });
+  });
+
+  test("round-trips parked thinking levels, rejects unknown ones", () => {
+    const withLevels = {
+      ...markerData,
+      mainThinkingLevel: "low",
+      sideThinkingLevel: "max",
+    };
+    expect(parseSideMarkerData(withLevels)).toEqual(withLevels);
+    expect(
+      parseSideMarkerData({ ...markerData, mainThinkingLevel: "ultra" }),
+    ).toEqual({
+      ...markerData,
+      mainThinkingLevel: undefined,
+      sideThinkingLevel: undefined,
+    });
   });
 });
 
@@ -290,13 +318,42 @@ describe("arguments and completions", () => {
     expect(parseModelArg("kilo/glm-5.3")).toEqual({
       provider: "kilo",
       id: "glm-5.3",
+      baseId: "glm-5.3",
     });
     expect(parseModelArg("openai/org/model-id")).toEqual({
       provider: "openai",
       id: "org/model-id",
+      baseId: "org/model-id",
     });
     expect(parseModelArg("noslash")).toBeUndefined();
     expect(parseModelArg("/leading")).toBeUndefined();
     expect(parseModelArg("trailing/")).toBeUndefined();
+  });
+
+  test("parseModelArg offers a thinking suffix without committing to it", () => {
+    // :low parses as a level candidate; the caller tries the full id first.
+    expect(parseModelArg("kilo/glm-5.3-flash:low")).toEqual({
+      provider: "kilo",
+      id: "glm-5.3-flash:low",
+      baseId: "glm-5.3-flash",
+      level: "low",
+    });
+    // A colon suffix that is not a known level stays part of the id (kilo :free).
+    expect(parseModelArg("kilo/some-model:free")).toEqual({
+      provider: "kilo",
+      id: "some-model:free",
+      baseId: "some-model:free",
+    });
+    expect(parseModelArg("kilo/a:bogus")).toEqual({
+      provider: "kilo",
+      id: "a:bogus",
+      baseId: "a:bogus",
+    });
+    // A level-like suffix on an empty base id is not a level candidate.
+    expect(parseModelArg("kilo/:low")).toEqual({
+      provider: "kilo",
+      id: ":low",
+      baseId: ":low",
+    });
   });
 });

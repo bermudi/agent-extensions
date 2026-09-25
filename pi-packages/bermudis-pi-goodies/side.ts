@@ -50,12 +50,18 @@ import { buildTrajectory, renderTrajectory } from "./copy-trajectory.ts";
 import { logGoodiesEvent } from "./goodies-log.ts";
 
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
+type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 type ModelRef = { provider: string; id: string };
 
 interface SideMarkerData {
   v: 1;
   sideModel: ModelRef;
   mainModel?: ModelRef;
+  /** Session thinking level at /side entry — restored on exit (pi's setModel
+   *  would otherwise apply the per-model default, e.g. parked :low → :max). */
+  mainThinkingLevel?: ThinkingLevel;
+  /** Level the side session started at; bookkeeping for a future resume. */
+  sideThinkingLevel?: ThinkingLevel;
   mainTipId: string;
 }
 
@@ -75,6 +81,22 @@ export type ExitMode = (typeof EXIT_MODES)[number];
 
 const modelRef = (m: ModelRef): string => `${m.provider}/${m.id}`;
 
+const THINKING_LEVELS = new Set([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+function parseThinkingLevel(value: unknown): ThinkingLevel | undefined {
+  return typeof value === "string" && THINKING_LEVELS.has(value)
+    ? (value as ThinkingLevel)
+    : undefined;
+}
+
 function parseModelRef(value: unknown): ModelRef | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const v = value as Record<string, unknown>;
@@ -90,7 +112,14 @@ export function parseSideMarkerData(data: unknown): SideMarkerData | null {
   const mainModel = parseModelRef(v.mainModel);
   const mainTipId = typeof v.mainTipId === "string" ? v.mainTipId : undefined;
   if (!sideModel || !mainTipId) return null;
-  return { v: 1, sideModel, mainModel, mainTipId };
+  return {
+    v: 1,
+    sideModel,
+    mainModel,
+    mainThinkingLevel: parseThinkingLevel(v.mainThinkingLevel),
+    sideThinkingLevel: parseThinkingLevel(v.sideThinkingLevel),
+    mainTipId,
+  };
 }
 
 /** Index of the last side-session marker on the given entry list, or -1. */
@@ -240,12 +269,39 @@ export function filterExitCompletions(
     : null;
 }
 
-/** "provider/model-id" → ref. Model ids may contain slashes; provider may not. */
-export function parseModelArg(arg: string): ModelRef | undefined {
+/**
+ * "provider/model-id[:level]" → ref. Splits the provider on the first slash;
+ * a trailing ":level" (known thinking level) is offered separately as
+ * `level`/`baseId` so the caller can try the full id first (some catalog ids
+ * legitimately end in a colon suffix, e.g. kilo `:free`) and fall back to the
+ * base id + explicit thinking level only if the full id does not resolve.
+ */
+export interface ModelSpec {
+  provider: string;
+  id: string;
+  baseId: string;
+  level?: ThinkingLevel;
+}
+
+export function parseModelArg(arg: string): ModelSpec | undefined {
   const trimmed = arg.trim();
   const slash = trimmed.indexOf("/");
   if (slash <= 0 || slash === trimmed.length - 1) return undefined;
-  return { provider: trimmed.slice(0, slash), id: trimmed.slice(slash + 1) };
+  const provider = trimmed.slice(0, slash);
+  const id = trimmed.slice(slash + 1);
+  const colon = id.lastIndexOf(":");
+  if (colon > 0 && colon < id.length - 1) {
+    const suffix = id.slice(colon + 1);
+    if (THINKING_LEVELS.has(suffix)) {
+      return {
+        provider,
+        id,
+        baseId: id.slice(0, colon),
+        level: suffix as ThinkingLevel,
+      };
+    }
+  }
+  return { provider, id, baseId: id };
 }
 
 // ---------------------------------------------------------------------------
@@ -455,20 +511,31 @@ export default function side(pi: ExtensionAPI): void {
       }
 
       const mainModelSnapshot = ctx.model; // capture before any switch
+      const mainThinkingSnapshot = ctx.thinkingLevel;
 
       let model: ActiveModel | undefined;
+      let argLevel: ThinkingLevel | undefined;
       if (arg !== "") {
-        const ref = parseModelArg(arg);
-        if (!ref) {
+        const spec = parseModelArg(arg);
+        if (!spec) {
           ctx.ui.notify(
-            `side: bad model reference ${JSON.stringify(arg)} — expected provider/model-id`,
+            `side: bad model reference ${JSON.stringify(arg)} — expected provider/model-id[:level]`,
             "warning",
           );
           return;
         }
-        model = ctx.modelRegistry.find(ref.provider, ref.id);
+        // Full id first: a catalog id may legitimately end in ":something"
+        // (e.g. kilo `:free`). Only strip a thinking suffix as a fallback.
+        model = ctx.modelRegistry.find(spec.provider, spec.id);
+        if (!model && spec.level) {
+          model = ctx.modelRegistry.find(spec.provider, spec.baseId);
+          argLevel = spec.level;
+        }
         if (!model) {
-          ctx.ui.notify(`side: unknown model ${modelRef(ref)}`, "error");
+          ctx.ui.notify(
+            `side: unknown model ${spec.provider}/${spec.id}`,
+            "error",
+          );
           return;
         }
       } else {
@@ -487,6 +554,9 @@ export default function side(pi: ExtensionAPI): void {
       if (!switched) {
         ctx.ui.notify(`side: ${modelRef(model)} is not authenticated`, "error");
         return;
+      }
+      if (argLevel && ctx.thinkingLevel !== argLevel) {
+        pi.setThinkingLevel(argLevel);
       }
       updateBadge(ctx, model);
 
@@ -510,6 +580,8 @@ export default function side(pi: ExtensionAPI): void {
         mainModel: mainModelSnapshot
           ? { provider: mainModelSnapshot.provider, id: mainModelSnapshot.id }
           : undefined,
+        mainThinkingLevel: mainThinkingSnapshot,
+        sideThinkingLevel: ctx.thinkingLevel,
         mainTipId,
       } satisfies SideMarkerData);
 
@@ -616,6 +688,14 @@ export default function side(pi: ExtensionAPI): void {
         );
         if (mainModel) {
           await pi.setModel(mainModel);
+          // pi's setModel resolves the thinking level from the per-model
+          // default — explicitly restore the parked level or :low comes back :max.
+          if (
+            marker.data.mainThinkingLevel &&
+            ctx.thinkingLevel !== marker.data.mainThinkingLevel
+          ) {
+            pi.setThinkingLevel(marker.data.mainThinkingLevel);
+          }
         } else {
           ctx.ui.notify(
             `side-exit: could not restore ${modelRef(marker.data.mainModel)} — still on the side model`,
