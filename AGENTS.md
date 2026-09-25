@@ -24,13 +24,6 @@ pi-packages/
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
   ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
   pi-harness/             # ACTIVE (dev-only): test harness for TUI extensions; faithful ToolExecutionComponent render semantics
-  pilab/                  # ACTIVE (standalone, not a pi extension): sandboxed pi launcher. Named sandboxes in
-                         # ~/.pi/sandboxes/<name>/ run via PI_CODING_AGENT_DIR, so test providers/extensions/system
-                         # prompts never touch the real config. Borrows from ~/.pi/agent are symlinks (auth.json is
-                         # LIVE-linked on purpose — pi rewrites it on OAuth refresh); settings.json is an allowlist
-                         # copy that never carries packages/extensions/skills/prompts. Tests use PILAB_ROOT +
-                         # PILAB_REAL_AGENT_DIR temp dirs; Bun.which reads the process-start env snapshot, hence the
-                         # whichLive() PATH scan (don't "simplify" it back to Bun.which).
   session-summarizer/     # INACTIVE (source kept; not linked in .pi/extensions — verify install state before claiming it runs)
   zen-relay/              # ACTIVE (standalone, not a pi extension): all-local multi-IP relay for OpenCode Zen. Per-gateway SSH SOCKS tunnels + one local relay; pi uses it via models.json baseUrl override.
   experiments/            # ARCHIVE — unused/exploratory. Not typechecked, not in default test run.
@@ -54,6 +47,17 @@ PATH (pi-reload does). Every `agent prompt` also costs ~300ms: herdr
 intentionally sleeps between typing the text and pressing Enter
 (AGENT_PROMPT_SUBMIT_DELAY, paste-boundary guard) — serial per-pane loops pay
 it N times, so run per-pane work concurrently when targeting many panes.
+
+## Dead: pilab
+
+Removed 2026-09-27 at bermudi's request ("kill that shit, it provides no isolation"),
+repo dir + ~/.pi/sandboxes trashed. Cause: config changes made from inside a
+"sandboxed" pi landed in the real ~/.pi/agent anyway. PI_CODING_AGENT_DIR is
+honored by getAgentDir() for path derivation in current pi, but pilab never
+audited pi's WRITE paths, so something escaped (exact path unidentified).
+Lesson: do not rebuild sandboxing on that env var without auditing every
+config write; and for quick extension tests, `pi -ne -e /abs/path` from a
+scratch cwd is the honest tool — it never promised isolation.
 
 SAFETY RULE for any plugin that types into agent panes: herdr 0.8.2
 `agent prompt` does NOT refuse blocked agents (0.9.1-fork's --help claims a
@@ -116,7 +120,7 @@ price of true isolation and is intentional.
 - **Production installation rule:** Install maintained extensions into Pi from a published, pinned npm version (for example, `pi install npm:bermudis-pi-goodies@0.2.0`) or another pinned release/commit. Never point a running Pi at an agent's mutable working tree. Source changes take effect in the installed extension only after publishing/updating the package, or when deliberately using a local development load.
 
 - Test your work: `bun run typecheck` and `bun run test` inside the extension dir.
-- When appropriate, give bermudi the `pi -e ...` command to test — with an absolute path so it works from any cwd, and `-ne` so installed extensions stay out and the dev copy runs alone: `pi -ne -e /home/daniel/build/agent-extensions/pi-packages/<name>/index.ts` (pilab sandboxes are already clean and skip `-ne`); installs still follow the production rule above.
+- When appropriate, give bermudi the `pi -e ...` command to test — with an absolute path so it works from any cwd, and `-ne` so installed extensions stay out and the dev copy runs alone: `pi -ne -e /home/daniel/build/agent-extensions/pi-packages/<name>/index.ts`; installs still follow the production rule above.
 - Do not symlink/install globally without bermudi's explicit request. The maintained goodies installation is the published npm package, not this working tree.
 - Extensions load at session start. Use `/reload` to pick up changes mid-session.
 
