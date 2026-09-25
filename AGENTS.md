@@ -116,6 +116,7 @@ price of true isolation and is intentional.
 - **Production installation rule:** Install maintained extensions into Pi from a published, pinned npm version (for example, `pi install npm:bermudis-pi-goodies@0.2.0`) or another pinned release/commit. Never point a running Pi at an agent's mutable working tree. Source changes take effect in the installed extension only after publishing/updating the package, or when deliberately using a local development load.
 
 - Test your work: `bun run typecheck` and `bun run test` inside the extension dir.
+- When appropriate, give bermudi the `pi -e ...` command to test — the exact invocation, run from the repo root (e.g. `pi -e pi-packages/bermudis-pi-goodies/index.ts`); installs still follow the production rule above.
 - Do not symlink/install globally without bermudi's explicit request. The maintained goodies installation is the published npm package, not this working tree.
 - Extensions load at session start. Use `/reload` to pick up changes mid-session.
 
