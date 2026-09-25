@@ -8,8 +8,10 @@
  *   /copy-trajectory            copy user + assistant text
  *   /copy-trajectory thinking   also include assistant thinking blocks
  *
- * Uses ctx.sessionManager.getBranch() for the active (compaction-aware) branch
- * and @earendil-works/pi-coding-agent's copyToClipboard for the clipboard write.
+ * Uses ctx.sessionManager.getBranch() for the active branch (the raw parent
+ * chain — compacted-away entries included, so the clipboard copy keeps
+ * everything) and @earendil-works/pi-coding-agent's copyToClipboard for the
+ * clipboard write.
  */
 
 import {

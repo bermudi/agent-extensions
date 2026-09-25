@@ -380,7 +380,8 @@ How it works:
     leaves you in the side session rather than exiting empty-handed.
   - `nothing` — main agent never learns the consultation happened.
 - **Re-entry**: `/side` after an exit starts a fresh side limb (the new
-  consult sees prior handoffs as part of the main transcript). Handoffs are
+  consult sees prior handoffs in the main transcript — quoted as attributed
+  `[prior side handoff]` assistant turns). Handoffs are
   delta-tracked per limb (`coveredUpTo` in the handoff entry's details), so a
   resumed limb would only ever deliver turns since the last handoff.
 
@@ -396,9 +397,13 @@ Details worth knowing:
   session's level directly (a full catalog id ending in a non-level suffix,
   like kilo `:free`, still resolves as-is).
 - Handoff delivery uses `sendMessage({ triggerTurn: false })` while idle,
-  which writes the session file synchronously. (`deliverAs: "nextTurn"`
-  would only queue in memory and die with the process.)
-- The footer's context-usage estimate reflects the raw branch, not the lens
-  output, so it over-reports while a side session is active.
+  which appends the entry to the session through pi's synchronous write
+  path. (`deliverAs: "nextTurn"` would only queue in memory and die with
+  the process.)
+- The footer's context-usage estimate reflects the raw session branch, not
+  the lens output, so it over-reports while a side session is active — by
+  the full uncompacted main history at worst, shrinking after compaction
+  (the lens renders compaction summaries into the quote rather than
+  resending summarized-away turns).
 - Both quote directions carry an explicit untrusted-evidence preamble:
   a transcript is framing, not a security boundary.

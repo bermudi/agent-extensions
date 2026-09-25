@@ -5,6 +5,7 @@ import type {
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
+  activeSideModel,
   buildLensMessages,
   buildSummaryHandoff,
   buildTrajectoryHandoff,
@@ -161,12 +162,18 @@ describe("findSideBoundary / parseSideMarkerData", () => {
 });
 
 describe("buildLensMessages", () => {
+  const lens = (
+    aware: SessionEntry[],
+    raw = aware,
+    event: Parameters<typeof buildLensMessages>[3] = [],
+  ) => buildLensMessages(aware, raw, findSideBoundary(raw), event);
+
   test("null when not a side session", () => {
-    expect(buildLensMessages([userEntry("hi")], [])).toBeNull();
+    expect(lens([userEntry("hi")])).toBeNull();
   });
 
   test("collapses the main trajectory into one attributed quote and keeps side turns native", () => {
-    const messages = buildLensMessages(branchWithSide(), [])!;
+    const messages = lens(branchWithSide())!;
     expect(messages).not.toBeNull();
 
     // One quote message + the side limb's two messages.
@@ -189,24 +196,83 @@ describe("buildLensMessages", () => {
     expect(messages[2]).toMatchObject({ role: "assistant" });
   });
 
+  test("compacted-away main history reaches the quote as a summary turn, not raw turns", () => {
+    const raw = branchWithSide();
+    // Aware view after compaction cut past the main history and the marker:
+    // compaction entry + kept side entries only.
+    const aware: SessionEntry[] = [
+      {
+        type: "compaction",
+        summary: "The user asked about v1 findings; the agent verified them.",
+        firstKeptEntryId: raw[3]!.id,
+        tokensBefore: 90000,
+        id: id(),
+        parentId: "root",
+        timestamp: new Date(5).toISOString(),
+      },
+      raw[3]!,
+      raw[4]!,
+    ];
+    const messages = lens(aware, raw)!;
+
+    expect(messages.length).toBe(3); // quote + two side messages
+    const text = JSON.stringify(messages[0]);
+    expect(text).toContain("compaction summary of earlier history");
+    expect(text).toContain("The user asked about v1 findings");
+    // Compacted-away raw main turns must not be resent.
+    expect(text).not.toContain("do you agree with the findings");
+    // Side entries stay native outside the quote.
+    expect(messages[1]).toMatchObject({ role: "user" });
+  });
+
+  test("prior handoffs on the main limb are visible to a later side consult", () => {
+    const priorHandoff = handoffEntry({
+      markerId: "old-marker",
+      coveredUpTo: "e0",
+      model: { provider: "kilo", id: "glm-5.3" },
+      kind: "summary",
+      turnCount: 4,
+    });
+    (priorHandoff as { content: string }).content =
+      "The consultant disagreed with finding #1 (full-schema emission, not intent).";
+    const raw: SessionEntry[] = [
+      userEntry("question"),
+      priorHandoff,
+      markerEntry(markerData),
+      userEntry("second consult"),
+    ];
+    const messages = lens(raw)!;
+    const text = JSON.stringify(messages[0]);
+    expect(text).toContain("prior side summary handoff");
+    expect(text).toContain("disagreed with finding #1");
+    expect(text).toContain("## Assistant (kilo/glm-5.3)");
+  });
+
   test("keeps an unlanded in-flight prompt on the first side turn", () => {
     const entries = branchWithSide().slice(0, 3); // marker is the leaf
     const inFlight = {
       role: "user",
       content: [{ type: "text", text: "what are your thoughts?" }],
       timestamp: 9,
-    } as unknown as Parameters<typeof buildLensMessages>[1][number];
-    const messages = buildLensMessages(entries, [inFlight])!;
+    } as unknown as Parameters<typeof buildLensMessages>[3][number];
+    const messages = lens(entries, entries, [inFlight])!;
     expect(messages.length).toBe(2);
     expect(messages[messages.length - 1]).toBe(inFlight);
   });
 
   test("empty main trajectory still yields a coherent quote", () => {
     const entries = [markerEntry(markerData), userEntry("q")];
-    const messages = buildLensMessages(entries, [])!;
+    const messages = lens(entries)!;
     expect(JSON.stringify(messages[0])).toContain(
       "(the main session has no messages yet)",
     );
+  });
+
+  test("malformed marker index yields null instead of a guessed boundary", () => {
+    expect(
+      buildLensMessages(branchWithSide(), branchWithSide(), -1),
+    ).toBeNull();
+    expect(buildLensMessages([], [], 0)).toBeNull();
   });
 });
 
@@ -355,5 +421,40 @@ describe("arguments and completions", () => {
       id: ":low",
       baseId: ":low",
     });
+  });
+});
+
+describe("activeSideModel", () => {
+  test("prefers the last model_change after the marker over the marker's model", () => {
+    const raw: SessionEntry[] = [
+      userEntry("q"),
+      markerEntry(markerData),
+      {
+        type: "model_change",
+        provider: "kilo",
+        modelId: "glm-5.3-flash",
+        id: id(),
+        parentId: "root",
+        timestamp: new Date(6).toISOString(),
+      },
+      userEntry("side turn"),
+      {
+        type: "model_change",
+        provider: "openai",
+        modelId: "gpt-5.2",
+        id: id(),
+        parentId: "root",
+        timestamp: new Date(7).toISOString(),
+      },
+    ];
+    expect(activeSideModel(raw, markerData)).toEqual({
+      provider: "openai",
+      id: "gpt-5.2",
+    });
+  });
+
+  test("falls back to the marker's model when no model_change follows it", () => {
+    const raw = branchWithSide();
+    expect(activeSideModel(raw, markerData)).toEqual(markerData.sideModel);
   });
 });

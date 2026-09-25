@@ -52,6 +52,8 @@ import { logGoodiesEvent } from "./goodies-log.ts";
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 type ModelRef = { provider: string; id: string };
+/** copy-trajectory's turn shape (built by buildTrajectory). */
+export type QuoteTurn = ReturnType<typeof buildTrajectory>[number];
 
 interface SideMarkerData {
   v: 1;
@@ -147,17 +149,85 @@ Below is a transcript of that session so far. You were NOT a participant: every 
  * own messages projected with pi's native entry→context semantics.
  * Returns null when the branch is not a side session.
  */
+/**
+ * Assemble quote turns from context entries: conversation messages in the
+ * copy-trajectory format, prior side handoffs as attributed assistant turns,
+ * and compaction/branch summaries as marked turns — so a compacted history
+ * still reaches the reader as text instead of vanishing (aware views drop
+ * summarized-away entries; raw walks would resend all of them).
+ */
+export function buildQuoteTurns(entries: readonly SessionEntry[]): QuoteTurn[] {
+  const turns: QuoteTurn[] = [];
+  for (const entry of entries) {
+    if (entry.type === "message") {
+      const [turn] = buildTrajectory([entry], false);
+      if (turn) turns.push(turn);
+    } else if (
+      entry.type === "custom_message" &&
+      entry.customType === SIDE_HANDOFF_TYPE
+    ) {
+      const details = entry.details;
+      const d =
+        typeof details === "object" && details !== null
+          ? (details as Record<string, unknown>)
+          : undefined;
+      const model = parseModelRef(d?.model);
+      const kind = d?.kind === "summary" ? "summary" : "trajectory";
+      const body = extractTextParts(entry.content).join("\n").trim();
+      if (body) {
+        turns.push({
+          role: "Assistant",
+          ...(model ? { model: modelRef(model) } : {}),
+          body: `[prior side ${kind} handoff]\n\n${body}`,
+        });
+      }
+    } else if (entry.type === "compaction") {
+      const body = entry.summary.trim();
+      if (body) {
+        turns.push({
+          role: "Assistant",
+          body: `[compaction summary of earlier history]\n\n${body}`,
+        });
+      }
+    } else if (entry.type === "branch_summary") {
+      const body = entry.summary.trim();
+      if (body) {
+        turns.push({
+          role: "Assistant",
+          body: `[summary of an abandoned branch]\n\n${body}`,
+        });
+      }
+    }
+  }
+  return turns;
+}
+
+/**
+ * Build the side-agent request view: one attributed quote message covering
+ * the main part of the COMPACTION-AWARE entry list, then the side limb's own
+ * messages projected with pi's native entry→context semantics. The side/main
+ * split uses the side-limb id set from the raw branch, so a marker or side
+ * entries compacted away mid-session cannot corrupt the boundary.
+ * Returns null when markerIdx does not mark a side session.
+ */
 export function buildLensMessages(
-  branch: readonly SessionEntry[],
+  awareEntries: readonly SessionEntry[],
+  rawBranch: readonly SessionEntry[],
+  markerIdx: number,
   eventMessages: ReadonlyArray<ContextEvent["messages"][number]>,
 ): ContextEvent["messages"] | null {
-  const markerIdx = findSideBoundary(branch);
-  if (markerIdx === -1) return null;
+  if (markerIdx < 0 || markerIdx >= rawBranch.length) return null;
 
-  const mainEntries = branch.slice(0, markerIdx);
-  const sideEntries = branch.slice(markerIdx + 1);
+  const sideIds = new Set(
+    rawBranch.slice(markerIdx + 1).map((entry) => entry.id),
+  );
+  const mainPart: SessionEntry[] = [];
+  const sidePart: SessionEntry[] = [];
+  for (const entry of awareEntries) {
+    (sideIds.has(entry.id) ? sidePart : mainPart).push(entry);
+  }
 
-  const turns = buildTrajectory(mainEntries, false);
+  const turns = buildQuoteTurns(mainPart);
   const transcript =
     turns.length > 0
       ? renderTrajectory(turns)
@@ -176,14 +246,17 @@ export function buildLensMessages(
 
   const messages: ContextEvent["messages"] = [
     quote,
-    ...sideEntries.flatMap((entry) => sessionEntryToContextMessages(entry)),
+    ...sidePart.flatMap((entry) => sessionEntryToContextMessages(entry)),
   ];
 
   // Guard: if the just-submitted prompt has not landed as an entry yet (first
   // side turn), keep it so the request is not answered without a question.
+  const sideHasUserMessage = sidePart.some(
+    (entry) => entry.type === "message" && entry.message.role === "user",
+  );
   const lastEvent = eventMessages[eventMessages.length - 1];
   if (
-    sideEntries.length === 0 &&
+    !sideHasUserMessage &&
     lastEvent !== undefined &&
     lastEvent.role === "user"
   ) {
@@ -389,6 +462,25 @@ function sideMarkerFromBranch(
   return data ? { entry, data } : null;
 }
 
+/**
+ * The model actually serving this side limb: the branch's last model_change
+ * after the marker (a mid-side /side provider/x swap updates it), falling
+ * back to the model the marker recorded.
+ */
+export function activeSideModel(
+  rawBranch: readonly SessionEntry[],
+  markerData: SideMarkerData,
+): ModelRef {
+  const markerIdx = findSideBoundary(rawBranch);
+  for (let i = rawBranch.length - 1; i > markerIdx; i--) {
+    const entry = rawBranch[i];
+    if (entry?.type === "model_change") {
+      return { provider: entry.provider, id: entry.modelId };
+    }
+  }
+  return markerData.sideModel;
+}
+
 async function summarizeDelta(
   ctx: ExtensionCommandContext,
   sideModel: ModelRef,
@@ -423,9 +515,26 @@ async function summarizeDelta(
 export default function side(pi: ExtensionAPI): void {
   // Lens: rewrite side-agent requests so the main trajectory arrives as an
   // attributed quote instead of the side model's own history.
+  // Lens: rewrite side-agent requests so the main trajectory arrives as an
+  // attributed quote instead of the side model's own history. Detection uses
+  // the raw branch (the marker is always an ancestor there); content uses
+  // the compaction-aware entry list so compacted-away history appears as a
+  // summary turn in the quote, not as resent raw messages — and compaction
+  // can actually shrink the lensed request.
   pi.on("context", (event, ctx) => {
+    const raw = ctx.sessionManager.getBranch();
+    const markerIdx = findSideBoundary(raw);
+    if (markerIdx === -1) return;
+    const markerEntry = raw[markerIdx];
+    const markerData =
+      markerEntry?.type === "custom"
+        ? parseSideMarkerData(markerEntry.data)
+        : null;
+    if (!markerData) return; // malformed marker: lens off rather than guessing
     const messages = buildLensMessages(
-      ctx.sessionManager.getBranch(),
+      ctx.sessionManager.buildContextEntries(),
+      raw,
+      markerIdx,
       event.messages,
     );
     return messages ? { messages } : undefined;
@@ -436,15 +545,32 @@ export default function side(pi: ExtensionAPI): void {
     if (sideMarkerFromBranch(ctx)) updateBadge(ctx, event.model);
   });
 
-  // Restore the badge when a session resumes already on a side limb.
+  // Manual /tree navigation onto or off a side limb changes lens state
+  // without any command of ours — keep the badge in step.
+  pi.on("session_tree", (_event, ctx) => {
+    const marker = sideMarkerFromBranch(ctx);
+    if (marker) {
+      updateBadge(
+        ctx,
+        activeSideModel(ctx.sessionManager.getBranch(), marker.data),
+      );
+    } else {
+      ctx.ui.setStatus("side", undefined);
+    }
+  });
+
+  // Restore the badge when a session resumes already on a side limb. The
+  // effective model is the branch's last model_change (a mid-side
+  // /side provider/x swap updates it; the marker keeps the original).
   pi.on("session_start", (_event, ctx) => {
     const marker = sideMarkerFromBranch(ctx);
     if (marker) {
-      updateBadge(ctx, marker.data.sideModel);
-      logGoodiesEvent({
-        type: "side_resumed",
-        model: modelRef(marker.data.sideModel),
-      });
+      const active = activeSideModel(
+        ctx.sessionManager.getBranch(),
+        marker.data,
+      );
+      updateBadge(ctx, active);
+      logGoodiesEvent({ type: "side_resumed", model: modelRef(active) });
     }
   });
 
@@ -627,7 +753,7 @@ export default function side(pi: ExtensionAPI): void {
         marker.entry.id,
       );
       const delta = deltaSideEntries(sideEntries, coveredUpTo);
-      const deltaTurns = buildTrajectory(delta, false);
+      const deltaTurns = buildQuoteTurns(delta);
 
       let mode: ExitMode | undefined = parsed;
       if (mode === undefined) {
@@ -665,6 +791,10 @@ export default function side(pi: ExtensionAPI): void {
             renderTrajectory(deltaTurns),
           );
         } catch (error) {
+          logGoodiesEvent({
+            type: "side_summary_failed",
+            error: describeError(error),
+          });
           ctx.ui.notify(`side-exit: ${describeError(error)}`, "error");
           return;
         }
@@ -702,6 +832,11 @@ export default function side(pi: ExtensionAPI): void {
             "warning",
           );
         }
+      } else {
+        ctx.ui.notify(
+          "side-exit: no main model was parked (model was unavailable at /side) — staying on the side model",
+          "warning",
+        );
       }
       ctx.ui.setStatus("side", undefined);
 
