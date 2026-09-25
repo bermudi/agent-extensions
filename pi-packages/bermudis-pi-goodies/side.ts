@@ -508,7 +508,7 @@ function sideMarkerFromBranch(
 
 /**
  * The model actually serving this side limb: the branch's last model_change
- * after the marker (a mid-side /side provider/x swap updates it), falling
+ * after the marker (a mid-side ctrl+l switch updates it), falling
  * back to the model the marker recorded.
  */
 export function activeSideModel(
@@ -605,7 +605,7 @@ export default function side(pi: ExtensionAPI): void {
 
   // Restore the badge when a session resumes already on a side limb. The
   // effective model is the branch's last model_change (a mid-side
-  // /side provider/x swap updates it; the marker keeps the original).
+  // ctrl+l switch updates it; the marker keeps the original).
   pi.on("session_start", (_event, ctx) => {
     modelRegistryRef = ctx.modelRegistry; // for /side argument completions
     const marker = sideMarkerFromBranch(ctx);
@@ -675,9 +675,12 @@ export default function side(pi: ExtensionAPI): void {
       const markerIdx = findSideBoundary(branch);
       const arg = args.trim();
 
-      if (markerIdx !== -1 && arg === "") {
+      // Model switching inside a side session is pi's own ctrl+l — the
+      // model_select handler keeps the badge honest and /side-exit reads the
+      // live model — so /side has no in-side behavior at all.
+      if (markerIdx !== -1) {
         ctx.ui.notify(
-          "side: already in a side session — /side-exit to return, or /side provider/model-id to swap the model",
+          "side: already in a side session — ctrl+l switches the side model, /side-exit to return",
           "warning",
         );
         return;
@@ -736,12 +739,6 @@ export default function side(pi: ExtensionAPI): void {
       }
       updateBadge(ctx, model);
 
-      if (markerIdx !== -1) {
-        ctx.ui.notify(`side model swapped to ${modelRef(model)}`, "info");
-        logGoodiesEvent({ type: "side_model_swap", model: modelRef(model) });
-        return;
-      }
-
       // setModel appends a model_change entry; the marker branches from the
       // new leaf so the parked tip includes it.
       const mainTipId = ctx.sessionManager.getLeafId();
@@ -798,7 +795,7 @@ export default function side(pi: ExtensionAPI): void {
       const branch = ctx.sessionManager.getBranch();
       const markerIdx = findSideBoundary(branch);
       // The handoff must speak for the model actually serving the side limb
-      // at exit — a mid-side /side provider/x swap updates model_change
+      // at exit — a mid-side ctrl+l switch updates model_change
       // entries, not the marker.
       const effectiveSide = activeSideModel(branch, marker.data);
       const sideEntries = branch.slice(markerIdx + 1);

@@ -390,9 +390,10 @@ Details worth knowing:
 - The footer badge (`side: kilo/glm-5.3`) tracks the active side model,
   including manual ctrl+l switches; it is restored when pi reopens a session
   that is already on a side limb. Handoffs speak for the model actually
-  active at exit (a mid-side `/side provider/x` swap changes the summarizer
+  active at exit (a mid-side ctrl+l switch changes the summarizer
   and the handoff labels), while the transcript itself keeps per-turn model
-  attribution.
+  attribution. `/side` inside a side session just points you at ctrl+l —
+  pi's model selector is the swap mechanism.
 - Thinking levels round-trip: pi's model switch applies the per-model default
   level, so the marker snapshots the session level at entry and `/side-exit`
   restores it explicitly — a session parked at `:low` comes back at `:low`,
