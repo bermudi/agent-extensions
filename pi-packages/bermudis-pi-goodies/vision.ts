@@ -45,6 +45,7 @@ import type {
 import {
   createBurstRenderer,
   isCleanTuiActive,
+  previewLines,
   shortenPath,
 } from "./clean-tui.ts";
 
@@ -153,11 +154,16 @@ const visionBurstSpec = {
   groupedDetails(entries: any[], theme: any) {
     return entries
       .map((e) => {
-        const label = `— ${shortenPath(e.args.path || "...")}${e.args.followUp ? " (follow-up)" : ""}: "${questionPreview(e.args.prompt, 90)}"`;
+        // Read-view rule: info that is missing is skipped, never rendered as
+        // junk (no `: ""` when a prompt is absent) — and long answers get the
+        // same 12-line preview + "... N more lines" note as every other tool.
+        const follow = e.args.followUp ? " (follow-up)" : "";
+        const q = questionPreview(e.args.prompt, 90);
+        const label = `— ${shortenPath(e.args.path || "...")}${follow}${q ? `: "${q}"` : ""}`;
         if (!e.result) return `\n${theme.fg("warning", `${label} (pending)`)}`;
         const txt = answerText(e.result);
         if (!txt) return `\n${theme.fg("muted", label)}`;
-        return `\n${theme.fg("muted", label)}\n${e.isError ? theme.fg("error", txt) : theme.fg("toolOutput", txt)}`;
+        return `\n${theme.fg("muted", label)}\n${e.isError ? theme.fg("error", txt) : previewLines(txt, theme)}`;
       })
       .join("");
   },

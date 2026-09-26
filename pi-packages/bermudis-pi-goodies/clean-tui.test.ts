@@ -5,6 +5,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import cleanTui, {
   __clearSummaryCache,
   __resetThinkingSummariesForTesting,
+  __historyStatsForTesting,
   __setSummaryBackoffForTesting,
   __setSummaryBackendForTesting,
   __setSummaryEnabled,
@@ -15,6 +16,7 @@ import cleanTui, {
   __setSummarySwapMaxAgeForTesting,
   __setSummaryUiForTesting,
   __setThinkingThresholdsForTesting,
+  __summaryCacheSizeForTesting,
   convertSummaryResponse,
   humanizeProviderError,
   setCleanTuiActive,
@@ -23,7 +25,7 @@ import vision, {
   __setCompletionModelsForTesting,
   wrapVisionAutocomplete,
 } from "./vision";
-import { PiHarness, type Theme } from "pi-harness";
+import { PiHarness, type Theme, type ToolRow } from "pi-harness";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -31,7 +33,7 @@ import {
   setThinkingSummariesEnabled,
   __setConfigPathForTesting,
 } from "./goodies";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 // Every cleanTui() load appends a line to the summary log; keep all tests off
@@ -3608,5 +3610,297 @@ describe("clean-tui rendering edge cases", () => {
     const r2 = h2.row("read", "r2");
     r2.setArgs({ path: `${home}/notes.txt` });
     expect(textOf(r2.lastCallComponent)).toContain("~/notes.txt");
+  });
+});
+
+describe("clean-tui result wake-ups", () => {
+  // pi's updateDisplay runs renderCall BEFORE renderResult in the same pass,
+  // so the paint produced when a result arrives reflects pre-result state.
+  // Only rows woken afterwards (their own invalidate, or a neighbor's) ever
+  // re-run renderCall with the recorded result. These tests pin the self-wake:
+  // a row with no groupable neighbor must still update itself.
+  const taggingTheme: Theme = {
+    fg: (_c, t) => t,
+    bg: (c, t) => `<${c}>${t}`,
+    bold: (t) => t,
+  };
+
+  function boxBg(row: ToolRow): string | undefined {
+    return (
+      row.lastCallComponent as unknown as { bgFn?: (s: string) => string }
+    ).bgFn?.("probe");
+  }
+
+  test("a solo row flips from pending to success when its result lands", () => {
+    const h = new PiHarness({ theme: taggingTheme });
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "solo");
+    row.setArgs({ command: "echo done" });
+    expect(boxBg(row)).toBe("<toolPendingBg>probe");
+    row.setResult({ content: [{ type: "text", text: "done" }] });
+    expect(boxBg(row)).toBe("<toolSuccessBg>probe");
+  });
+
+  test("a solo failure turns red when its result lands", () => {
+    const h = new PiHarness({ theme: taggingTheme });
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "solo-fail");
+    row.setArgs({ command: "false" });
+    expect(boxBg(row)).toBe("<toolPendingBg>probe");
+    row.setResult({ content: [{ type: "text", text: "boom" }], isError: true });
+    expect(boxBg(row)).toBe("<toolErrorBg>probe");
+  });
+
+  test("an image result at the end of a burst splits off into its own row", () => {
+    // A middle image only appeared because the next job woke it; the last
+    // one had no next job. With the self-wake the image row re-renders itself
+    // as a solo row (with its [image] marker) the moment its result lands.
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const a = h.row("read", "a");
+    const b = h.row("read", "b");
+    a.setArgs({ path: "/tmp/one.txt" });
+    b.setArgs({ path: "/tmp/two.png" });
+    a.setResult({ content: [{ type: "text", text: "one" }] });
+    expect(textOf(a.lastCallComponent)).toContain("read ×2");
+    b.setResult({
+      content: [
+        { type: "text", text: "Read image file [image/png]" },
+        { type: "image", data: "AAAA", mimeType: "image/png" },
+      ],
+    });
+    // The burst splits: the leader is solo again, without the image row.
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(textOf(a.lastCallComponent)).not.toContain("two.png");
+    // And the image row itself renders — no longer a hidden follower.
+    const bText = textOf(b.lastCallComponent);
+    expect(bText).toContain("two.png");
+    expect(bText).toContain("[image]");
+  });
+});
+
+describe("clean-tui execute passthrough", () => {
+  // A real 1x1 PNG: the built-in read's execute appends a
+  // "[Current model does not support images...]" note based on ctx.model —
+  // observable proof that ctx survives the override's delegation.
+  const PNG_1x1 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  test("execute forwards ctx to the built-in tool", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctxpass-"));
+    writeFileSync(join(dir, "img.png"), Buffer.from(PNG_1x1, "base64"));
+    const h = freshHarness();
+    const result = (await (h.tool("read") as any).execute(
+      "probe-read",
+      { path: join(dir, "img.png") },
+      undefined,
+      undefined,
+      { cwd: dir, model: { input: ["text"] } },
+    )) as { content: Array<{ type: string; text?: string }> };
+    const text = result.content.find((c) => c.type === "text")?.text ?? "";
+    expect(text).toContain("Read image file");
+    expect(text).toContain("does not support images");
+  });
+});
+
+describe("clean-tui summary widget link", () => {
+  test("setWidget keeps its receiver — called through pi's ui object", async () => {
+    // The session_start capture used to store a DETACHED setWidget function.
+    // pi currently hands over a closure so detaching happens to work, but a
+    // prototype method would lose `this` and die. Call the handler with a
+    // ui whose setWidget IS a prototype method and prove the failure path
+    // reaches it.
+    class Ui {
+      widgets = new Map<string, unknown>();
+      setWidget(key: string, content: unknown) {
+        this.widgets.set(key, content);
+      }
+    }
+    const ui = new Ui();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    for (const handler of h.handlers.get("session_start") ?? []) {
+      handler({ reason: "startup" }, {
+        hasUI: true,
+        ui: ui as never,
+        sessionManager: { getBranch: () => [] },
+      } as never);
+    }
+    __setSummaryBackendForTesting({
+      summarize: async () => {
+        throw new Error("429: rate limited (test/model)");
+      },
+    });
+    const cfgDir = mkdtempSync(join(tmpdir(), "cfg-link-"));
+    __setConfigPathForTesting(join(cfgDir, "goodies.json"));
+    setSummaryModel("test/model");
+    __clearSummaryCache();
+    __setSummaryEnabled(true);
+    __setSummaryBackoffForTesting(0, 0);
+    h.emit("agent_start");
+    const row = h.row("bash", "link");
+    row.setArgs({
+      // Over the 80-char summary threshold so a request actually fires.
+      command:
+        "cat >> \"PsVita/Archive/MIGRATION-LOG.md\" << 'EOF'\n### First reboot verification — PASS\ndetail\nEOF",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    // Recorded ON THE INSTANCE — the receiver survived the round trip.
+    expect(ui.widgets.has("bermudis-pi-goodies.summaries")).toBe(true);
+    // Cleanup: restore every global this test touched.
+    __setSummaryUiForTesting(undefined);
+    __setSummaryBackendForTesting(undefined);
+    __setSummaryModelRegistryForTesting(undefined);
+    __setSummaryEnabled(false);
+    __setSummaryBackoffForTesting(30_000, 15 * 60_000);
+    __setConfigPathForTesting(join(homedir(), ".pi", "agent", "goodies.json"));
+  });
+});
+
+describe("clean-tui history caps", () => {
+  test("entries pruned once past the cap; id maps stay in lockstep", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    for (let i = 0; i < 600; i++) {
+      h.row("ls", `ls-${i}`).setArgs({ path: `/tmp/${i}` });
+    }
+    let stats = __historyStatsForTesting();
+    expect(stats.entries).toBe(600);
+    expect(stats.entryById).toBe(600);
+    // The 601st entry crosses the cap: pruned down to the keep size, with
+    // both id maps agreeing (no orphaned invalidate closures either).
+    h.row("ls", "ls-600").setArgs({ path: "/tmp/600" });
+    stats = __historyStatsForTesting();
+    expect(stats.entries).toBe(400);
+    expect(stats.entryById).toBe(400);
+    expect(stats.invalidateById).toBe(400);
+  });
+
+  test("grouping still works at the tail after pruning", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    for (let i = 0; i < 605; i++) {
+      h.row("ls", `fill-${i}`).setArgs({ path: `/tmp/${i}` });
+    }
+    // 601st row pruned to 400; rows 602–605 push back to 404.
+    expect(__historyStatsForTesting().entries).toBe(404);
+    // Fresh rows after a prune still group normally (different tool so the
+    // filler rows cannot join the burst).
+    const a = h.row("grep", "g1");
+    const b = h.row("grep", "g2");
+    a.setArgs({ pattern: "tail", path: "/tmp" });
+    b.setArgs({ pattern: "tail", path: "/tmp" });
+    a.setResult({ content: [{ type: "text", text: "hit" }] });
+    b.setResult({ content: [{ type: "text", text: "hit" }] });
+    expect(textOf(a.lastCallComponent)).toContain("grep ×2");
+  });
+
+  test("summary cache is capped", async () => {
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    __setSummaryBackendForTesting({
+      summarize: async (cmd: string) => cmd.slice(0, 12),
+    });
+    const cfgDir = mkdtempSync(join(tmpdir(), "cfg-cap-"));
+    __setConfigPathForTesting(join(cfgDir, "goodies.json"));
+    setSummaryModel("test/model");
+    __clearSummaryCache();
+    __setSummaryEnabled(true);
+    for (let i = 0; i < 205; i++) {
+      h.row("bash", `cap-${i}`).setArgs({
+        command: `echo ${i} ${"x".repeat(90)}`,
+      });
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(__summaryCacheSizeForTesting()).toBe(200);
+    // Cleanup.
+    __setSummaryBackendForTesting(undefined);
+    __setSummaryModelRegistryForTesting(undefined);
+    __setSummaryEnabled(false);
+    __setConfigPathForTesting(join(homedir(), ".pi", "agent", "goodies.json"));
+  });
+});
+
+describe("clean-tui expanded view parity", () => {
+  const longText = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join(
+    "\n",
+  );
+  const argsByTool: Record<string, Record<string, string>> = {
+    read: { path: "/tmp/a" },
+    bash: { command: "echo hi" },
+    find: { pattern: "*.ts" },
+    grep: { pattern: "foo" },
+    ls: { path: "/tmp" },
+    edit: { path: "/tmp/a" },
+  };
+
+  test("grouped details cut long output with a more-lines note (every tool)", () => {
+    // Read's rule everywhere: first 12 lines + "... N more lines" when
+    // anything was cut. A cut with no note reads as the complete output.
+    for (const tool of Object.keys(argsByTool)) {
+      const h = freshHarness();
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const a = h.row(tool, "a");
+      const b = h.row(tool, "b");
+      a.setArgs(argsByTool[tool]);
+      b.setArgs(argsByTool[tool]);
+      a.setResult({ content: [{ type: "text", text: longText }] });
+      b.setResult({ content: [{ type: "text", text: "ok" }] });
+      a.setExpanded(true);
+      const text = textOf(a.lastCallComponent);
+      expect(text).toContain("line 12");
+      expect(text).not.toContain("line 13");
+      expect(text).toContain("... 18 more lines");
+    }
+  });
+
+  test("missing pattern never renders as 'undefined'", () => {
+    // Regression: find/grep grouped details interpolated e.args.pattern
+    // unguarded, printing "— undefined:" into the expanded view.
+    for (const tool of ["find", "grep"]) {
+      const h = freshHarness();
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const a = h.row(tool, "a");
+      const b = h.row(tool, "b");
+      a.setArgs({});
+      b.setArgs({});
+      a.setResult({ content: [{ type: "text", text: "match" }] });
+      b.setResult({ content: [{ type: "text", text: "match" }] });
+      a.setExpanded(true);
+      expect(textOf(a.lastCallComponent)).not.toContain("undefined");
+    }
+  });
+
+  test("vision grouped details: no empty-quote junk; long answers get the note", () => {
+    const h = freshHarness();
+    const api = Object.create(h.api) as Record<string, unknown>;
+    api.registerCommand = () => {};
+    api.getActiveTools = () => ["vision"];
+    api.setActiveTools = () => {};
+    vision(api as never);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const a = h.row("vision", "a");
+    const b = h.row("vision", "b");
+    a.setArgs({ path: "/tmp/shot.png" }); // no prompt
+    b.setArgs({ path: "/tmp/shot2.png", prompt: "what is this?" });
+    a.setResult({ content: [{ type: "text", text: longText }] });
+    b.setResult({ content: [{ type: "text", text: "a chart" }] });
+    a.setExpanded(true);
+    const text = textOf(a.lastCallComponent);
+    expect(text).not.toContain('""');
+    expect(text).toContain("shot.png");
+    expect(text).toContain("... 18 more lines");
   });
 });

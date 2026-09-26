@@ -143,7 +143,10 @@ type Entry = {
    * groups. Calls with no boundary between them share a segment.
    */
   seg: number;
-  /** Position in `entries`; stable because entries are append-only. */
+  /**
+   * Monotonic creation number (its position in `entries` is
+   * `index - entriesBase`; the base advances when history is pruned).
+   */
   index: number;
   result?: {
     content: Array<{ type: string; text?: string; data?: string }>;
@@ -186,8 +189,37 @@ let curAssistantMessage: any;
 let replaying = true;
 const replaySegByToolCallId = new Map<string, number>();
 const entries: Entry[] = [];
+// `entries[0]`'s position in the monotonic entry numbering. Pruning drops
+// from the front (pruneHistoryIfNeeded) and advances this base, so an
+// entry's `index` stays stable for its lifetime while its position in the
+// array shifts. Callers that need an array position subtract the base.
+let entriesBase = 0;
 const entryById = new Map<string, Entry>();
 const invalidateById = new Map<string, () => void>();
+
+// History cap. `entries` is walked linearly by stampSummaryRequested on
+// every bash renderCall and by invalidateRowsForCommand on every summary
+// landing, so an unbounded history makes long sessions slower as they grow
+// (thousands of finished rows re-scanned per render). Prune down to KEEP
+// once MAX is exceeded. Pruned rows keep whatever is already painted on
+// screen — pi components hold their own output — but a LATE re-render of a
+// pruned row (expanding a burst far up the transcript) re-registers it as a
+// solo row: burst context beyond the cap is gone. Cheap by design: entries
+// are small metadata; the result payloads belong to pi's components.
+const MAX_HISTORY_ENTRIES = 600;
+const HISTORY_KEEP_ENTRIES = 400;
+
+/** Drop the oldest history once the cap is exceeded (see MAX_HISTORY_ENTRIES). */
+function pruneHistoryIfNeeded(): void {
+  if (entries.length <= MAX_HISTORY_ENTRIES) return;
+  const drop = entries.length - HISTORY_KEEP_ENTRIES;
+  for (let i = 0; i < drop; i++) {
+    entryById.delete(entries[i].toolCallId);
+    invalidateById.delete(entries[i].toolCallId);
+  }
+  entries.splice(0, drop);
+  entriesBase += drop;
+}
 
 function upsertEntry(
   toolCallId: string,
@@ -215,10 +247,11 @@ function upsertEntry(
       toolName,
       args,
       seg,
-      index: entries.length,
+      index: entries.length + entriesBase,
     };
     entries.push(e);
     entryById.set(toolCallId, e);
+    pruneHistoryIfNeeded();
   } else {
     e.args = args;
   }
@@ -326,7 +359,7 @@ function getBurstForId(
 ): { entries: Entry[]; index: number } | null {
   const entry = entryById.get(toolCallId);
   if (!entry) return null;
-  const idx = entry.index;
+  const idx = entry.index - entriesBase;
   let start = idx;
   while (start > 0 && shouldGroup(entries[start - 1], entries[start])) start--;
   let end = idx;
@@ -362,11 +395,21 @@ function revalidateBurstsAround(changedId: string) {
   // burst; pending/error flags surface on the leader). Rerender those runs —
   // bounded, unlike scanning the whole history per result.
   //
-  // The changed row itself is NOT invalidated here: pi is already re-rendering
-  // it (we are inside its render slot), and invalidating it would synchronously
-  // re-enter this code path via updateDisplay -> renderResult -> invalidate.
-  const idx = changed.index;
-  const ranges: Array<[number, number]> = [];
+  // The changed row's OWN run is included deliberately. pi's updateDisplay
+  // runs renderCall BEFORE renderResult in the same pass, so the box painted
+  // when a result arrives still reflects pre-result state. Neighbors were
+  // already woken here, but a row with no groupable neighbor had no wake-up
+  // at all: a solo row stayed "running" after it finished, a solo failure
+  // never turned red, and an image result at the END of a burst never split
+  // off into its own row (a middle image only appeared because the next job
+  // woke it). The self-wake closes all three.
+  //
+  // The synchronous re-entry (invalidate -> updateDisplay -> renderResult
+  // -> recordResult) terminates immediately: the contentRef check above
+  // classifies the replayed wrapper as a plain re-render, not a new result,
+  // so no further invalidation fires.
+  const idx = changed.index - entriesBase;
+  const ranges: Array<[number, number]> = [runAround(idx)];
   if (idx > 0) ranges.push(runAround(idx - 1));
   if (idx + 1 < entries.length) ranges.push(runAround(idx + 1));
   const seen = new Set<number>();
@@ -450,6 +493,12 @@ const THINKING_SUMMARY_PROMPT =
 const SUMMARY_ERROR_SNIPPET_CHARS = 200;
 
 const summaryCache = new Map<string, string>();
+// Cache cap: one entry per distinct long command, and the key is the FULL
+// command text (heredocs make fat keys), so a long session accumulates
+// without bound. FIFO eviction is the right shape — recent commands are the
+// ones whose rows still re-render; an evicted command just falls back to
+// its raw text if it ever reappears.
+const SUMMARY_CACHE_MAX = 200;
 const pendingSummaries = new Set<string>();
 // Commands whose requests were deferred by the inflight cap or a failure
 // backoff. Drained whenever a slot frees (request settle) or a later
@@ -566,6 +615,24 @@ export function __clearSummaryCache(): void {
   summaryFailStreak = 0;
   summaryBlockedUntil = 0;
   summaryFailureWaveObservedAt = 0;
+}
+
+/** History sizes for tests (entries cap + id maps must stay in lockstep). */
+export function __historyStatsForTesting(): {
+  entries: number;
+  entryById: number;
+  invalidateById: number;
+} {
+  return {
+    entries: entries.length,
+    entryById: entryById.size,
+    invalidateById: invalidateById.size,
+  };
+}
+
+/** Saved-summary count for tests (the cache is capped, not unbounded). */
+export function __summaryCacheSizeForTesting(): number {
+  return summaryCache.size;
 }
 
 function isSummarizable(cmd: string): boolean {
@@ -1275,6 +1342,11 @@ function startSummaryRequest(cmd: string): void {
         pendingSummaries.delete(cmd);
         const recovered = noteSummarySuccess(requestStartedAt);
         summaryCache.set(cmd, normalizeSummary(result.text));
+        while (summaryCache.size > SUMMARY_CACHE_MAX) {
+          const oldest = summaryCache.keys().next().value;
+          if (oldest === undefined) break;
+          summaryCache.delete(oldest);
+        }
         logGoodiesEvent({
           type: "summary_request",
           outcome: "ok",
@@ -1751,6 +1823,25 @@ function makeBox(
   return box;
 }
 
+/**
+ * The shared expanded-detail rule (the read view's): preview the first `max`
+ * lines, and whenever anything was cut, append a muted "... N more lines"
+ * note — a cut with no note reads as the complete output. Every burst tool's
+ * grouped details use this so the expanded view stays even across tools;
+ * missing info is skipped or guarded by the callers, never interpolated.
+ */
+export function previewLines(txt: string, theme: any, max = 12): string {
+  const lines = txt.split("\n");
+  const shown = lines
+    .slice(0, max)
+    .map((l) => theme.fg("toolOutput", l))
+    .join("\n");
+  const remaining = lines.length - max;
+  return remaining > 0
+    ? `${shown}\n${theme.fg("muted", `... ${remaining} more lines`)}`
+    : shown;
+}
+
 /** While set, sibling extension tools in this package render in burst style
  *  (same contract @bermudi/pi-codex mirrors via Symbol.for). Set at load,
  *  cleared when the feature is disabled, so /reload converges. Consumers must
@@ -1835,6 +1926,9 @@ export function createBurstRenderer(spec: BurstToolSpec): {
 
       // solo
       let line = spec.soloHeader(args, theme, ctx);
+      // Image parity with grouped bullets: a solo image read is visibly
+      // marked too (the image itself is painted by pi's image layer).
+      if (entry.hasImage) line += theme.fg("success", " [image]");
       if (ctx.expanded) {
         const extra = spec.soloExpanded(entry, args, theme);
         if (extra) line += `\n${extra}`;
@@ -2067,6 +2161,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
     curAssistantMessage = undefined;
     replaying = true;
     entries.length = 0;
+    entriesBase = 0;
     entryById.clear();
     invalidateById.clear();
     pendingSummaries.clear();
@@ -2081,11 +2176,16 @@ export default function cleanTui(pi: ExtensionAPI): void {
     // undefined and every TUI failure took the console.error branch, flashing
     // raw stderr across the terminal; the widget never showed.
     const ui = (ctx as { ui?: Partial<SummaryUi> } | undefined)?.ui;
-    const setWidget = ui?.setWidget;
-    if (typeof setWidget === "function") {
+    if (ui && typeof ui.setWidget === "function") {
+      // Call through the ui object — never through a detached copy of the
+      // method. The receiver IS the link back to pi: today ctx.ui.setWidget
+      // arrives as a closure so detaching happens to work, but that is an
+      // implementation detail; a prototype method would lose `this` and
+      // silently break. Tests inject plain functions, so only calling
+      // through the object keeps this honest.
       summaryUi = {
         hasUI: ctx.hasUI,
-        setWidget: (key, content) => setWidget(key, content),
+        setWidget: (key, content) => ui.setWidget!(key, content),
       };
     }
     clearSummaryPauseWidget();
@@ -2146,7 +2246,13 @@ export default function cleanTui(pi: ExtensionAPI): void {
       ...createBurstRenderer(spec),
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         const tool = (getBuiltInTools(ctx.cwd) as any)[spec.name];
-        return tool.execute(toolCallId, params, signal, onUpdate);
+        // Forward the ENTIRE pi call, ctx included. The built-ins mostly
+        // ignore ctx today (they fall back to their construction cwd), but
+        // not entirely: read's execute already reads ctx.model to append the
+        // visionless-model image note, and any future field would be
+        // silently dropped by a partial passthrough — the kind of quiet
+        // breakage nothing tests because "it works today".
+        return tool.execute(toolCallId, params, signal, onUpdate, ctx);
       },
     });
   }
@@ -2171,16 +2277,9 @@ export default function cleanTui(pi: ExtensionAPI): void {
         }
         const txt = resultText(e.result as any);
         if (!txt) continue;
-        const preview = txt
-          .split("\n")
-          .slice(0, 12)
-          .map((l) => theme.fg("toolOutput", l))
-          .join("\n");
-        const remaining = txt.split("\n").length - 12;
-        let block = `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}:\n${preview}`;
-        if (remaining > 0)
-          block += `\n${theme.fg("muted", `... ${remaining} more lines`)}`;
-        details.push(block);
+        details.push(
+          `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}:\n${previewLines(txt, theme)}`,
+        );
       }
       return details.length ? `\n${details.join("\n")}` : "";
     },
@@ -2232,12 +2331,9 @@ export default function cleanTui(pi: ExtensionAPI): void {
           details.push(`\n${theme.fg("muted", `— $ ${cmd}`)}`);
           continue;
         }
-        const preview = txt
-          .split("\n")
-          .slice(0, 12)
-          .map((l) => theme.fg("toolOutput", l))
-          .join("\n");
-        details.push(`\n${theme.fg("muted", `— $ ${cmd}`)}:\n${preview}`);
+        details.push(
+          `\n${theme.fg("muted", `— $ ${cmd}`)}:\n${previewLines(txt, theme)}`,
+        );
       }
       return details.length ? `\n${details.join("\n")}` : "";
     },
@@ -2310,7 +2406,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
         .map((e) => {
           const txt = e.result ? resultText(e.result as any) : undefined;
           return txt
-            ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}:\n${theme.fg("toolOutput", txt.slice(0, 600))}`
+            ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}:\n${previewLines(txt, theme)}`
             : "";
         })
         .join("");
@@ -2338,11 +2434,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
             ? resultText(e.result as any)?.trim()
             : undefined;
           return txt
-            ? `\n${theme.fg("muted", `— ${e.args.pattern}`)}:\n${txt
-                .split("\n")
-                .slice(0, 10)
-                .map((l) => theme.fg("toolOutput", l))
-                .join("\n")}`
+            ? `\n${theme.fg("muted", `— ${e.args.pattern ?? ""}`)}:\n${previewLines(txt, theme)}`
             : "";
         })
         .join("");
@@ -2375,11 +2467,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
             ? resultText(e.result as any)?.trim()
             : undefined;
           return txt
-            ? `\n${theme.fg("muted", `— /${e.args.pattern}/`)}:\n${txt
-                .split("\n")
-                .slice(0, 10)
-                .map((l) => theme.fg("toolOutput", l))
-                .join("\n")}`
+            ? `\n${theme.fg("muted", `— /${e.args.pattern ?? ""}/`)}:\n${previewLines(txt, theme)}`
             : "";
         })
         .join("");
@@ -2414,11 +2502,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
             ? resultText(e.result as any)?.trim()
             : undefined;
           return txt
-            ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path || ".")}`)}:\n${txt
-                .split("\n")
-                .slice(0, 10)
-                .map((l) => theme.fg("toolOutput", l))
-                .join("\n")}`
+            ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path || ".")}`)}:\n${previewLines(txt, theme)}`
             : "";
         })
         .join("");
