@@ -48,6 +48,13 @@ import {
 import { describeError, extractTextParts } from "./json-file.ts";
 import { buildTrajectory, renderTrajectory } from "./copy-trajectory.ts";
 import { logGoodiesEvent } from "./goodies-log.ts";
+import {
+  getSideSessionModel,
+  isMergedSideBadgeActive,
+  onSideBadgeChange,
+  setSideSessionModel,
+  type SideModelRef,
+} from "./side-state.ts";
 
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
 type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
@@ -491,7 +498,22 @@ function updateBadge(
   ctx: ExtensionContext,
   model: { provider: string; id: string },
 ): void {
-  ctx.ui.setStatus("side", `side: ${modelRef(model)}`);
+  setSideSessionModel(model);
+  applySideStatus(ctx);
+}
+
+/**
+ * Mirror the side state into pi's status line — unless the provider-balance
+ * footer is currently rendering the badge merged into the stats line's model
+ * readout, in which case a separate status line would duplicate it.
+ */
+export function applySideStatus(ctx: ExtensionContext): void {
+  const model: SideModelRef | undefined = getSideSessionModel();
+  const text =
+    model && !isMergedSideBadgeActive()
+      ? `side: ${modelRef(model)}`
+      : undefined;
+  ctx.ui.setStatus("side", text);
 }
 
 function sideMarkerFromBranch(
@@ -557,6 +579,9 @@ async function summarizeDelta(
 // ---------------------------------------------------------------------------
 
 let modelRegistryRef: ExtensionContext["modelRegistry"] | undefined;
+/** Latest live context, for re-applying the badge when the merged footer
+ *  toggles; cleared on session_shutdown before the ctx goes stale. */
+let lastBadgeCtx: ExtensionContext | undefined;
 
 export default function side(pi: ExtensionAPI): void {
   // Lens: rewrite side-agent requests so the main trajectory arrives as an
@@ -599,7 +624,8 @@ export default function side(pi: ExtensionAPI): void {
         activeSideModel(ctx.sessionManager.getBranch(), marker.data),
       );
     } else {
-      ctx.ui.setStatus("side", undefined);
+      setSideSessionModel(undefined);
+      applySideStatus(ctx);
     }
   });
 
@@ -608,6 +634,7 @@ export default function side(pi: ExtensionAPI): void {
   // ctrl+l switch updates it; the marker keeps the original).
   pi.on("session_start", (_event, ctx) => {
     modelRegistryRef = ctx.modelRegistry; // for /side argument completions
+    lastBadgeCtx = ctx;
     const marker = sideMarkerFromBranch(ctx);
     if (marker) {
       const active = activeSideModel(
@@ -616,7 +643,24 @@ export default function side(pi: ExtensionAPI): void {
       );
       updateBadge(ctx, active);
       logGoodiesEvent({ type: "side_resumed", model: modelRef(active) });
+    } else {
+      // Switched/new/resumed into a non-side session: drop any badge the
+      // previous session left behind (both the status line and the state
+      // the merged footer badge reads).
+      setSideSessionModel(undefined);
+      applySideStatus(ctx);
     }
+  });
+
+  // The footer-rendered badge needs a re-render when side state changes;
+  // the status-line fallback needs re-applying when the merged footer
+  // appears or disappears (install order between the two modules is not
+  // guaranteed to leave the badge applied with the right policy).
+  pi.on("session_shutdown", () => {
+    lastBadgeCtx = undefined;
+  });
+  onSideBadgeChange(() => {
+    if (lastBadgeCtx) applySideStatus(lastBadgeCtx);
   });
 
   pi.registerEntryRenderer<SideMarkerData>(
@@ -889,7 +933,8 @@ export default function side(pi: ExtensionAPI): void {
           "warning",
         );
       }
-      ctx.ui.setStatus("side", undefined);
+      setSideSessionModel(undefined);
+      applySideStatus(ctx);
 
       if (
         (mode === "trajectory" || mode === "summary") &&

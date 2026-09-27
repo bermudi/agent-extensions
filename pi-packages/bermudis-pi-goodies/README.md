@@ -357,6 +357,12 @@ session. `/side-exit` closes it and chooses what the main agent receives.
 
 How it works:
 
+- **Badge**: while a side session is open, the footer's model readout becomes
+  `side: (zai) glm-5.3 • max` — the provider-balance footer prepends the
+  badge to the stats line instead of adding a separate `side:` status line
+  (which remains the fallback when that footer is not mounted). The readout
+  tracks mid-side ctrl+l switches, and the badge clears on exit or when
+  switching to a session that is not in a side consultation.
 - **Entry**: `/side` opens pi's own model selector (falls back to a plain
   selector when pi's internal runtime is not reachable; in headless modes pass
   the model explicitly as `/side provider/model-id[:level]`). The main agent's

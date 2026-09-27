@@ -6,6 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   activeSideModel,
+  applySideStatus,
   buildLensMessages,
   buildSummaryHandoff,
   buildTrajectoryHandoff,
@@ -18,6 +19,12 @@ import {
   parseModelArg,
   parseSideMarkerData,
 } from "./side.ts";
+import {
+  resetSideBadgeState,
+  setMergedSideBadgeInstalled,
+  setMergedSideBadgeRendered,
+  setSideSessionModel,
+} from "./side-state.ts";
 
 let nextId = 0;
 const id = (): string => `e${nextId++}`;
@@ -528,5 +535,58 @@ describe("filterSideModelCompletions", () => {
   test("no registry or no matches yields null", () => {
     expect(filterSideModelCompletions("kilo/", undefined)).toBeNull();
     expect(filterSideModelCompletions("google/", registry)).toBeNull();
+  });
+});
+
+describe("applySideStatus badge policy", () => {
+  function captureStatus(): {
+    ctx: ExtensionContext;
+    calls: Array<[string, string | undefined]>;
+  } {
+    const calls: Array<[string, string | undefined]> = [];
+    const ctx = {
+      ui: {
+        setStatus(key: string, text: string | undefined) {
+          calls.push([key, text]);
+        },
+      },
+    } as unknown as ExtensionContext;
+    return { ctx, calls };
+  }
+
+  test("shows the classic status line when no merged footer badge is active", () => {
+    resetSideBadgeState();
+    setSideSessionModel({ provider: "zai", id: "glm-5.3" });
+    const { ctx, calls } = captureStatus();
+    applySideStatus(ctx);
+    expect(calls).toEqual([["side", "side: zai/glm-5.3"]]);
+  });
+
+  test("suppresses the status line while the merged footer badge is live", () => {
+    resetSideBadgeState();
+    setSideSessionModel({ provider: "zai", id: "glm-5.3" });
+    setMergedSideBadgeInstalled(true);
+    setMergedSideBadgeRendered(true);
+    const { ctx, calls } = captureStatus();
+    applySideStatus(ctx);
+    expect(calls).toEqual([["side", undefined]]);
+  });
+
+  test("falls back to the status line when the merge stopped landing", () => {
+    resetSideBadgeState();
+    setSideSessionModel({ provider: "zai", id: "glm-5.3" });
+    setMergedSideBadgeInstalled(true);
+    // Footer mounted, but the merge failed on the last render (drift).
+    setMergedSideBadgeRendered(false);
+    const { ctx, calls } = captureStatus();
+    applySideStatus(ctx);
+    expect(calls).toEqual([["side", "side: zai/glm-5.3"]]);
+  });
+
+  test("clears the status line when no side session is active", () => {
+    resetSideBadgeState();
+    const { ctx, calls } = captureStatus();
+    applySideStatus(ctx);
+    expect(calls).toEqual([["side", undefined]]);
   });
 });

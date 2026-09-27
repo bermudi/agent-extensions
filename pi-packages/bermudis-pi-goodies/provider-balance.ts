@@ -4,7 +4,11 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  stripTerminalSequences,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -26,6 +30,13 @@ import {
   timeoutSignal,
 } from "./json-file.ts";
 import { getKiloCatalogStatus, type KiloCatalogStatus } from "./kilo.ts";
+import { logGoodiesEvent } from "./goodies-log.ts";
+import {
+  getSideSessionModel,
+  onSideBadgeChange,
+  setMergedSideBadgeInstalled,
+  setMergedSideBadgeRendered,
+} from "./side-state.ts";
 
 const KILO_API_BASE = process.env.KILO_API_URL || "https://api.kilo.ai";
 const KILO_BALANCE_ENDPOINT = `${KILO_API_BASE}/api/profile/balance`;
@@ -1284,6 +1295,50 @@ function addBalanceToWorkingDirectoryLine(
   return [`${left}${padding}${right}`, ...lines.slice(1)];
 }
 
+const SGR_SEQUENCE = /\x1b\[[0-9;:]*m/g;
+
+/**
+ * Prepend a badge to the right-aligned model readout of the stats line pi's
+ * FooterComponent produced: `side: (zai) glm-5.3 • max`. The line is built
+ * as `<dim statsLeft><dim padding + model>` — split at the opener of the
+ * final styled run (the last SGR sequence is its closer, so the opener is
+ * the second-to-last), keep the left half verbatim (it may carry a colored
+ * context percentage), and rebuild the right half around the badge.
+ *
+ * Returns undefined when the line lacks that two-run shape — the caller then
+ * leaves the line untouched and the /side badge falls back to a status line.
+ * Deliberately structural, not textual: no assumption about stats or model
+ * spelling, only about how pi styles the two halves.
+ */
+export function mergeSideBadgeIntoStatsLine(
+  line: string,
+  width: number,
+  theme: FooterTheme,
+  prefix = "side: ",
+): string | undefined {
+  if (!line || width <= 0) return undefined;
+  const runs = [...line.matchAll(SGR_SEQUENCE)];
+  if (runs.length < 2) return undefined;
+  const opener = runs[runs.length - 2]?.index;
+  if (opener === undefined) return undefined;
+  const head = line.slice(0, opener);
+  const tail = stripTerminalSequences(line.slice(opener)).trim();
+  if (!tail || !stripTerminalSequences(head).trim()) return undefined;
+
+  const labeled = `${prefix}${tail}`;
+  const headWidth = visibleWidth(head);
+  const room = width - headWidth - 2; // pi keeps ≥2 columns between the halves
+  if (room <= 0) return undefined;
+  const right =
+    visibleWidth(labeled) <= room
+      ? labeled
+      : truncateToWidth(labeled, room, "");
+  const padding = " ".repeat(
+    Math.max(2, width - headWidth - visibleWidth(right)),
+  );
+  return `${head}${theme.fg("dim", padding + right)}`;
+}
+
 // --- Kilo catalog badge ------------------------------------------------------
 // kilo.ts serves a fallback catalog when its refresh fails (see
 // getKiloCatalogStatus in kilo.ts). The balance footer is the only
@@ -1349,6 +1404,9 @@ export default function providerBalance(
   /** True while our footer component is the one mounted in the TUI. */
   let footerInstalled = false;
   let activeThinkingLevel: ActiveThinkingLevel = "off";
+  /** Logged once per footer install: the /side badge merge stopped matching
+   *  pi's stats-line shape and the badge fell back to a status line. */
+  let sideBadgeDriftLogged = false;
 
   function clearBalance(): void {
     balance = undefined;
@@ -1648,6 +1706,7 @@ export default function providerBalance(
   function installFooter(ctx: ExtensionContext): void {
     if (ctx.mode !== "tui") return;
     activeContext = ctx;
+    const unsubscribeSideBadge = onSideBadgeChange(() => requestRender?.());
     ctx.ui.setFooter((tui, theme, footerData) => {
       requestRender = () => tui.requestRender();
       const footer = new FooterComponent(
@@ -1687,21 +1746,49 @@ export default function providerBalance(
             kiloBadge && balanceText
               ? `${kiloBadge} · ${balanceText}`
               : (kiloBadge ?? balanceText);
-          return addBalanceToWorkingDirectoryLine(
+          const lines = addBalanceToWorkingDirectoryLine(
             footer.render(width),
             width,
             theme,
             rightText,
           );
+          // Side-session badge: prepend "side: " to the stats line's
+          // right-aligned model readout (the session model IS the side model
+          // while a side session is open). Report whether the merge landed so
+          // side.ts can drop the separate status line — or fall back to it
+          // when a pi update changes the stats-line shape.
+          const sideModel = getSideSessionModel();
+          let merged = false;
+          if (sideModel && typeof lines[1] === "string") {
+            const statsLine = mergeSideBadgeIntoStatsLine(
+              lines[1],
+              width,
+              theme,
+            );
+            if (statsLine !== undefined) {
+              lines[1] = statsLine;
+              merged = true;
+            }
+          }
+          setMergedSideBadgeRendered(merged);
+          if (sideModel && !merged && !sideBadgeDriftLogged) {
+            sideBadgeDriftLogged = true;
+            logGoodiesEvent({ type: "side_badge_merge_failed" });
+          }
+          return lines;
         },
         dispose: () => {
           unsubscribeBranchChange();
+          unsubscribeSideBadge();
           footer.dispose();
           requestRender = undefined;
           footerInstalled = false;
+          sideBadgeDriftLogged = false;
+          setMergedSideBadgeInstalled(false);
         },
       };
     });
+    setMergedSideBadgeInstalled(true);
     footerInstalled = true;
   }
 

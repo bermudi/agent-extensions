@@ -42,9 +42,12 @@ import providerBalance, {
   clearBalanceFailureMarker,
   FAILURE_BACKOFF_MS,
   formatKiloCatalogStatus,
+  mergeSideBadgeIntoStatsLine,
   zaiQuotaToBalance,
   type BalanceAdapter,
 } from "./provider-balance.ts";
+import { resetSideBadgeState, setSideSessionModel } from "./side-state.ts";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 
 describe("event latency", () => {
   test("model selection does not await the balance refresh", () => {
@@ -1682,6 +1685,190 @@ describe("shared failure backoff and session-start adoption", () => {
       ]);
     } finally {
       await cleanup();
+    }
+  });
+});
+
+describe("mergeSideBadgeIntoStatsLine", () => {
+  /** Mirrors pi's footer styling: each half is one dim run. */
+  const dim = (text: string): string => `\x1b[2m${text}\x1b[22m`;
+  const theme = { fg: (_color: string, text: string) => dim(text) };
+
+  /** Build the stats line the way FooterComponent.render does. */
+  function statsLine(left: string, right: string, width: number): string {
+    const padding = " ".repeat(Math.max(0, width - left.length - right.length));
+    return dim(left) + dim(padding + right);
+  }
+
+  test("prepends the badge to the model readout, keeping right alignment", () => {
+    const left = "↑1k ↓2k 1.0%/100k (auto)";
+    const badge = "side: (zai) glm-5.3 • max";
+    const line = statsLine(left, "(zai) glm-5.3 • max", 80);
+    const merged = mergeSideBadgeIntoStatsLine(line, 80, theme);
+    expect(merged).toBeDefined();
+    expect(visibleWidth(merged!)).toBe(80);
+    const padding = " ".repeat(80 - left.length - badge.length);
+    expect(stripTerminalSequences(merged!)).toBe(left + padding + badge);
+    // The left half keeps its original styling run.
+    expect(merged!.startsWith("\x1b[2m↑1k")).toBe(true);
+  });
+
+  test("preserves a colored context percentage inside the left half", () => {
+    const left = `↑1k \x1b[33m1.7%/100k (auto)\x1b[0m`;
+    const padding = " ".repeat(80 - 24 - "kilo-model".length);
+    const line = dim(left) + dim(padding + "kilo-model");
+    const merged = mergeSideBadgeIntoStatsLine(line, 80, theme);
+    expect(merged).toBeDefined();
+    expect(visibleWidth(merged!)).toBe(80);
+    expect(stripTerminalSequences(merged!)!.endsWith("side: kilo-model")).toBe(
+      true,
+    );
+    // The warning-colored context run survives untouched.
+    expect(merged).toContain("\x1b[33m1.7%/100k (auto)\x1b[0m");
+  });
+
+  test("returns undefined for a stats-only line (no right half)", () => {
+    const line = dim("s".repeat(80));
+    expect(mergeSideBadgeIntoStatsLine(line, 80, theme)).toBeUndefined();
+  });
+
+  test("returns undefined for a plain line without any styling runs", () => {
+    expect(
+      mergeSideBadgeIntoStatsLine("↑1k ↓2k kilo-model", 80, theme),
+    ).toBeUndefined();
+  });
+
+  test("returns undefined when there is no room for a 2-column gap", () => {
+    const line = statsLine("s".repeat(78), "m", 80);
+    expect(mergeSideBadgeIntoStatsLine(line, 80, theme)).toBeUndefined();
+  });
+
+  test("truncates the badge when it does not fit", () => {
+    const line = statsLine("↑1k", "(zai) a-very-long-model-id • max", 40);
+    const merged = mergeSideBadgeIntoStatsLine(line, 40, theme);
+    expect(merged).toBeDefined();
+    expect(visibleWidth(merged!)).toBe(40);
+    const plain = stripTerminalSequences(merged!);
+    expect(plain.startsWith("↑1k")).toBe(true);
+    expect(plain).toContain("side: ");
+  });
+
+  test("returns undefined for an empty line", () => {
+    expect(mergeSideBadgeIntoStatsLine("", 80, theme)).toBeUndefined();
+  });
+});
+
+describe("footer side badge", () => {
+  test("render merges the side badge into the stats line and back out", async () => {
+    resetSideBadgeState();
+    /** Stand-in for pi's footer container (same shape as the lifecycle test). */
+    function createFooterHost() {
+      const builtin = { render: () => ["builtin footer"] };
+      let mounted: { render(width: number): string[] } = builtin;
+      const tui = { requestRender() {} };
+      const theme = {
+        fg: (_color: string, text: string) => text,
+        bold: (text: string) => text,
+      };
+      const footerData = {
+        getGitBranch: () => undefined,
+        getExtensionStatuses: () => new Map<string, string>(),
+        getAvailableProviderCount: () => 1,
+        onBranchChange: () => () => {},
+      };
+      return {
+        renderMounted: () => mounted.render(100),
+        ui: {
+          setFooter(
+            factory?:
+              | ((
+                  tui: unknown,
+                  theme: unknown,
+                  footerData: unknown,
+                ) => { render(width: number): string[]; dispose(): void })
+              | undefined,
+          ) {
+            mounted = factory
+              ? factory(tui, theme, footerData)
+              : (builtin as unknown as { render(width: number): string[] });
+          },
+        },
+      };
+    }
+
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    const host = createFooterHost();
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: ExtensionContext) => unknown
+    >();
+    try {
+      providerBalance(
+        {
+          on(event, handler) {
+            handlers.set(
+              event,
+              handler as (event: unknown, ctx: ExtensionContext) => unknown,
+            );
+          },
+          events: {
+            emit() {},
+            on() {
+              return () => {};
+            },
+          },
+        } as unknown as ExtensionAPI,
+        {
+          adapters: { kilo: { fetch: async () => [{ credits: 42 }] } },
+          cacheDir: directory,
+          random: () => 0.5,
+        },
+      );
+
+      const ctx = {
+        mode: "tui",
+        model: {
+          provider: "kilo",
+          id: "kilo-model",
+          reasoning: false,
+          contextWindow: 128_000,
+        },
+        isIdle: () => false,
+        ui: host.ui,
+        sessionManager: {
+          getBranch: () => [],
+          getEntries: () => [],
+          getCwd: () => "/work",
+          getSessionName: () => undefined,
+        },
+        getContextUsage: () => null,
+        modelRegistry: {
+          isUsingOAuth: () => false,
+          getApiKeyForProvider: async () => "token",
+        },
+      } as unknown as ExtensionContext;
+
+      const start = handlers.get("session_start");
+      if (!start) throw new Error("missing session_start");
+      start({}, ctx);
+
+      // No side session: no badge anywhere.
+      let lines = host.renderMounted();
+      expect(lines.join("\n")).not.toContain("side:");
+
+      // Side session active: the stats line carries the merged badge.
+      setSideSessionModel({ provider: "zai", id: "glm-5.3" });
+      lines = host.renderMounted();
+      expect(lines[1]).toContain("side: kilo-model");
+      expect(lines.join("\n")).not.toContain("\nside: ");
+
+      // Side session closed: badge disappears again.
+      setSideSessionModel(undefined);
+      lines = host.renderMounted();
+      expect(lines.join("\n")).not.toContain("side:");
+    } finally {
+      resetSideBadgeState();
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });
