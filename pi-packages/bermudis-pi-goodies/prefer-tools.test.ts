@@ -1,5 +1,9 @@
 import { describe, it, expect } from "bun:test";
-import { detectLegacyTool } from "./prefer-tools.ts";
+import {
+  detectLegacyTool,
+  isRipgrepBlockedModel,
+  RG_RULE,
+} from "./prefer-tools.ts";
 
 describe("detectLegacyTool", () => {
   const blocked = (cmd: string, expected: string) => {
@@ -190,5 +194,66 @@ describe("detectLegacyTool", () => {
     // In an unquoted heredoc, single quotes still quote — $(rm) inside
     // single quotes does NOT execute.
     allowed("cat <<EOF\necho '$(rm file)'\nEOF");
+  });
+});
+
+describe("isRipgrepBlockedModel", () => {
+  it("matches glm-5 model ids", () => {
+    expect(isRipgrepBlockedModel("glm-5")).toBe(true);
+    expect(isRipgrepBlockedModel("glm-5.5")).toBe(true);
+    expect(isRipgrepBlockedModel("glm-5-turbo")).toBe(true);
+    expect(isRipgrepBlockedModel("glm-5:free")).toBe(true);
+    expect(isRipgrepBlockedModel("kilo/glm-5")).toBe(true);
+    expect(isRipgrepBlockedModel("GLM-5")).toBe(true);
+  });
+
+  it("does not match other models", () => {
+    expect(isRipgrepBlockedModel("glm-4.6")).toBe(false);
+    expect(isRipgrepBlockedModel("claude-opus-4-5")).toBe(false);
+    // Digit continuation: glm-50 is not glm-5.
+    expect(isRipgrepBlockedModel("glm-50")).toBe(false);
+    expect(isRipgrepBlockedModel("glm-500")).toBe(false);
+    // Meta's XGLM family embeds "glm-5" without a boundary (xglm-564M).
+    expect(isRipgrepBlockedModel("xglm-564M")).toBe(false);
+    expect(isRipgrepBlockedModel(undefined)).toBe(false);
+  });
+});
+
+describe("detectLegacyTool with rg rule (glm-5 models)", () => {
+  const blocked = (cmd: string, expected: string) => {
+    expect(detectLegacyTool(cmd, [RG_RULE])).toBe(expected);
+  };
+  const allowed = (cmd: string) => {
+    expect(detectLegacyTool(cmd, [RG_RULE])).toBeUndefined();
+  };
+  const reason = RG_RULE.reason;
+
+  it("blocks rg in command position", () => {
+    blocked("rg -n foo .", reason);
+    blocked("rg pattern file.txt", reason);
+    blocked("sudo rg -n foo", reason);
+    blocked("cat x | rg foo", reason);
+    blocked("rg foo && echo done", reason);
+    blocked("\\rg foo", reason);
+    blocked("{ rg foo; }", reason);
+  });
+
+  it("blocks rg inside command substitutions and unquoted heredocs", () => {
+    blocked("echo $(rg foo)", reason);
+    blocked("cat <<EOF\n$(rg foo)\nEOF", reason);
+    blocked("cat <<EOF\n`rg foo`\nEOF", reason);
+  });
+
+  it("allows grep and non-command occurrences", () => {
+    allowed("grep -rn foo .");
+    allowed("grep -rn --include='*.ts' foo src");
+    allowed("echo rg");
+    allowed("echo 'rg -n foo'");
+    allowed("cat <<'EOF'\nrg foo\nEOF");
+    allowed("git grep -n foo");
+  });
+
+  it("is inert without the rule (non-glm models)", () => {
+    expect(detectLegacyTool("rg -n foo .")).toBeUndefined();
   });
 });

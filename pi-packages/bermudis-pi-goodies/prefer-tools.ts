@@ -8,6 +8,10 @@
  *   rm                  -> trash
  *   python/pip/pytest/  -> uv
  *     mypy
+ *
+ * Model-conditional: on glm-5.* models, `rg` is also blocked — they invent
+ * ripgrep flags. The built-in grep tool (structured args, no raw flags) and
+ * bash `grep -rn` still work.
  */
 import {
   isToolCallEventType,
@@ -31,6 +35,26 @@ const RULES: Rule[] = [
   },
 ];
 
+/**
+ * glm-5.* model ids hallucinate ripgrep flags; bash `rg` is blocked for them.
+ * Matches "glm-5" as a family token: not preceded by an alphanumeric (so
+ * Meta's xglm-564M doesn't match) and not followed by a digit (so glm-50,
+ * glm-500 don't match). glm-5, glm-5.5, glm-5-turbo, glm-5:free,
+ * provider-prefixed "kilo/glm-5" all match. glm-4.x is unaffected.
+ */
+export function isRipgrepBlockedModel(modelId: string | undefined): boolean {
+  return (
+    typeof modelId === "string" && /(^|[^a-z0-9])glm-5(?![0-9])/i.test(modelId)
+  );
+}
+
+/** Extra rule appended when the active model is glm-5.*. */
+export const RG_RULE: Rule = {
+  names: ["rg"],
+  reason:
+    'rg is blocked for this model — it invents ripgrep flags. Use `grep -rn "pattern" path` instead (or pi\'s built-in grep tool).',
+};
+
 const COMMAND_PREFIX_KEYWORDS = new Set([
   "if",
   "while",
@@ -45,11 +69,14 @@ const COMMAND_PREFIX_KEYWORDS = new Set([
 
 const WORD_STOP = " \t\n\r|&;<>()\"'`$";
 
-function matchCommand(name: string): string | undefined {
+function matchCommand(
+  name: string,
+  rules: readonly Rule[],
+): string | undefined {
   const base = name.includes("/")
     ? name.slice(name.lastIndexOf("/") + 1)
     : name;
-  for (const rule of RULES) {
+  for (const rule of rules) {
     if (rule.names.includes(base)) return rule.reason;
   }
   return undefined;
@@ -182,6 +209,7 @@ function skipBalancedBraces(s: string, i: number): number {
 function readDollar(
   s: string,
   i: number,
+  rules: readonly Rule[],
 ): { next: number; reason?: string } | null {
   if (i >= s.length || s[i] !== "$") return null;
 
@@ -195,7 +223,7 @@ function readDollar(
     const end = skipBalancedParens(s, i, 2);
     const closeParen = end > 0 && s[end - 1] === ")" ? 1 : 0;
     const inner = s.slice(i + 2, end - closeParen);
-    const reason = detectLegacyTool(inner);
+    const reason = detectLegacyTool(inner, rules);
     return { next: end, reason };
   }
   if (s.startsWith("{", i + 1)) {
@@ -273,7 +301,10 @@ function readHeredocDelimiter(
  * `$(rm)` inside the body is a real bypass. Returns the matched rule's
  * reason if a blocked tool is found, undefined otherwise.
  */
-function scanHeredocLineForCommandSubs(line: string): string | undefined {
+function scanHeredocLineForCommandSubs(
+  line: string,
+  rules: readonly Rule[],
+): string | undefined {
   let i = 0;
   let quote: '"' | "'" | null = null;
   while (i < line.length) {
@@ -303,7 +334,7 @@ function scanHeredocLineForCommandSubs(line: string): string | undefined {
     if (line.startsWith("$(", i)) {
       const end = skipBalancedParens(line, i, 2);
       const inner = line.slice(i + 2, end - 1);
-      const reason = detectLegacyTool(inner);
+      const reason = detectLegacyTool(inner, rules);
       if (reason) return reason;
       i = end;
       continue;
@@ -311,7 +342,7 @@ function scanHeredocLineForCommandSubs(line: string): string | undefined {
     if (c === "`") {
       const end = readQuote(line, i, "`", true);
       const inner = line.slice(i + 1, end - 1);
-      const reason = detectLegacyTool(inner);
+      const reason = detectLegacyTool(inner, rules);
       if (reason) return reason;
       i = end;
       continue;
@@ -327,6 +358,7 @@ function skipHeredocBody(
   delimiter: string,
   indented: boolean,
   quoted: boolean,
+  rules: readonly Rule[],
 ): { next: number; reason?: string } {
   let pos = i;
   while (pos <= s.length) {
@@ -340,7 +372,7 @@ function skipHeredocBody(
     // In unquoted heredocs, command substitutions execute — scan for
     // blocked tools inside $(...) and backticks.
     if (!quoted) {
-      const reason = scanHeredocLineForCommandSubs(line);
+      const reason = scanHeredocLineForCommandSubs(line, rules);
       if (reason) return { next: end, reason };
     }
     if (nl === -1) break;
@@ -371,7 +403,11 @@ const SUDO_OPTS_WITH_ARG = new Set([
   "--user",
 ]);
 
-export function detectLegacyTool(command: string): string | undefined {
+export function detectLegacyTool(
+  command: string,
+  extraRules: readonly Rule[] = [],
+): string | undefined {
+  const rules = extraRules.length > 0 ? [...RULES, ...extraRules] : RULES;
   let i = 0;
   let commandPos = true;
   let sudoNext = false;
@@ -392,6 +428,7 @@ export function detectLegacyTool(command: string): string | undefined {
         heredoc.delimiter,
         heredoc.indented,
         heredoc.quoted,
+        rules,
       );
       if (result.reason) return result.reason;
       i = result.next;
@@ -498,7 +535,7 @@ export function detectLegacyTool(command: string): string | undefined {
     }
 
     if (c === "$") {
-      const d = readDollar(command, i);
+      const d = readDollar(command, i, rules);
       if (d) {
         if (d.reason) return d.reason;
         i = d.next;
@@ -539,7 +576,7 @@ export function detectLegacyTool(command: string): string | undefined {
           skipNextWord = false;
           continue;
         }
-        const reason = matchCommand(word);
+        const reason = matchCommand(word, rules);
         if (reason) return reason;
         sudoNext = false;
       } else {
@@ -547,7 +584,7 @@ export function detectLegacyTool(command: string): string | undefined {
           skipNextWord = false;
           continue;
         }
-        const reason = matchCommand(word);
+        const reason = matchCommand(word, rules);
         if (reason) return reason;
       }
       if (!COMMAND_PREFIX_KEYWORDS.has(word)) {
@@ -562,10 +599,13 @@ export function detectLegacyTool(command: string): string | undefined {
 }
 
 export default function preferTools(pi: ExtensionAPI) {
-  pi.on("tool_call", async (event) => {
+  pi.on("tool_call", async (event, ctx) => {
     if (!isToolCallEventType("bash", event)) return;
 
-    const reason = detectLegacyTool(event.input.command ?? "");
+    // Model-conditional rule: glm-5.* gets bash `rg` blocked (live model,
+    // read per call — model switches mid-session take effect immediately).
+    const extraRules = isRipgrepBlockedModel(ctx.model?.id) ? [RG_RULE] : [];
+    const reason = detectLegacyTool(event.input.command ?? "", extraRules);
     if (reason) {
       return { block: true, reason };
     }

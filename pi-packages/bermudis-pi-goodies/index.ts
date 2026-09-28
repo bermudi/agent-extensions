@@ -7,7 +7,7 @@
  *   - copy-trajectory  /copy-trajectory  copy the whole conversation (text only) to the clipboard
  *   - name-with-ai     /name-with-ai     generate a session name via the model
  *   - zed              /z                open Zed on cwd
- *   - prefer-tools     hook              block legacy tools (use trash/rg/fd/uv)
+ *   - prefer-tools     hook              block legacy tools (trash/uv; blocks rg on glm-5.*)
  *   - keep-model       hook              preserve the active model across /new
  *   - model-thinking   /model-thinking   per-model default thinking levels, applied on switch
  *   - clean-tui        tool overrides    collapse built-in tool output; keep a one-line call header, hide results/diffs until expanded
