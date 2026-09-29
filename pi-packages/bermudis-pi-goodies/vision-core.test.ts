@@ -608,7 +608,6 @@ describe("runVisionTool", () => {
       d,
       (t) => updates.push(t),
     );
-    expect(result.isError).toBeUndefined();
     expect(result.details.vision).toBe(true);
     expect(result.details.model).toBe("google/gemini-2.5-flash");
     expect(result.content[0].text).toBe("it is red"); // raw answer — no banner, no model label
@@ -623,13 +622,13 @@ describe("runVisionTool", () => {
     expect(updates.join("")).toContain("Asking google/gemini-2.5-flash");
   });
 
-  test("unconfigured → isError telling how to configure", async () => {
+  test("unconfigured → throws with configure instructions", async () => {
     const { deps: d } = deps({
       cfg: { model: "", maxTokens: DEFAULT_MAX_TOKENS },
     });
-    const result = await runVisionTool({ path: "x.png", prompt: "q" }, d);
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("/vision set model=");
+    await expect(
+      runVisionTool({ path: "x.png", prompt: "q" }, d),
+    ).rejects.toThrow("/vision set model=");
   });
 
   test("signal is forwarded to complete (Esc reaches the wire call)", async () => {
@@ -653,19 +652,18 @@ describe("runVisionTool", () => {
     });
     const result = await runVisionTool({ path: "legacy.bmp", prompt: "q" }, d);
     expect(seen[0]).toBe("/srv/project/legacy.bmp");
-    expect(result.isError).toBeUndefined();
   });
 
-  test("model not in registry → isError with suggestions", async () => {
+  test("model not in registry → throws with suggestions", async () => {
     const { deps: d } = deps({
       cfg: { model: "google/gemini-2.5-flsh", maxTokens: DEFAULT_MAX_TOKENS },
     });
-    const result = await runVisionTool({ path: "x.png", prompt: "q" }, d);
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("Did you mean");
+    await expect(
+      runVisionTool({ path: "x.png", prompt: "q" }, d),
+    ).rejects.toThrow("Did you mean");
   });
 
-  test("configured model is text-only → isError with input hint", async () => {
+  test("configured model is text-only → throws with input hint", async () => {
     const { deps: d } = deps({
       registry: fakeRegistry([VISION_MODEL, TEXT_MODEL]),
       cfg: {
@@ -673,32 +671,32 @@ describe("runVisionTool", () => {
         maxTokens: DEFAULT_MAX_TOKENS,
       },
     });
-    const result = await runVisionTool({ path: "x.png", prompt: "q" }, d);
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('"input": ["text", "image"]');
+    await expect(
+      runVisionTool({ path: "x.png", prompt: "q" }, d),
+    ).rejects.toThrow('"input": ["text", "image"');
   });
 
-  test("read failure passes through as isError", async () => {
+  test("read failure → throws with the read error", async () => {
     const { deps: d } = deps({
       readImage: async () => ({
         content: [{ type: "text", text: "File not found: nope.png" }],
         isError: true,
       }),
     });
-    const result = await runVisionTool({ path: "nope.png", prompt: "q" }, d);
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("File not found");
+    await expect(
+      runVisionTool({ path: "nope.png", prompt: "q" }, d),
+    ).rejects.toThrow("File not found");
   });
 
-  test("non-image file → isError, no vision call", async () => {
+  test("non-image file → throws, no vision call", async () => {
     const { deps: d, calls } = deps({
       readImage: async () => ({
         content: [{ type: "text", text: "file contents" }],
       }),
     });
-    const result = await runVisionTool({ path: "notes.txt", prompt: "q" }, d);
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("not an image");
+    await expect(
+      runVisionTool({ path: "notes.txt", prompt: "q" }, d),
+    ).rejects.toThrow("not an image");
     expect(calls).toHaveLength(0);
   });
 
@@ -716,11 +714,10 @@ describe("runVisionTool", () => {
     const result = await runVisionTool({ path: "legacy.bmp", prompt: "q" }, d);
     expect(rawCalls).toBe(1);
     expect(calls).toHaveLength(1);
-    expect(result.isError).toBeUndefined();
     expect(result.details.vision).toBe(true);
   });
 
-  test("vision API error → isError with provider message", async () => {
+  test("vision API error → throws with provider message", async () => {
     const { deps: d } = deps({
       complete: async () => ({
         stopReason: "error",
@@ -728,21 +725,21 @@ describe("runVisionTool", () => {
         content: [],
       }),
     });
-    const result = await runVisionTool({ path: "x.png", prompt: "q" }, d);
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("429 quota exceeded");
+    await expect(
+      runVisionTool({ path: "x.png", prompt: "q" }, d),
+    ).rejects.toThrow("429 quota exceeded");
   });
 
-  test("empty answer → isError", async () => {
+  test("empty answer → throws", async () => {
     const { deps: d } = deps({
       complete: async () => ({ stopReason: "stop", content: [] }),
     });
-    const result = await runVisionTool({ path: "x.png", prompt: "q" }, d);
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("empty answer");
+    await expect(
+      runVisionTool({ path: "x.png", prompt: "q" }, d),
+    ).rejects.toThrow("empty answer");
   });
 
-  test("abort rethrows as AbortError (not swallowed into isError)", async () => {
+  test("abort rethrows as AbortError (not swallowed into a failure)", async () => {
     const { deps: d } = deps({
       complete: async () => {
         const err = new Error("vision request aborted");
@@ -758,6 +755,22 @@ describe("runVisionTool", () => {
     }
   });
 
+  test("Esc during image read rethrows pi's plain abort shape", async () => {
+    // pi's built-in read rejects Esc with a plain Error("Operation aborted")
+    // — name stays "Error", so the name check alone misses it. It must pass
+    // through as-is (matching pi's own abort rows), never become a fake
+    // "[vision error] read failed" tool failure.
+    const { deps: d, calls } = deps({
+      readImage: async () => {
+        throw new Error("Operation aborted");
+      },
+    });
+    await expect(
+      runVisionTool({ path: "x.png", prompt: "q" }, d),
+    ).rejects.toThrow("Operation aborted");
+    expect(calls).toHaveLength(0);
+  });
+
   test("leading @ stripped from path", async () => {
     const seen: string[] = [];
     const { deps: d } = deps({
@@ -768,7 +781,6 @@ describe("runVisionTool", () => {
       d,
     );
     expect(seen[0]).toBe("/tmp/shot.png");
-    expect(result.isError).toBeUndefined();
   });
 
   test("followUp=true replays prior turns, image in final turn only", async () => {
@@ -827,7 +839,6 @@ describe("runVisionTool", () => {
       d,
     );
     expect(calls[0].messages).toHaveLength(1);
-    expect(result.isError).toBeUndefined();
     expect(result.details.followUps).toBe(0);
   });
 });

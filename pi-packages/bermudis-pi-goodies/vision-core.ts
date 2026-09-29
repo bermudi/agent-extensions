@@ -636,14 +636,13 @@ export interface VisionToolDeps {
 export interface VisionToolResult {
   content: Array<{ type: "text"; text: string }>;
   details: {
-    vision: true | false;
+    vision: true;
     model?: string;
     question?: string;
     /** Prior turns this call continued (0 = independent call). */
     followUps?: number;
   };
   usage?: UsageLike;
-  isError?: boolean;
 }
 
 /**
@@ -651,9 +650,13 @@ export interface VisionToolResult {
  * Answers return as plain text (same trust model as any tool output); the
  * vision model's own system prompt carries the injection refusal.
  *
- * Failure policy: setup/transient failures return isError results (the parent
- * model relays them once and moves on instead of retry-looping the tool).
- * Abort is the exception — it rethrows as AbortError so pi cancels the turn.
+ * Failure policy: setup/transient failures THROW. pi hard-codes returned
+ * results to isError:false (pi-agent-core agent-loop), so a returned error
+ * flag never reaches the transcript and failures rendered as successes; a
+ * thrown error is what marks the toolResult. The message text is unchanged
+ * for the parent model — it relays once and moves on instead of retry-
+ * looping the tool. Aborts rethrow unchanged (see isAbortError) so the
+ * transcript carries pi's own abort shape, not a fake read failure.
  */
 export async function runVisionTool(
   params: { path: string; prompt: string; followUp?: boolean },
@@ -663,18 +666,18 @@ export async function runVisionTool(
   const rawPath = (params.path ?? "").replace(/^@/, "");
   const question = (params.prompt ?? "").trim();
   if (!rawPath || !question) {
-    return failure("vision tool needs both a path and a prompt");
+    fail("vision tool needs both a path and a prompt");
   }
 
   const cfg = deps.cfg;
   if (!cfg.model) {
-    return failure(
+    fail(
       "vision model not configured. Ask the user to run: /vision set model=<provider>/<vision-model-id>",
     );
   }
 
   const resolved = await resolveVisionTransport(deps.registry, cfg);
-  if (!resolved.ok) return failure(resolved.error);
+  if (!resolved.ok) fail(resolved.error);
   const { transport } = resolved;
 
   // Delegate to pi's built-in read: resize + magic-byte mime detection.
@@ -686,11 +689,16 @@ export async function runVisionTool(
         .filter((c) => c.type === "text")
         .map((c) => c.text ?? "")
         .join("\n");
-      return failure(text || `read failed for ${rawPath}`);
+      fail(text || `read failed for ${rawPath}`);
     }
     blocks = readResult.content;
   } catch (e) {
-    return failure(`read failed for ${rawPath}: ${errorMessage(e)}`);
+    // pi's read rejects Esc with a plain Error("Operation aborted") — not an
+    // AbortError. Let it through: recording it as a tool failure both breaks
+    // the abort contract and writes a bogus "[vision error]" row into the
+    // transcript on every cancel.
+    if (isAbortError(e)) throw e;
+    fail(`read failed for ${rawPath}: ${errorMessage(e)}`);
   }
 
   let image = blocks.find(
@@ -700,15 +708,14 @@ export async function runVisionTool(
     // Built-in read produced no image block (no photon processor / decode
     // failure). If the path looks like an image, fall back to a raw read.
     if (!MIME[extname(rawPath).toLowerCase()]) {
-      return failure(
-        `${rawPath} is not an image file (jpg, png, gif, webp, bmp)`,
-      );
+      fail(`${rawPath} is not an image file (jpg, png, gif, webp, bmp)`);
     }
     try {
       const raw = await deps.readRaw(resolve(deps.cwd, rawPath));
       image = { type: "image", data: raw.data, mimeType: raw.mimeType };
     } catch (e) {
-      return failure(errorMessage(e));
+      if (isAbortError(e)) throw e;
+      fail(errorMessage(e));
     }
   }
 
@@ -743,9 +750,7 @@ export async function runVisionTool(
     );
   } catch (e) {
     if (isAbortError(e)) throw e;
-    return failure(
-      `vision call to ${transport.label} failed: ${errorMessage(e)}`,
-    );
+    fail(`vision call to ${transport.label} failed: ${errorMessage(e)}`);
   }
 
   let answer: string;
@@ -753,7 +758,7 @@ export async function runVisionTool(
     answer = convertVisionResponse(response, transport.label);
   } catch (e) {
     if (isAbortError(e)) throw e;
-    return failure(errorMessage(e));
+    fail(errorMessage(e));
   }
 
   deps.conversations.record(
@@ -774,12 +779,13 @@ export async function runVisionTool(
   };
 }
 
-function failure(text: string): VisionToolResult {
-  return {
-    content: [{ type: "text", text: `[vision error] ${text}` }],
-    details: { vision: false },
-    isError: true,
-  };
+/**
+ * Fail the tool call by throwing: pi converts a thrown error into an
+ * isError:true toolResult (returned results are hard-coded isError:false),
+ * carrying `[vision error] …` to the model and marking the transcript.
+ */
+function fail(text: string): never {
+  throw new Error(`[vision error] ${text}`);
 }
 
 function errorMessage(e: unknown): string {
@@ -787,5 +793,14 @@ function errorMessage(e: unknown): string {
 }
 
 function isAbortError(e: unknown): boolean {
-  return e instanceof Error && e.name === "AbortError";
+  // Two shapes reach this file: AbortError from completeSimple's fetch, and
+  // pi's own convention — a plain Error("Operation aborted") — which the
+  // built-in read rejects with when Esc lands mid-read (read.js) and
+  // pi-agent-core fabricates for calls aborted around execution. Message
+  // equality on pi's exact literal, nothing looser: a provider error that
+  // merely mentions "aborted" is still a provider error.
+  return (
+    e instanceof Error &&
+    (e.name === "AbortError" || e.message === "Operation aborted")
+  );
 }
