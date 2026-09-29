@@ -9,7 +9,7 @@
 // console output is reserved for headless modes, where there is no TUI to
 // corrupt.
 
-import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -21,7 +21,6 @@ export const GOODIES_LOG_DEFAULT_PATH = join(
 );
 
 const MAX_BYTES = 256 * 1024;
-const KEEP_BYTES = 64 * 1024;
 
 let logPath = GOODIES_LOG_DEFAULT_PATH;
 
@@ -46,8 +45,13 @@ export function logGoodiesEvent(event: Record<string, unknown>): void {
   }
   try {
     if (statSync(logPath).size > MAX_BYTES) {
-      // Size cap without timers or rotation daemons: keep the newest tail.
-      writeFileSync(logPath, readFileSync(logPath).subarray(-KEEP_BYTES));
+      // Size cap without timers or rotation daemons: rotate by rename —
+      // atomic on POSIX, so a crash mid-rotation can't truncate the log and
+      // lines appended between the size check and the rename land in the
+      // .old file instead of being destroyed by a read-then-overwrite. The
+      // single .old slot is replaced on each rotation; the append below
+      // recreates the live file.
+      renameSync(logPath, `${logPath}.old`);
     }
   } catch {
     // Missing/unreadable file — the append below (re)creates it.

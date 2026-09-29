@@ -102,29 +102,51 @@ describe("goodies-log basic logging", () => {
 });
 
 describe("goodies-log rotation", () => {
-  test("file exceeding MAX_BYTES is truncated to KEEP_BYTES (newest tail kept)", () => {
-    // Write a file well over MAX_BYTES (256 * 1024). After rotation, the file
-    // should be truncated to the newest KEEP_BYTES (64 * 1024) of content.
-    // Use a unique start marker and a unique end marker so we can verify the
-    // tail (end) survives and the head (start) is dropped.
-    const startMarker = "STARTMARKER_" + "S".repeat(200) + "\n";
-    const filler = "X".repeat(300_000) + "\n";
-    const endMarker = "ENDMARKER_" + "E".repeat(200) + "\n";
-    writeFileSync(logPath, startMarker + filler + endMarker);
+  function writeOversizedLog(): { startMarker: string; endMarker: string } {
+    // Write a file well over MAX_BYTES (256 * 1024) with a unique start
+    // marker and a unique end marker so we can verify where the old content
+    // ended up after rotation.
+    const startMarker = "STARTMARKER_" + "S".repeat(200);
+    const filler = "X".repeat(300_000);
+    const endMarker = "ENDMARKER_" + "E".repeat(200);
+    writeFileSync(logPath, `${startMarker}\n${filler}\n${endMarker}\n`);
+    return { startMarker, endMarker };
+  }
+
+  test("oversized log rotates via .old: live file restarts, newest tail preserved in .old, previous .old replaced", () => {
+    // A pre-existing .old must be replaced (single slot, no accumulation).
+    writeFileSync(`${logPath}.old`, "PREVIOUSOLD_NEVERSEEN_AGAIN\n");
+    const { startMarker, endMarker } = writeOversizedLog();
 
     // Log a small event — this triggers the rotation check.
     logGoodiesEvent({ type: "after_rotation", message: "marker" });
 
-    const data = readFileSync(logPath);
-    // The file must have been truncated: it should be well under the original
-    // ~300KB + the new line. The tail (KEEP_BYTES) plus the new event line.
-    expect(data.length).toBeLessThan(startMarker.length + filler.length);
-    // The newest content (our marker event + the end marker) must be present.
-    const text = data.toString("utf-8");
-    expect(text).toContain("after_rotation");
-    expect(text).toContain("ENDMARKER");
-    // The oldest content (the start marker) must have been dropped.
-    expect(text).not.toContain("STARTMARKER");
+    // The live file was recreated by the append: it holds the new event and
+    // none of the oversized content.
+    const live = readFileSync(logPath, "utf-8");
+    expect(live).toContain("after_rotation");
+    expect(live).not.toContain(startMarker);
+    expect(live).not.toContain("ENDMARKER");
+
+    // The old content moved to .old intact — the newest tail survived.
+    const old = readFileSync(`${logPath}.old`, "utf-8");
+    expect(old).toContain(endMarker);
+    expect(old).toContain(startMarker);
+    // The previous .old slot was replaced, not accumulated next to.
+    expect(old).not.toContain("PREVIOUSOLD");
+  });
+
+  test("rotation works when no .old exists yet", () => {
+    const { endMarker } = writeOversizedLog();
+    expect(existsSync(`${logPath}.old`)).toBe(false);
+
+    logGoodiesEvent({ type: "after_rotation", message: "marker" });
+
+    expect(existsSync(`${logPath}.old`)).toBe(true);
+    expect(readFileSync(`${logPath}.old`, "utf-8")).toContain(endMarker);
+    const live = readFileSync(logPath, "utf-8");
+    expect(live).toContain("after_rotation");
+    expect(live).not.toContain("ENDMARKER");
   });
 
   test("file under MAX_BYTES is not rotated", () => {
@@ -134,6 +156,7 @@ describe("goodies-log rotation", () => {
     const text = readFileSync(logPath, "utf-8");
     expect(text).toContain("small existing content");
     expect(text).toContain("appended");
+    expect(existsSync(`${logPath}.old`)).toBe(false);
   });
 });
 
