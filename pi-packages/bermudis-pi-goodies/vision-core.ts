@@ -100,6 +100,21 @@ export function resetConfigCache(): void {
   cfgCache = null;
 }
 
+/**
+ * Classify an rmSync failure from /vision reset: only ENOENT means the
+ * config file was already absent (nothing to remove — reset is a no-op
+ * success). Every other code (EACCES, EISDIR, …) is a real failure that
+ * must surface instead of reporting success.
+ */
+export function isConfigAbsentError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: unknown }).code === "ENOENT"
+  );
+}
+
 /** Merge a partial config into the config file (creating it if needed). */
 export function saveConfig(partial: Partial<VisionConfig>): VisionConfig {
   let existing: Partial<VisionConfig> = {};
@@ -489,6 +504,9 @@ export interface ConversationStore {
   getTurns(key: string): StoredTurn[];
   /** Record a turn: "fresh" resets the thread, "follow" appends. */
   record(key: string, turn: StoredTurn, mode: "fresh" | "follow"): void;
+  /** Drop every thread — called when the configured model changes, so a new
+   *  model never replays answers its predecessor gave. */
+  clear(): void;
 }
 
 const MAX_THREADS = 8;
@@ -517,6 +535,9 @@ export function createConversationStore(): ConversationStore {
       while (threads.size > MAX_THREADS) {
         threads.delete(threads.keys().next().value as string);
       }
+    },
+    clear() {
+      threads.clear();
     },
   };
 }

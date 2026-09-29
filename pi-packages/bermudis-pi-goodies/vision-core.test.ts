@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import {
   DEFAULT_MAX_TOKENS,
   MIME,
@@ -12,6 +12,7 @@ import {
   createConversationStore,
   defaultConfigPath,
   findVisionModel,
+  isConfigAbsentError,
   loadConfig,
   modelSupportsImages,
   parseVisionArgs,
@@ -120,6 +121,51 @@ describe("config", () => {
     expect(cfg.maxTokens).toBe(42);
     saveConfig({ maxTokens: -3 });
     expect(loadConfig().maxTokens).toBe(DEFAULT_MAX_TOKENS);
+  });
+});
+
+// --- /vision reset error classification ----------------------------------------
+
+describe("isConfigAbsentError", () => {
+  test("rmSync on an absent file throws ENOENT — classified as absent", () => {
+    const absent = join("/tmp", `vision-absent-${process.pid}-${Date.now()}`);
+    let caught: unknown;
+    try {
+      rmSync(absent);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(isConfigAbsentError(caught)).toBe(true);
+  });
+
+  test("rmSync on a directory without recursive fails for real — NOT absent", () => {
+    const dir = join("/tmp", `vision-test-dir-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    try {
+      let caught: unknown;
+      try {
+        rmSync(dir);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect(isConfigAbsentError(caught)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("duck-typed ENOENT code classifies as absent (rmSync's error shape)", () => {
+    expect(isConfigAbsentError({ code: "ENOENT" })).toBe(true);
+    expect(isConfigAbsentError({ code: "EACCES" })).toBe(false);
+  });
+
+  test("non-error junk is never classified as absent", () => {
+    expect(isConfigAbsentError(null)).toBe(false);
+    expect(isConfigAbsentError(undefined)).toBe(false);
+    expect(isConfigAbsentError("ENOENT")).toBe(false);
+    expect(isConfigAbsentError(new Error("boom"))).toBe(false);
   });
 });
 
@@ -535,6 +581,20 @@ describe("createConversationStore", () => {
     }
     expect(s.getTurns("k0")).toEqual([]); // evicted
     expect(s.getTurns("k11")).toHaveLength(1);
+  });
+
+  test("clear drops every thread (model switch must not inherit old answers)", () => {
+    const s = createConversationStore();
+    s.record("k1", { question: "q1", answer: "old model's answer" }, "fresh");
+    s.record("k2", { question: "q2", answer: "also old" }, "fresh");
+    s.clear();
+    expect(s.getTurns("k1")).toEqual([]);
+    expect(s.getTurns("k2")).toEqual([]);
+    // Store stays usable afterwards: follow-up against a cleared key is fresh.
+    s.record("k1", { question: "q3", answer: "new model's answer" }, "follow");
+    expect(s.getTurns("k1").map((t) => t.answer)).toEqual([
+      "new model's answer",
+    ]);
   });
 });
 

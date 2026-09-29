@@ -27,6 +27,7 @@ import {
   completeVisionArgument,
   configPath,
   createConversationStore,
+  isConfigAbsentError,
   loadConfig,
   modelSupportsImages,
   parseVisionArgs,
@@ -38,6 +39,8 @@ import {
   type ContentBlockLike,
   type ModelLike,
 } from "./vision-core.ts";
+import { describeError } from "./json-file.ts";
+import { reportFailure } from "./goodies-log.ts";
 import type {
   AutocompleteItem,
   AutocompleteProvider,
@@ -197,10 +200,25 @@ export default function (pi: ExtensionAPI): void {
       if (parsed.action === "reset") {
         try {
           rmSync(configPath);
-        } catch {
+        } catch (err) {
+          if (!isConfigAbsentError(err)) {
+            // ENOENT is "already absent"; anything else is a real failure —
+            // report it instead of claiming a reset that never happened.
+            reportFailure(
+              "vision_error",
+              `vision: failed to remove ${configPath}: ${describeError(err)}`,
+            );
+            ctx.ui.notify(
+              `vision: failed to clear config: ${describeError(err)}`,
+              "warning",
+            );
+            return;
+          }
           // already absent
         }
         resetConfigCache();
+        // Reset can change the effective model (env fallback) — drop threads.
+        conversations.clear();
         ctx.ui.notify(
           `vision: config cleared — VISION_MODEL env still applies if set`,
           "info",
@@ -217,6 +235,9 @@ export default function (pi: ExtensionAPI): void {
           return;
         }
         const cfg = saveConfig(parsed.values);
+        // A model switch invalidates follow-up threads: the new model must
+        // not "remember" answers the previous one gave on the same image.
+        if (parsed.values.model !== undefined) conversations.clear();
         // Live-validate against the registry when a model was just set:
         // fail fast on typos, text-only models, and missing auth.
         if (parsed.values.model !== undefined && ctx.modelRegistry) {
