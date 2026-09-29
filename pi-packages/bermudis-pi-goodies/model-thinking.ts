@@ -100,28 +100,45 @@ export function modelKey(model: Pick<Model, "provider" | "id">): string {
   return `${model.provider}/${model.id}`;
 }
 
-/** Validate the sidecar shape; only this module's own writer produces it. */
-export function parseStoredLevels(raw: unknown): Record<string, StoredLevel> {
+/**
+ * Validate the sidecar shape; only this module's own writer produces it.
+ * Invalid entries are skipped (and logged) so one bad entry cannot discard
+ * the other saved defaults on the next write; only a non-object file is
+ * rejected wholesale. `path` labels the skip logs; direct callers may omit it.
+ */
+export function parseStoredLevels(
+  raw: unknown,
+  path?: string,
+): Record<string, StoredLevel> {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("sidecar is not a JSON object");
   }
+  const where = path ? ` in ${path}` : "";
   const levels: Record<string, StoredLevel> = {};
   for (const [key, value] of Object.entries(raw)) {
     if (!/^[^/]+\/.+/.test(key)) {
-      throw new Error(`key ${JSON.stringify(key)} is not a provider/id pair`);
+      reportFailure(
+        "sidecar_error",
+        `model-thinking: skipping invalid entry${where}: ${JSON.stringify(key)} is not a provider/id pair`,
+      );
+      continue;
     }
     if (
       typeof value !== "string" ||
       !THINKING_LEVELS.has(value as StoredLevel)
     ) {
-      throw new Error(`invalid thinking level for ${key}: ${String(value)}`);
+      reportFailure(
+        "sidecar_error",
+        `model-thinking: skipping invalid entry${where}: invalid thinking level for ${key}: ${String(value)}`,
+      );
+      continue;
     }
     levels[key] = value as StoredLevel;
   }
   return levels;
 }
 
-/** Read levels from disk; a corrupt sidecar degrades to empty, never crashes a switch. */
+/** Read levels from disk; unparseable JSON degrades to empty, never crashes a switch. */
 export function readStoredLevels(
   path: string = DEFAULT_LEVELS_PATH,
 ): Record<string, StoredLevel> {
@@ -133,7 +150,7 @@ export function readStoredLevels(
     throw error;
   }
   try {
-    return parseStoredLevels(JSON.parse(raw));
+    return parseStoredLevels(JSON.parse(raw), path);
   } catch (error) {
     reportFailure(
       "sidecar_error",

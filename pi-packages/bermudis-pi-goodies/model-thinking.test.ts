@@ -157,12 +157,22 @@ describe("parseStoredLevels", () => {
     });
   });
 
-  test("rejects non-objects, bad keys, and bad levels", () => {
+  test("rejects non-objects wholesale", () => {
     expect(() => parseStoredLevels(null)).toThrow();
     expect(() => parseStoredLevels([1, 2])).toThrow();
-    expect(() => parseStoredLevels({ "no-slash": "high" })).toThrow();
-    expect(() => parseStoredLevels({ "zai/glm": "ultra" })).toThrow();
-    expect(() => parseStoredLevels({ "zai/glm": 7 })).toThrow();
+  });
+
+  test("skips bad keys and bad levels, keeping the valid entries", () => {
+    const parsed = parseStoredLevels({
+      "zai/glm-5.3": "high",
+      "no-slash": "high",
+      "zai/glm": "ultra",
+      "openai-codex/gpt-5.6-sol": "off",
+    });
+    expect(parsed).toEqual({
+      "zai/glm-5.3": "high",
+      "openai-codex/gpt-5.6-sol": "off",
+    });
   });
 });
 
@@ -551,6 +561,38 @@ describe("/model-thinking command", () => {
     expect(JSON.parse(readFileSync(levelsPath, "utf8"))).toEqual({
       "zai/glm-5.3": "high",
     });
+  });
+
+  test("one bad sidecar entry no longer discards the other saved defaults", async () => {
+    const glm = makeModel("zai", "glm-5.3");
+    const sol = makeModel("openai-codex", "gpt-5.6-sol");
+    const { writeFileSync } = await import("node:fs");
+    // A hand-edit typo: sol's level is garbage, glm's entry is fine.
+    writeFileSync(
+      levelsPath,
+      `${JSON.stringify({
+        "zai/glm-5.3": "high",
+        "openai-codex/gpt-5.6-sol": "ultra",
+      })}\n`,
+    );
+    const pi = new PiHarness(levelsPath);
+    pi.load();
+    // The valid entry still applies on switch...
+    pi.thinkingLevel = "low";
+    await pi.modelSelect(glm, "set");
+    expect(pi.thinkingLevel).toBe("high");
+    // ...and a save for another model persists it instead of an emptied map.
+    await pi.runCommand("medium", sol);
+    expect(JSON.parse(readFileSync(levelsPath, "utf8"))).toEqual({
+      "zai/glm-5.3": "high",
+      "openai-codex/gpt-5.6-sol": "medium",
+    });
+    // The skip is logged, not silent.
+    const log = readFileSync(join(scratchDir, "goodies.log"), "utf8");
+    expect(log).toContain("sidecar_error");
+    expect(log).toContain(
+      "invalid thinking level for openai-codex/gpt-5.6-sol",
+    );
   });
 
   test("completions cover levels and verbs", () => {
