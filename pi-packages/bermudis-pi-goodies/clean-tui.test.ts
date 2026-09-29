@@ -1429,6 +1429,60 @@ describe("clean-tui AI summary", () => {
     );
   });
 
+  test("summaries never repaint resultless replayed rows (crash zombies)", async () => {
+    // A session that died mid-command leaves its row resultless forever after
+    // a /resume. `!e.result` used to classify it as "still executing", so a
+    // summary landing for the same command repainted it anywhere in history —
+    // the above-viewport fullRender flash. Pending is now tracked per live
+    // run: replayed rows are never pending, so they keep raw text.
+    scriptedBackend(() => "Typechecks the extension sources");
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "resume" });
+    const cmd =
+      "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies && bun run typecheck && bun run test";
+    const zombie = h.row("bash", "zombie"); // replayed, no result ever lands
+    zombie.setArgs({ command: cmd });
+    h.emit("agent_start");
+    const live = h.row("bash", "live");
+    live.setArgs({ command: cmd }); // request fires here
+    live.setResult({ content: [{ type: "text", text: "132 pass" }] });
+    const zombieUpdatesAtLanding = zombie.updates;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(zombie.updates).toBe(zombieUpdatesAtLanding);
+    expect(textOf(zombie.lastCallComponent)).not.toContain(
+      "Typechecks the extension sources",
+    );
+    // The just-finished live row still swaps (the flight rule is untouched).
+    expect(textOf(live.lastCallComponent)).toContain(
+      "Typechecks the extension sources",
+    );
+  });
+
+  test("agent_settled sweeps resultless live rows out of summary-swap scope", async () => {
+    // Esc-interrupted turns normally get pi's fabricated abort result, but a
+    // missed event must not leave a row pending forever either: after the
+    // turn settles, nothing is executing, so a later summary for the same
+    // command keeps the raw text (viewport safety beats decoration).
+    scriptedBackend(() => "Typechecks the extension sources");
+    enableSummariesForTest();
+    const h = new PiHarness();
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const cmd = "echo " + "y".repeat(90);
+    const interrupted = h.row("bash", "interrupted");
+    interrupted.setArgs({ command: cmd });
+    h.emit("agent_settled", { type: "agent_settled" });
+    const updatesAtLanding = interrupted.updates;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(interrupted.updates).toBe(updatesAtLanding);
+    expect(textOf(interrupted.lastCallComponent)).not.toContain(
+      "Typechecks the extension sources",
+    );
+  });
+
   test("summary is normalized to one line and not capped", async () => {
     scriptedBackend(
       () =>

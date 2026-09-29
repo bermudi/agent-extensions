@@ -18,11 +18,13 @@ import {
 } from "./goodies.ts";
 import type { Entry } from "./clean-tui.ts";
 
-// Only the two safe, tail-only row interactions cross into burst state.
+// Only the safe, tail-only row interactions cross into burst state.
 let history: {
   entries: Entry[];
   invalidateById: Map<string, () => void>;
   isReplaying: () => boolean;
+  /** True while the call's final result has not landed in the CURRENT run. */
+  isPending: (toolCallId: string) => boolean;
 };
 export function bindSummaryHistory(value: typeof history): void {
   history = value;
@@ -1117,13 +1119,18 @@ function invalidateRowsForCommand(cmd: string): void {
   // their summary was in flight — at landing those are at most one summary
   // latency old, so they sit at the viewport tail and a differential
   // re-render is safe. This is what makes fast commands (finished before the
-  // ~2s summary arrives) visibly summarize at all. Older finished rows —
-  // including replayed ones from before a /resume — keep the raw command
-  // text: they can sit far above the viewport on a long transcript, and pi's
-  // diff renderer answers any change above the viewport with fullRender(true):
-  // clear screen + scrollback wipe + full repaint, i.e. the "flicker while pi
-  // is working" seen on 0.11.x. The summary stays cached either way, and
-  // future rows of the same command render it from the start.
+  // ~2s summary arrives) visibly summarize at all. Still-executing means
+  // pending in the CURRENT run: `!e.result` alone also matched rows left
+  // resultless by a crash or interrupt (replayed zombies from a dead
+  // session included), and repainting those anywhere in history is the
+  // above-viewport fullRender flash this function exists to prevent.
+  // Older finished rows — including replayed ones from before a /resume —
+  // keep the raw command text: they can sit far above the viewport on a long
+  // transcript, and pi's diff renderer answers any change above the viewport
+  // with fullRender(true): clear screen + scrollback wipe + full repaint,
+  // i.e. the "flicker while pi is working" seen on 0.11.x. The summary stays
+  // cached either way, and future rows of the same command render it from
+  // the start.
   for (const e of history.entries) {
     if (e.args?.command !== cmd) continue;
     const finishedDuringFlight =
@@ -1133,7 +1140,7 @@ function invalidateRowsForCommand(cmd: string): void {
       // Strictly younger than the window: a zero window must admit nothing,
       // and stamp/result often land in the same millisecond in tests.
       Date.now() - e.resultAt < summarySwapMaxAgeMs;
-    if (!e.result || finishedDuringFlight) {
+    if (history.isPending(e.toolCallId) || finishedDuringFlight) {
       const fn = history.invalidateById.get(e.toolCallId);
       if (fn) fn();
     }

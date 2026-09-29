@@ -270,6 +270,18 @@ const entries: Entry[] = [];
 let entriesBase = 0;
 const entryById = new Map<string, Entry>();
 const invalidateById = new Map<string, () => void>();
+/**
+ * Tool calls of the CURRENT run whose final result has not landed. Only these
+ * may swap to a summary when one lands (see invalidateRowsForCommand). `!e.result`
+ * alone was the old test, and rows left resultless by a crash/interrupt —
+ * replayed from a dead session via /resume, or any turn where pi never
+ * delivered a result — stayed `!e.result` forever, so a later summary for the
+ * same command repainted them anywhere in history: the above-viewport flash
+ * again. Filled only for live registrations (never during replay); swept at
+ * agent_settled so an abort that skipped the result path cannot leave a
+ * zombie behind.
+ */
+const pendingToolCalls = new Set<string>();
 // Ids dropped by pruning. A pruned row can re-render (expanding a burst far
 // up the transcript re-creates its component), and a re-registered id must
 // NOT join the live burst: its burst context is gone, so it renders solo
@@ -307,6 +319,7 @@ function pruneHistoryIfNeeded(): void {
     const id = entries[i].toolCallId;
     entryById.delete(id);
     invalidateById.delete(id);
+    pendingToolCalls.delete(id);
     prunedToolCallIds.add(id);
     if (prunedToolCallIds.size > PRUNED_ID_CAP) {
       const oldest = prunedToolCallIds.values().next();
@@ -354,6 +367,12 @@ function upsertEntry(
     };
     entries.push(e);
     entryById.set(toolCallId, e);
+    // Live registration of a call whose result has not landed. Replayed rows
+    // (startup, /resume) and pruned-id re-registrations (late re-renders of
+    // old rows) are not executing calls — a resultless replayed row is
+    // exactly the crashed-session zombie this set exists to exclude.
+    if (!replaying && !prunedToolCallIds.has(toolCallId))
+      pendingToolCalls.add(toolCallId);
     pruneHistoryIfNeeded();
   } else {
     e.args = args;
@@ -569,6 +588,7 @@ function recordResult(
   if (!isPartial) {
     entry.resultAt = Date.now();
     entry.isError = !!ctx.isError || !!result.isError;
+    pendingToolCalls.delete(entry.toolCallId);
   }
   entry.hasImage = hasImageContent(result);
   revalidateBurstsAround(entry.toolCallId);
@@ -928,7 +948,12 @@ function loadExtensionVersion(): string {
 }
 
 export default function cleanTui(pi: ExtensionAPI): void {
-  bindSummaryHistory({ entries, invalidateById, isReplaying: () => replaying });
+  bindSummaryHistory({
+    entries,
+    invalidateById,
+    isReplaying: () => replaying,
+    isPending: (id) => pendingToolCalls.has(id),
+  });
   setCleanTuiActive(true);
   // One line per load (pi process start, /reload) so the log answers "was the
   // feature even on, pointing at which model, and running which version"
@@ -1003,6 +1028,11 @@ export default function cleanTui(pi: ExtensionAPI): void {
     // last summary is spent. In-flight requests may still land — their
     // run-identity check drops them silently.
     resetThinkingRun();
+    // Nothing executes across a settle, so anything still pending is a
+    // zombie (an abort that skipped the result path, a missed event). Sweep
+    // it: pi fabricates "Operation aborted" results for interrupted calls,
+    // but the sweep does not depend on that reaching every row.
+    pendingToolCalls.clear();
   });
   pi.on("session_start", (_event, ctx) => {
     liveSeg = 0;
@@ -1013,6 +1043,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
     entriesBase = 0;
     entryById.clear();
     invalidateById.clear();
+    pendingToolCalls.clear();
     prunedToolCallIds.clear();
     // Capture the UI handle for the pause widget (guarded: harness stubs and
     // limited contexts lack setWidget), and drop any stale pause indicator
