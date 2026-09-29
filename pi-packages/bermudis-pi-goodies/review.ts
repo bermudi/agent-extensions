@@ -38,6 +38,16 @@
  * - parsePrReference(): exported, strictly numeric bare refs, anchored PR-URL
  *   regex, and the URL's owner/repo forwarded to gh via --repo
  * - tokenizeArgs(): hoisted to module scope and exported for tests
+ * - quote-aware path parsing: parseArgs() + parseReviewPaths() hoisted to
+ *   module scope (exported for tests); the folder flow no longer joins tokens
+ *   back into a string (join+re-split destroyed quoted paths), and the folder
+ *   editor tokenizes its raw text with tokenizeArgs() instead of splitting on
+ *   whitespace
+ * - navigateWithSummary(): aborting the summary loader detaches the
+ *   navigation instead of pretending it stopped — a result that completes
+ *   after the abort is discarded and the review state is cleared, so a stale
+ *   {active: true} entry can't resurrect the review widget (pi exposes no
+ *   cancellation for an in-flight navigateTree summarization)
  */
 
 import type {
@@ -569,6 +579,100 @@ export function tokenizeArgs(value: string): string[] {
 }
 
 /**
+ * Normalize already-tokenized review paths: trim and drop empties (e.g. ""
+ * tokens). Callers must tokenize raw text with tokenizeArgs() first — never
+ * re-split token output on whitespace, that destroys quoted paths.
+ *
+ * Extracted to module level and exported so the pure logic is testable
+ * without spinning up the review command's closure.
+ */
+export function parseReviewPaths(tokens: string[]): string[] {
+  return tokens.map((item) => item.trim()).filter((item) => item.length > 0);
+}
+
+/**
+ * Parse command arguments for direct invocation.
+ * Returns the target or a special marker for PR that needs async handling.
+ *
+ * Extracted to module level and exported so the pure logic is testable
+ * without spinning up the review command's closure.
+ */
+export type ParsedReviewArgs = {
+  target: ReviewTarget | { type: "pr"; ref: string } | null;
+  extraInstruction?: string;
+  error?: string;
+};
+
+export function parseArgs(args: string | undefined): ParsedReviewArgs {
+  if (!args?.trim()) return { target: null };
+
+  const rawParts = tokenizeArgs(args.trim());
+  const parts: string[] = [];
+  let extraInstruction: string | undefined;
+
+  for (let i = 0; i < rawParts.length; i++) {
+    const part = rawParts[i];
+    if (part === "--extra") {
+      const next = rawParts[i + 1];
+      if (!next) {
+        return { target: null, error: "Missing value for --extra" };
+      }
+      extraInstruction = next;
+      i += 1;
+      continue;
+    }
+
+    if (part.startsWith("--extra=")) {
+      extraInstruction = part.slice("--extra=".length);
+      continue;
+    }
+
+    parts.push(part);
+  }
+
+  if (parts.length === 0) {
+    return { target: null, extraInstruction };
+  }
+
+  const subcommand = parts[0]?.toLowerCase();
+
+  switch (subcommand) {
+    case "uncommitted":
+      return { target: { type: "uncommitted" }, extraInstruction };
+
+    case "branch": {
+      const branch = parts[1];
+      if (!branch) return { target: null, extraInstruction };
+      return { target: { type: "baseBranch", branch }, extraInstruction };
+    }
+
+    case "commit": {
+      const sha = parts[1];
+      if (!sha) return { target: null, extraInstruction };
+      const title = parts.slice(2).join(" ") || undefined;
+      return { target: { type: "commit", sha, title }, extraInstruction };
+    }
+
+    case "folder": {
+      // parts are already tokenizeArgs() output — pass the tokens through,
+      // don't join(" ") + re-split (that would destroy quoted paths).
+      const paths = parseReviewPaths(parts.slice(1));
+      if (paths.length === 0) return { target: null, extraInstruction };
+      return { target: { type: "folder", paths }, extraInstruction };
+    }
+
+    case "pr": {
+      const ref = parts[1];
+      if (!ref) return { target: null, extraInstruction };
+      return { target: { type: "pr", ref }, extraInstruction };
+    }
+
+    default:
+      return { target: null, extraInstruction };
+  }
+}
+
+/**
  * Get PR information from GitHub CLI
  */
 async function getPrInfo(
@@ -653,10 +757,13 @@ async function getDefaultBranch(pi: ExtensionAPI): Promise<string> {
 /**
  * Build the review prompt based on target
  */
-async function buildReviewPrompt(
+export async function buildReviewPrompt(
   pi: ExtensionAPI,
   target: ReviewTarget,
 ): Promise<string> {
+  // Titles/branches/paths flow into replace() as replacements — use function
+  // replacements so `$&`/`$'`/`` $` `` in them stay literal instead of being
+  // expanded as patterns.
   switch (target.type) {
     case "uncommitted":
       return UNCOMMITTED_PROMPT;
@@ -666,39 +773,43 @@ async function buildReviewPrompt(
       const basePrompt = mergeBase
         ? BASE_BRANCH_PROMPT_WITH_MERGE_BASE.replace(
             /{baseBranch}/g,
-            target.branch,
-          ).replace(/{mergeBaseSha}/g, mergeBase)
-        : BASE_BRANCH_PROMPT_FALLBACK.replace(/{branch}/g, target.branch);
+            () => target.branch,
+          ).replace(/{mergeBaseSha}/g, () => mergeBase)
+        : BASE_BRANCH_PROMPT_FALLBACK.replace(/{branch}/g, () => target.branch);
       return basePrompt;
     }
 
     case "commit":
       if (target.title) {
-        return COMMIT_PROMPT_WITH_TITLE.replace("{sha}", target.sha).replace(
+        // local copies: closures don't inherit property narrowing on target
+        const { sha, title } = target;
+        return COMMIT_PROMPT_WITH_TITLE.replace("{sha}", () => sha).replace(
           "{title}",
-          target.title,
+          () => title,
         );
       }
-      return COMMIT_PROMPT.replace("{sha}", target.sha);
+      return COMMIT_PROMPT.replace("{sha}", () => target.sha);
 
     case "pullRequest": {
       const mergeBase = await getMergeBase(pi, target.baseBranch);
       const basePrompt = mergeBase
         ? PULL_REQUEST_PROMPT.replace(/{prNumber}/g, String(target.prNumber))
-            .replace(/{title}/g, target.title)
-            .replace(/{baseBranch}/g, target.baseBranch)
-            .replace(/{mergeBaseSha}/g, mergeBase)
+            .replace(/{title}/g, () => target.title)
+            .replace(/{baseBranch}/g, () => target.baseBranch)
+            .replace(/{mergeBaseSha}/g, () => mergeBase)
         : PULL_REQUEST_PROMPT_FALLBACK.replace(
             /{prNumber}/g,
             String(target.prNumber),
           )
-            .replace(/{title}/g, target.title)
-            .replace(/{baseBranch}/g, target.baseBranch);
+            .replace(/{title}/g, () => target.title)
+            .replace(/{baseBranch}/g, () => target.baseBranch);
       return basePrompt;
     }
 
     case "folder":
-      return FOLDER_REVIEW_PROMPT.replace("{paths}", target.paths.join(", "));
+      return FOLDER_REVIEW_PROMPT.replace("{paths}", () =>
+        target.paths.join(", "),
+      );
   }
 }
 
@@ -1452,13 +1563,6 @@ export default function reviewExtension(pi: ExtensionAPI) {
     return { type: "commit", sha: result.sha, title: result.title };
   }
 
-  function parseReviewPaths(value: string): string[] {
-    return value
-      .split(/\s+/)
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
-  }
-
   /**
    * Show folder input
    */
@@ -1471,7 +1575,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
     );
 
     if (!result?.trim()) return null;
-    const paths = parseReviewPaths(result);
+    const paths = parseReviewPaths(tokenizeArgs(result));
     if (paths.length === 0) return null;
 
     return { type: "folder", paths };
@@ -1617,83 +1721,6 @@ export default function reviewExtension(pi: ExtensionAPI) {
     // start is unchanged. Same contract as the fix-findings send below.
     pi.sendUserMessage(fullPrompt, { deliverAs: "followUp" });
     return true;
-  }
-
-  /**
-   * Parse command arguments for direct invocation
-   * Returns the target or a special marker for PR that needs async handling
-   */
-  type ParsedReviewArgs = {
-    target: ReviewTarget | { type: "pr"; ref: string } | null;
-    extraInstruction?: string;
-    error?: string;
-  };
-
-  function parseArgs(args: string | undefined): ParsedReviewArgs {
-    if (!args?.trim()) return { target: null };
-
-    const rawParts = tokenizeArgs(args.trim());
-    const parts: string[] = [];
-    let extraInstruction: string | undefined;
-
-    for (let i = 0; i < rawParts.length; i++) {
-      const part = rawParts[i];
-      if (part === "--extra") {
-        const next = rawParts[i + 1];
-        if (!next) {
-          return { target: null, error: "Missing value for --extra" };
-        }
-        extraInstruction = next;
-        i += 1;
-        continue;
-      }
-
-      if (part.startsWith("--extra=")) {
-        extraInstruction = part.slice("--extra=".length);
-        continue;
-      }
-
-      parts.push(part);
-    }
-
-    if (parts.length === 0) {
-      return { target: null, extraInstruction };
-    }
-
-    const subcommand = parts[0]?.toLowerCase();
-
-    switch (subcommand) {
-      case "uncommitted":
-        return { target: { type: "uncommitted" }, extraInstruction };
-
-      case "branch": {
-        const branch = parts[1];
-        if (!branch) return { target: null, extraInstruction };
-        return { target: { type: "baseBranch", branch }, extraInstruction };
-      }
-
-      case "commit": {
-        const sha = parts[1];
-        if (!sha) return { target: null, extraInstruction };
-        const title = parts.slice(2).join(" ") || undefined;
-        return { target: { type: "commit", sha, title }, extraInstruction };
-      }
-
-      case "folder": {
-        const paths = parseReviewPaths(parts.slice(1).join(" "));
-        if (paths.length === 0) return { target: null, extraInstruction };
-        return { target: { type: "folder", paths }, extraInstruction };
-      }
-
-      case "pr": {
-        const ref = parts[1];
-        if (!ref) return { target: null, extraInstruction };
-        return { target: { type: "pr", ref }, extraInstruction };
-      }
-
-      default:
-        return { target: null, extraInstruction };
-    }
   }
 
   /**
@@ -1913,7 +1940,17 @@ Instructions:
             theme,
             "Returning and summarizing review branch...",
           );
-          loader.onAbort = () => done(null);
+
+          // Esc resolves this dialog immediately, but pi has no
+          // extension-facing way to cancel the in-flight navigation
+          // (session.abortBranchSummary() is internal, navigateTree takes no
+          // signal), so the work can race past the abort. Track it and
+          // reconcile when the promise settles.
+          let aborted = false;
+          loader.onAbort = () => {
+            aborted = true;
+            done(null);
+          };
 
           ctx
             .navigateTree(originId, {
@@ -1921,13 +1958,48 @@ Instructions:
               customInstructions: REVIEW_SUMMARY_PROMPT,
               replaceInstructions: true,
             })
-            .then(done)
-            .catch((err) =>
+            .then((result) => {
+              if (aborted) {
+                if (!result.cancelled) {
+                  // Completed after the abort: the tree already moved back
+                  // to the origin, so the review is really over. Discard
+                  // the result (it must not be applied below) and clear the
+                  // persisted state so the stale {active: true} entry can't
+                  // resurrect the review widget on replay.
+                  try {
+                    clearReviewState(ctx);
+                    ctx.ui.notify(
+                      "Summarization finished in the background after cancel; review ended.",
+                      "info",
+                    );
+                  } catch (err) {
+                    // ctx can be stale (reload/session switch) by the time
+                    // the navigation settles — surface it instead of
+                    // crashing on a dead context.
+                    console.error(
+                      `[review] failed to clear review state after aborted summarization: ${describeError(err)}`,
+                    );
+                  }
+                }
+                return;
+              }
+              done(result);
+            })
+            .catch((err) => {
+              if (aborted) {
+                // pi throws before mutating the tree, so the review is
+                // intact and retrying /end-review stays valid — but don't
+                // swallow the failure silently.
+                console.error(
+                  `[review] abandoned summarization navigation failed: ${describeError(err)}`,
+                );
+                return;
+              }
               done({
                 cancelled: false,
                 error: describeError(err),
-              }),
-            );
+              });
+            });
 
           return loader;
         },
