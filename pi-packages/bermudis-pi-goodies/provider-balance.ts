@@ -63,7 +63,7 @@ const BALANCE_FETCH_TIMEOUT_MS = 5_000;
  */
 const IDLE_REFRESH_INTERVAL_MS = 60_000;
 const IDLE_REFRESH_JITTER_MS = 15_000;
-/** Minimum time between turn_end-triggered balance refreshes. See turn_end handler. */
+/** Minimum time between turn_end/delegate:usage-triggered balance refreshes. See throttledRefresh. */
 const TURN_REFRESH_MIN_INTERVAL_MS = 30_000;
 /** On session start, adopt a sibling/previous session's cache entry younger
  *  than this instead of refetching — rapid session switches then cost nothing. */
@@ -1404,7 +1404,8 @@ export default function providerBalance(
   let refreshGeneration = 0;
   let refreshInFlight = false;
   let refreshController: AbortController | undefined;
-  let lastTurnRefreshAt: number | undefined;
+  /** Stamp shared by every throttled refresh trigger (turn_end, delegate:usage). */
+  let lastThrottledRefreshAt: number | undefined;
   let idleRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   let authTransitionTimer: ReturnType<typeof setTimeout> | undefined;
   let requestRender: (() => void) | undefined;
@@ -1863,17 +1864,39 @@ export default function providerBalance(
   // chatty runs would hammer that endpoint. agent_settled still fires
   // afterward and guarantees a final refresh, so the tail of a run is never
   // left stale.
-  pi.on("turn_end", (_event, ctx) => {
-    activeContext = ctx;
+  //
+  // turn_end and delegate:usage share ONE stamp: the interval exists to bound
+  // provider-status requests, and both triggers ask the same question — "did
+  // the balance move since we last looked?" Splitting the stamp would double
+  // the request rate the interval was chosen for.
+  function throttledRefresh(ctx: ExtensionContext): void {
     const timestamp = now();
     if (
-      lastTurnRefreshAt !== undefined &&
-      timestamp - lastTurnRefreshAt < TURN_REFRESH_MIN_INTERVAL_MS
+      lastThrottledRefreshAt !== undefined &&
+      timestamp - lastThrottledRefreshAt < TURN_REFRESH_MIN_INTERVAL_MS
     ) {
       return;
     }
-    lastTurnRefreshAt = timestamp;
+    lastThrottledRefreshAt = timestamp;
     void refreshForModel(ctx, ctx.model);
+  }
+  pi.on("turn_end", (_event, ctx) => {
+    activeContext = ctx;
+    throttledRefresh(ctx);
+  });
+
+  // Subagent usage (#60): pi-delegate emits `delegate:usage` on the shared
+  // event bus when a subagent task settles — those tokens land on the same
+  // account, so an hour-long delegate batch should move the footer before
+  // the parent run's agent_settled would fire. The bus handler receives no
+  // ctx; the tracked activeContext is the live session. Payload
+  // provider/model are reserved for future per-provider display — today the
+  // refresh reads the active model, identical to turn_end.
+  pi.events.on("delegate:usage", (data: unknown) => {
+    if (data === null || typeof data !== "object") return;
+    const ctx = activeContext;
+    if (ctx === undefined) return;
+    throttledRefresh(ctx);
   });
 
   pi.on("thinking_level_select", (event) => {
@@ -1901,7 +1924,7 @@ export default function providerBalance(
     refreshInFlight = false;
     refreshController?.abort();
     refreshController = undefined;
-    lastTurnRefreshAt = undefined;
+    lastThrottledRefreshAt = undefined;
     if (idleRefreshTimer !== undefined) clearTimer(idleRefreshTimer);
     idleRefreshTimer = undefined;
     if (authTransitionTimer !== undefined) clearTimer(authTransitionTimer);

@@ -61,6 +61,12 @@ describe("event latency", () => {
           modelSelectHandler = handler as typeof modelSelectHandler;
         }
       },
+      events: {
+        emit() {},
+        on() {
+          return () => {};
+        },
+      },
     } as unknown as ExtensionAPI);
     if (!modelSelectHandler) {
       throw new Error("provider-balance did not register model_select");
@@ -118,6 +124,126 @@ describe("event latency", () => {
         },
       },
     ]);
+  });
+});
+
+describe("delegate:usage", () => {
+  test("routes a subagent settlement into the same throttled refresh as turn_end", async () => {
+    // Issue #60: pi-delegate emits `delegate:usage` on the shared event
+    // bus at task settlement. The listener must refresh the ACTIVE
+    // model's balance — payload provider/model are reserved for future
+    // per-provider display — through the same 30s stamp as turn_end,
+    // so the two triggers cannot double the provider-status request rate.
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: ExtensionContext) => unknown
+    >();
+    const busHandlers = new Map<string, (data: unknown) => unknown>();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    const flush = () =>
+      new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+    let nowMs = 1_000_000;
+    const fetched: string[] = [];
+
+    try {
+      providerBalance(
+        {
+          on(event, handler) {
+            handlers.set(
+              event,
+              handler as (event: unknown, ctx: ExtensionContext) => unknown,
+            );
+          },
+          events: {
+            emit() {},
+            on(channel: string, handler: (data: unknown) => unknown) {
+              busHandlers.set(channel, handler);
+              return () => {};
+            },
+          },
+        } as unknown as ExtensionAPI,
+        {
+          adapters: {
+            kilo: {
+              fetch: async (token: string) => {
+                fetched.push(token);
+                return [{ credits: 1 }];
+              },
+            },
+          },
+          cacheDir: directory,
+          now: () => nowMs,
+          random: () => 0.5,
+          setTimeout,
+          clearTimeout,
+        },
+      );
+
+      const ctx = {
+        mode: "tui",
+        model: { provider: "kilo" },
+        isIdle: () => false,
+        ui: { setFooter() {} },
+        sessionManager: { getBranch: () => [] },
+        modelRegistry: {
+          isUsingOAuth: () => false,
+          getApiKeyForProvider: async () => "tok",
+        },
+      } as unknown as ExtensionContext;
+
+      const start = handlers.get("session_start");
+      const turnEnd = handlers.get("turn_end");
+      const usage = busHandlers.get("delegate:usage");
+      if (!start || !turnEnd || !usage) {
+        throw new Error("missing lifecycle or delegate:usage handlers");
+      }
+
+      // Before any session starts there is no live ctx — a stray
+      // emission must not refresh (and must not throw).
+      usage({ provider: "delegate-faux" });
+      await flush();
+      expect(fetched).toEqual([]);
+
+      start({}, ctx);
+      await flush();
+      expect(fetched).toEqual(["tok"]);
+
+      // First settlement inside a window refreshes the active model.
+      usage({
+        provider: "delegate-faux",
+        model: "faux-1",
+        totalTokens: 10,
+        inputTokens: 7,
+        outputTokens: 3,
+      });
+      await flush();
+      expect(fetched).toEqual(["tok", "tok"]);
+
+      // Same-window settlements are throttled — as is a turn_end, since
+      // both triggers share one stamp.
+      usage({ provider: "delegate-faux" });
+      turnEnd({ turnIndex: 0 }, ctx);
+      await flush();
+      expect(fetched).toHaveLength(2);
+
+      // Malformed payloads never reach the refresh path.
+      usage("garbage");
+      usage(null);
+      nowMs += 31_000;
+      usage({ provider: "delegate-faux" });
+      await flush();
+      expect(fetched).toHaveLength(3);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
 
