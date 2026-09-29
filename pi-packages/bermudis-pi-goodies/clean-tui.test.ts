@@ -1,5 +1,16 @@
 import { describe, expect, test, afterEach, beforeEach } from "bun:test";
 import { Box, Container } from "@earendil-works/pi-tui";
+import {
+  createBashToolDefinition,
+  createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import { isCleanTuiActive } from "./clean-tui-active";
+import bermudisPiGoodies from "./index";
 import type { AutocompleteProvider } from "@earendil-works/pi-tui";
 import type { Model } from "@earendil-works/pi-ai";
 import cleanTui, {
@@ -88,6 +99,99 @@ describe("clean-tui pi-codex integration flag", () => {
     expect(globals[FLAG]).toBe(true);
     setCleanTuiActive(false);
     expect(globals[FLAG]).toBeUndefined();
+  });
+});
+
+describe("clean-tui built-in metadata parity", () => {
+  test("all seven overrides retain native definition fields, including system prompt metadata", () => {
+    const h = freshHarness();
+    for (const [name, native] of [
+      ["read", createReadToolDefinition(process.cwd())],
+      ["bash", createBashToolDefinition(process.cwd())],
+      ["edit", createEditToolDefinition(process.cwd())],
+      ["write", createWriteToolDefinition(process.cwd())],
+      ["find", createFindToolDefinition(process.cwd())],
+      ["grep", createGrepToolDefinition(process.cwd())],
+      ["ls", createLsToolDefinition(process.cwd())],
+    ] as const) {
+      const definition = h.tool(name);
+      for (const key of Object.keys(native) as Array<keyof typeof native>) {
+        if (
+          key === "renderCall" ||
+          key === "renderResult" ||
+          key === "renderShell" ||
+          key === "execute"
+        )
+          continue;
+        expect(definition[key]).toEqual(native[key]);
+      }
+      expect(definition.promptSnippet).toBe(native.promptSnippet);
+      expect(definition.promptGuidelines).toEqual(native.promptGuidelines);
+      expect(definition.parameters).toEqual(native.parameters);
+    }
+  });
+});
+
+describe("clean-tui load-time configuration", () => {
+  /** PiHarness has no registerCommand; the bundle always registers /goodies. */
+  function loadBundle(h: PiHarness): void {
+    const api = Object.create(h.api) as Record<string, unknown>;
+    api.registerCommand = () => {};
+    bermudisPiGoodies(api as never);
+  }
+
+  /** Config with every feature explicitly set — unset keys default to on. */
+  function writeConfig(path: string, cleanTui: boolean): void {
+    const features = [
+      "copy-with-model",
+      "copy-trajectory",
+      "name-with-ai",
+      "zed",
+      "prefer-tools",
+      "keep-model",
+      "model-thinking",
+      "clean-tui",
+      "review",
+      "provider-balance",
+      "kilo",
+      "tps",
+      "vision",
+      "side",
+    ];
+    writeFileSync(
+      path,
+      JSON.stringify(
+        Object.fromEntries(
+          features.map((f) => [f, f === "clean-tui" && cleanTui]),
+        ),
+      ),
+    );
+  }
+
+  test("disabled at load registers nothing; enabled overrides built-ins", () => {
+    const dir = mkdtempSync(join(tmpdir(), "goodies-cfg-"));
+    const cfg = join(dir, "goodies.json");
+    writeConfig(cfg, false);
+    __setConfigPathForTesting(cfg);
+    const off = new PiHarness();
+    loadBundle(off);
+    // Nothing registered: pi's own tools stay fully native, and the flag the
+    // pi-codex integration reads is cleared.
+    expect(() => off.tool("read")).toThrow(/no tool "read"/);
+    expect(isCleanTuiActive()).toBe(false);
+
+    writeConfig(cfg, true);
+    // __setConfigPathForTesting snapshots the config at call time — re-point
+    // it so the rewritten file is actually loaded.
+    __setConfigPathForTesting(cfg);
+    const on = new PiHarness();
+    loadBundle(on);
+    const read = on.tool("read");
+    expect(read.renderShell).toBe("self");
+    expect(read.promptSnippet).toBe(
+      createReadToolDefinition(process.cwd()).promptSnippet,
+    );
+    expect(isCleanTuiActive()).toBe(true);
   });
 });
 
@@ -425,10 +529,9 @@ describe("clean-tui resume/replay", () => {
     expect(f.lastCallComponent instanceof Container).toBe(true);
   });
 
-  test("replayed empty thinking blocks do not split bursts", () => {
-    // Pi renders no row for empty thinking, so grouping across it matches
-    // the screen. OpenAI models often emit reasoning items with no text
-    // before every tool call — those must not force solos.
+  test("replayed empty thinking blocks split bursts", () => {
+    // An empty reasoning item may fill in after the tool calls register;
+    // grouping across it would place the later call above that thinking.
     const toolCall = (id: string, name: string) => ({
       type: "toolCall",
       id,
@@ -454,8 +557,8 @@ describe("clean-tui resume/replay", () => {
     const b = h.row("read", "b");
     a.setArgs({ path: "/tmp/a.ts" });
     b.setArgs({ path: "/tmp/b.ts" });
-    expect(textOf(a.lastCallComponent)).toContain("read ×2");
-    expect(b.lastCallComponent instanceof Container).toBe(true);
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(b.lastCallComponent instanceof Container).toBe(false);
   });
 
   test("replayed prose between messages keeps their bursts apart", () => {
@@ -787,10 +890,9 @@ describe("clean-tui resume/replay", () => {
     expect(b.lastCallComponent instanceof Container).toBe(false);
   });
 
-  test("live: empty thinking between tool calls does not split the burst", () => {
-    // Empty reasoning items (OpenAI emits one before every call, often with
-    // no text) produce no Thinking... row, so grouping across them matches
-    // the screen — this is the screenshot case: three solos become one burst.
+  test("live: empty thinking between tool calls splits even before it paints", () => {
+    // OpenAI may fill in a reasoning item after the next tool call registers.
+    // Preserve chronological order without depending on paint timing.
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
     h.emit("agent_start");
@@ -822,9 +924,112 @@ describe("clean-tui resume/replay", () => {
     });
     const c = h.row("bash", "c");
     c.setArgs({ command: "echo three" });
-    expect(textOf(a.lastCallComponent)).toContain("bash ×3");
-    expect(b.lastCallComponent instanceof Container).toBe(true);
-    expect(c.lastCallComponent instanceof Container).toBe(true);
+    expect(textOf(a.lastCallComponent)).not.toContain("×3");
+    expect(b.lastCallComponent instanceof Container).toBe(false);
+    expect(c.lastCallComponent instanceof Container).toBe(false);
+  });
+
+  test("tool-order reconciliation splits rows when thinking arrives after paint", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    h.emit("message_start", { message: { role: "assistant", content: [] } });
+    const a = h.row("read", "late-a");
+    const b = h.row("read", "late-b");
+    a.setArgs({ path: "/tmp/a" });
+    b.setArgs({ path: "/tmp/b" });
+    expect(textOf(a.lastCallComponent)).toContain("read ×2");
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "late-a" },
+          { type: "thinking", thinking: "" },
+          { type: "toolCall", id: "late-b" },
+        ],
+      },
+    });
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(b.lastCallComponent instanceof Container).toBe(false);
+  });
+
+  test("late boundary re-stamps the tail: rows after the split still group", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    h.emit("message_start", { message: { role: "assistant", content: [] } });
+    const a = h.row("read", "tail-a");
+    const b = h.row("read", "tail-b");
+    const c = h.row("read", "tail-c");
+    a.setArgs({ path: "/tmp/a" });
+    b.setArgs({ path: "/tmp/b" });
+    c.setArgs({ path: "/tmp/c" });
+    expect(textOf(a.lastCallComponent)).toContain("read ×3");
+    // The thinking block lands between a and b after all three painted: a
+    // must split off, but b and c — adjacent, no boundary between them —
+    // must still form one burst (they were all stamped pre-boundary).
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "tail-a" },
+          { type: "thinking", thinking: "" },
+          { type: "toolCall", id: "tail-b" },
+          { type: "toolCall", id: "tail-c" },
+        ],
+      },
+    });
+    expect(textOf(a.lastCallComponent)).not.toContain("×3");
+    expect(textOf(b.lastCallComponent)).toContain("read ×2");
+    // Hidden followers render an empty container — c paints nothing.
+    expect(textOf(c.lastCallComponent)).toBe("");
+  });
+
+  test("a boundary inserted after both calls were seen splits their group", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const call = (id: string) => ({ type: "toolCall", id, name: "read" });
+    h.emit("message_start", {
+      message: { role: "assistant", content: [call("a"), call("b")] },
+    });
+    const a = h.row("read", "a");
+    const b = h.row("read", "b");
+    a.setArgs({ path: "/tmp/a" });
+    b.setArgs({ path: "/tmp/b" });
+    expect(textOf(a.lastCallComponent)).toContain("read ×2");
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [call("a"), { type: "thinking", thinking: "" }, call("b")],
+      },
+    });
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(b.lastCallComponent instanceof Container).toBe(false);
+  });
+
+  test("a non-overridden tool call between two reads breaks adjacency", () => {
+    const h = freshHarness();
+    h.ctx.sessionManager.branch = [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", id: "a", name: "read" },
+            { type: "toolCall", id: "other", name: "other" },
+            { type: "toolCall", id: "b", name: "read" },
+          ],
+        },
+      },
+    ];
+    h.emit("session_start", { reason: "resume" });
+    const a = h.row("read", "a");
+    const b = h.row("read", "b");
+    a.setArgs({ path: "/tmp/a" });
+    b.setArgs({ path: "/tmp/b" });
+    expect(textOf(a.lastCallComponent)).not.toContain("×2");
+    expect(b.lastCallComponent instanceof Container).toBe(false);
   });
 
   test("a provider delivering the whole message at once still splits interleaved calls", () => {

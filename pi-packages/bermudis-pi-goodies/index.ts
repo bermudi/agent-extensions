@@ -55,8 +55,11 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   if (isEnabled("prefer-tools")) preferTools(pi);
   if (isEnabled("keep-model")) keepModelOnNew(pi);
   if (isEnabled("model-thinking")) modelThinking(pi);
+  // clean-tui reads its config here, at load: when disabled, nothing is
+  // registered and pi's own tools stay fully native; the flag is cleared so
+  // pi-codex's integration renders natively too (a toggle needs /reload).
   if (isEnabled("clean-tui")) cleanTui(pi);
-  else setCleanTuiActive(false); // clear the pi-codex integration flag on /reload
+  else setCleanTuiActive(false);
   if (isEnabled("review")) review(pi);
   if (isEnabled("provider-balance")) providerBalance(pi);
   if (isEnabled("kilo")) kilo(pi);

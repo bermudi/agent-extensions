@@ -285,6 +285,9 @@ export default function (pi: ExtensionAPI): void {
     syncVisionToolVisibility(event.model);
   });
 
+  // Burst-style rows while clean-tui is active — a load-time decision: the
+  // flag is settled before this module registers (index.ts loads clean-tui
+  // first). pi's default rendering when clean-tui starts disabled.
   pi.registerTool({
     name: "vision",
     label: "vision",
@@ -312,16 +315,17 @@ export default function (pi: ExtensionAPI): void {
         }),
       ),
     }),
-    // Burst-style rows while clean-tui is active (flag is settled before this
-    // loads — index.ts registers clean-tui first); pi's default rendering
-    // otherwise. Read at registration time, like the pi-codex contract.
     ...(isCleanTuiActive() ? createBurstRenderer(visionBurstSpec) : {}),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       // Delegate image loading to pi's own read tool: photon resize,
       // magic-byte mime detection, size caps — battle-tested behavior.
       const reader = createReadToolDefinition(ctx.cwd);
       return runVisionTool(
-        { path: params.path, prompt: params.prompt, followUp: params.followUp },
+        {
+          path: params.path,
+          prompt: params.prompt,
+          followUp: params.followUp,
+        },
         {
           cwd: ctx.cwd,
           cfg: loadConfig(),
@@ -356,7 +360,10 @@ export default function (pi: ExtensionAPI): void {
             ) as Promise<never>,
         },
         (text) =>
-          onUpdate?.({ content: [{ type: "text", text }], details: undefined }),
+          onUpdate?.({
+            content: [{ type: "text", text }],
+            details: undefined,
+          }),
       );
     },
   });
