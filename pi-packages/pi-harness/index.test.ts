@@ -79,6 +79,25 @@ describe("ToolRow fidelity to ToolExecutionComponent", () => {
     expect(contents[0]).toBe(contents[1]); // stable content
   });
 
+  test("setResult(result, isPartial) reaches renderResult options like pi", () => {
+    const h = new PiHarness();
+    const partials: boolean[] = [];
+    h.api.registerTool({
+      name: "t",
+      renderCall: () => null,
+      renderResult: (_result, options) => {
+        partials.push((options as { isPartial: boolean }).isPartial);
+        return null;
+      },
+    });
+    const row = h.row("t", "x1");
+    row.setArgs({});
+    row.setResult({ content: [] }, true); // streaming tick
+    row.setExpanded(true); // repaint mid-stream stays partial
+    row.setResult({ content: ["out"] }); // final
+    expect(partials).toEqual([true, true, false]);
+  });
+
   test("ctx.invalidate synchronously re-renders the row", () => {
     const h = new PiHarness();
     let calls = 0;

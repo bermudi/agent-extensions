@@ -17,6 +17,7 @@ import cleanTui, {
   __clearSummaryCache,
   __resetThinkingSummariesForTesting,
   __historyStatsForTesting,
+  __setHistoryCapsForTesting,
   __setSummaryBackoffForTesting,
   __setSummaryBackendForTesting,
   __setSummaryEnabled,
@@ -3751,6 +3752,25 @@ describe("humanizeProviderError — raw bodies to readable lines", () => {
 });
 
 describe("clean-tui rendering edge cases", () => {
+  test("string content on a user message splits bursts instead of throwing", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const a = h.row("read", "str-a");
+    const b = h.row("read", "str-b");
+    a.setArgs({ path: "/tmp/a" });
+    b.setArgs({ path: "/tmp/b" });
+    expect(textOf(a.lastCallComponent)).toContain("read ×2");
+    // pi's extension API allows content: string on user messages; the
+    // boundary scan must treat it as text, not call Array methods on it.
+    expect(() =>
+      h.emit("message_start", { message: { role: "user", content: "stop" } }),
+    ).not.toThrow();
+    const c = h.row("read", "str-c");
+    c.setArgs({ path: "/tmp/c" });
+    expect(textOf(c.lastCallComponent)).not.toContain("×2");
+  });
+
   test("expanded write hides its success output", () => {
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });
@@ -3846,6 +3866,44 @@ describe("clean-tui result wake-ups", () => {
     expect(boxBg(row)).toBe("<toolPendingBg>probe");
     row.setResult({ content: [{ type: "text", text: "done" }] });
     expect(boxBg(row)).toBe("<toolSuccessBg>probe");
+  });
+
+  test("streaming (partial) results keep the row pending until the final", () => {
+    const h = new PiHarness({ theme: taggingTheme });
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const row = h.row("bash", "stream");
+    row.setArgs({ command: "sleep 30" });
+    // bash fires onUpdate the instant execution starts and again per output
+    // tick; pi delivers those as isPartial results. The row must keep the
+    // pending background (native pi holds toolPendingBg while isPartial)
+    // instead of flipping green on the first tick.
+    row.setResult({ content: [] }, true);
+    expect(boxBg(row)).toBe("<toolPendingBg>probe");
+    row.setResult({ content: [{ type: "text", text: "partial out" }] }, true);
+    expect(boxBg(row)).toBe("<toolPendingBg>probe");
+    row.setResult({ content: [{ type: "text", text: "done" }] });
+    expect(boxBg(row)).toBe("<toolSuccessBg>probe");
+  });
+
+  test("a grouped burst stays pending while any member streams", () => {
+    const h = new PiHarness({ theme: taggingTheme });
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const a = h.row("bash", "ga");
+    const b = h.row("bash", "gb");
+    a.setArgs({ command: "echo one" });
+    b.setArgs({ command: "echo two" });
+    a.setResult({ content: [{ type: "text", text: "one" }] }, true);
+    b.setResult({ content: [{ type: "text", text: "two" }] }, true);
+    expect(boxBg(a)).toBe("<toolPendingBg>probe");
+    // One member finished, the other still streaming: still pending.
+    a.setResult({ content: [{ type: "text", text: "one" }] });
+    expect(boxBg(a)).toBe("<toolPendingBg>probe");
+    b.setResult({ content: [{ type: "text", text: "two" }] });
+    expect(boxBg(a)).toBe("<toolSuccessBg>probe");
   });
 
   test("a solo failure turns red when its result lands", () => {
@@ -4005,6 +4063,32 @@ describe("clean-tui history caps", () => {
     a.setResult({ content: [{ type: "text", text: "hit" }] });
     b.setResult({ content: [{ type: "text", text: "hit" }] });
     expect(textOf(a.lastCallComponent)).toContain("grep ×2");
+  });
+
+  test("a re-rendered pruned row never glues into the live burst", () => {
+    __setHistoryCapsForTesting({ max: 4, keep: 2 });
+    try {
+      const h = freshHarness();
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      // Five adjacent same-tool rows cross the cap: the three oldest ids
+      // are pruned (burst context gone) but stay on screen as painted rows.
+      for (const id of ["p1", "p2", "p3", "p4", "p5"]) {
+        h.row("read", id).setArgs({ path: `/tmp/${id}` });
+      }
+      expect(__historyStatsForTesting().prunedIds).toBe(3);
+      // A provider that never emits toolCall blocks in message content
+      // re-registers a pruned row with no ordering info — it must render
+      // solo (NaN segment), not join the current live segment.
+      const zombie = h.row("read", "p1");
+      zombie.setArgs({ path: "/tmp/p1" });
+      const fresh = h.row("read", "p6");
+      fresh.setArgs({ path: "/tmp/p6" });
+      expect(textOf(zombie.lastCallComponent)).not.toContain("×2");
+      expect(textOf(zombie.lastCallComponent)).toContain("/tmp/p1");
+    } finally {
+      __setHistoryCapsForTesting();
+    }
   });
 
   test("summary cache is capped", async () => {

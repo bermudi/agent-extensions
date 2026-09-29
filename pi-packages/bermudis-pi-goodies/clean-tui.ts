@@ -172,6 +172,9 @@ export type Entry = {
   summaryRequestedAt?: number;
   /** When the first genuine tool result landed (stamped in recordResult). */
   resultAt?: number;
+  /** True while only streaming (partial) results have arrived — bash ticks.
+   *  The row is still pending; resultAt/isError wait for the final result. */
+  isPartial?: boolean;
 };
 
 let liveSeg = 0;
@@ -183,6 +186,13 @@ let liveSeg = 0;
  * reasoning items interleaved between tool calls of one message.
  */
 let curAssistantBoundaries = new Set<object>();
+// NOTE: the dedupe below is by object identity, which is load-bearing for
+// pi-ai's in-place accumulator (block references are stable across a
+// message's updates). A provider handing a fresh message object per update
+// re-counts its boundaries at every registration and degrades to all-solo
+// rows — the safe direction (never a wrong merge). Keying by text would be
+// worse: distinct empty thinking blocks all have text "", and collapsing
+// them would silently merge across boundaries.
 /**
  * The assistant message currently streaming. Boundaries are counted lazily —
  * only up to a call's position as it registers (scanBoundariesBeforeTool) and
@@ -260,6 +270,13 @@ const entries: Entry[] = [];
 let entriesBase = 0;
 const entryById = new Map<string, Entry>();
 const invalidateById = new Map<string, () => void>();
+// Ids dropped by pruning. A pruned row can re-render (expanding a burst far
+// up the transcript re-creates its component), and a re-registered id must
+// NOT join the live burst: its burst context is gone, so it renders solo
+// (seg NaN). Bounded; the oldest ids drop off — by then their rows are long
+// off-screen.
+const prunedToolCallIds = new Set<string>();
+const PRUNED_ID_CAP = 2000;
 
 // History cap. `entries` is walked linearly by stampSummaryRequested on
 // every bash renderCall and by invalidateRowsForCommand on every summary
@@ -270,16 +287,31 @@ const invalidateById = new Map<string, () => void>();
 // pruned row (expanding a burst far up the transcript) re-registers it as a
 // solo row: burst context beyond the cap is gone. Cheap by design: entries
 // are small metadata; the result payloads belong to pi's components.
-const MAX_HISTORY_ENTRIES = 600;
-const HISTORY_KEEP_ENTRIES = 400;
+let MAX_HISTORY_ENTRIES = 600;
+let HISTORY_KEEP_ENTRIES = 400;
+
+/** Shrink the history cap so pruning is exercisable in tests. */
+export function __setHistoryCapsForTesting(caps?: {
+  max?: number;
+  keep?: number;
+}): void {
+  MAX_HISTORY_ENTRIES = caps?.max ?? 600;
+  HISTORY_KEEP_ENTRIES = caps?.keep ?? 400;
+}
 
 /** Drop the oldest history once the cap is exceeded (see MAX_HISTORY_ENTRIES). */
 function pruneHistoryIfNeeded(): void {
   if (entries.length <= MAX_HISTORY_ENTRIES) return;
   const drop = entries.length - HISTORY_KEEP_ENTRIES;
   for (let i = 0; i < drop; i++) {
-    entryById.delete(entries[i].toolCallId);
-    invalidateById.delete(entries[i].toolCallId);
+    const id = entries[i].toolCallId;
+    entryById.delete(id);
+    invalidateById.delete(id);
+    prunedToolCallIds.add(id);
+    if (prunedToolCallIds.size > PRUNED_ID_CAP) {
+      const oldest = prunedToolCallIds.values().next();
+      if (!oldest.done) prunedToolCallIds.delete(oldest.value);
+    }
   }
   entries.splice(0, drop);
   entriesBase += drop;
@@ -294,7 +326,12 @@ function upsertEntry(
   let e = entryById.get(toolCallId);
   if (!e) {
     let seg: number;
-    if (replaying) {
+    // Pruned ids re-register as solo rows: their burst context is gone, and
+    // stamping the current segment would let a zombie row glue itself into
+    // the live burst when its provider never puts toolCall blocks in message
+    // content (the previousToolById path can't catch those).
+    if (prunedToolCallIds.has(toolCallId)) seg = NaN;
+    else if (replaying) {
       seg = replaySegByToolCallId.get(toolCallId) ?? NaN;
     } else {
       // Count the boundaries above this call before reading the counter, so a
@@ -331,7 +368,12 @@ function upsertEntry(
  * lives in isBurstBoundaryBlock.
  */
 function hasVisibleText(message: any): boolean {
-  return (message?.content ?? []).some(
+  const content = message?.content;
+  // pi's extension API allows content: string (user messages); Array
+  // methods on a string would throw (contained by pi's runner, but a
+  // crashing handler still skips the boundary bump this computes).
+  if (typeof content === "string") return content.trim().length > 0;
+  return (Array.isArray(content) ? content : []).some(
     (b: any) =>
       b?.type === "text" &&
       typeof b.text === "string" &&
@@ -502,12 +544,32 @@ function revalidateBurstsAround(changedId: string) {
  * treating plain re-renders as mutations caused infinite render churn
  * (invalidate -> updateDisplay -> renderResult -> invalidate -> ...).
  */
-function recordResult(entry: Entry | undefined, result: any, ctx: any) {
-  if (!entry || entry.contentRef === result?.content) return;
+function recordResult(
+  entry: Entry | undefined,
+  result: any,
+  ctx: any,
+  isPartial = false,
+) {
+  if (!entry) return;
+  // A final result may share the content array the last partial delivered —
+  // it must still be processed to clear isPartial and stamp completion.
+  if (
+    entry.contentRef === result?.content &&
+    !(isPartial === false && entry.isPartial)
+  )
+    return;
   entry.contentRef = result?.content;
   entry.result = result;
-  entry.resultAt = Date.now();
-  entry.isError = !!ctx.isError || !!result.isError;
+  // Partial (streaming) results — bash's onUpdate ticks — are not
+  // completion: pi keeps its pending background while isPartial, so pending
+  // must survive, and resultAt/isError only land with the final result
+  // (stamping resultAt on the first tick would also loosen the summary-swap
+  // freshness window to start at execution start).
+  entry.isPartial = isPartial;
+  if (!isPartial) {
+    entry.resultAt = Date.now();
+    entry.isError = !!ctx.isError || !!result.isError;
+  }
   entry.hasImage = hasImageContent(result);
   revalidateBurstsAround(entry.toolCallId);
 }
@@ -517,11 +579,13 @@ export function __historyStatsForTesting(): {
   entries: number;
   entryById: number;
   invalidateById: number;
+  prunedIds: number;
 } {
   return {
     entries: entries.length,
     entryById: entryById.size,
     invalidateById: invalidateById.size,
+    prunedIds: prunedToolCallIds.size,
   };
 }
 
@@ -588,7 +652,7 @@ export type BurstToolSpec = {
 export function createBurstRenderer(spec: BurstToolSpec): {
   renderShell: "self";
   renderCall: (args: any, theme: any, ctx: any) => any;
-  renderResult: (result: any, _opts: any, _theme: any, ctx: any) => Container;
+  renderResult: (result: any, opts: any, _theme: any, ctx: any) => Container;
 } {
   return {
     renderShell: "self",
@@ -611,9 +675,11 @@ export function createBurstRenderer(spec: BurstToolSpec): {
       // (b80a14d "follow the leader" painted the whole block red whenever the
       // first call itself failed; this rule — formerly only on bash — now
       // applies to every burst tool.)
+      // A streaming (partial) result keeps its row pending — same semantics
+      // as pi's own shell, which holds toolPendingBg while isPartial.
       const pending = isGrouped
-        ? burst.entries.some((e) => !e.result)
-        : !entry.result;
+        ? burst.entries.some((e) => !e.result || e.isPartial)
+        : !entry.result || !!entry.isPartial;
       const isError = isGrouped ? false : !!entry.isError;
 
       if (isGrouped && !isLeader) {
@@ -645,8 +711,13 @@ export function createBurstRenderer(spec: BurstToolSpec): {
       }
       return makeBox(theme, pending, isError, line);
     },
-    renderResult(result: any, _opts: any, _theme: any, ctx: any) {
-      recordResult(entryById.get(ctx.toolCallId), result, ctx);
+    renderResult(result: any, opts: any, _theme: any, ctx: any) {
+      recordResult(
+        entryById.get(ctx.toolCallId),
+        result,
+        ctx,
+        opts?.isPartial === true,
+      );
       // All visual work is done in renderCall (unified box); keep the result
       // slot empty. Images are rendered by Pi's ToolExecutionComponent image
       // layer even when we return empty here.
@@ -878,6 +949,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
     entriesBase = 0;
     entryById.clear();
     invalidateById.clear();
+    prunedToolCallIds.clear();
     // Capture the UI handle for the pause widget (guarded: harness stubs and
     // limited contexts lack setWidget), and drop any stale pause indicator
     // left over from the previous session. hasUI comes from the context —

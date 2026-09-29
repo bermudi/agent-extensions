@@ -141,6 +141,7 @@ export class ToolRow {
   private argsComplete = true;
   private resultContent?: unknown[];
   private resultIsError = false;
+  private resultIsPartial = false;
   private hasResult = false;
   private expandedValue = false;
   private readonly theme: Theme;
@@ -182,9 +183,18 @@ export class ToolRow {
   }
 
   /** Simulate execution finishing (pi calls updateResult -> updateDisplay). */
-  setResult(result: { content: unknown[]; isError?: boolean }): void {
+  /**
+   * Deliver a result. `isPartial: true` mirrors pi's updateResult(result,
+   * isPartial) streaming path (bash onUpdate ticks): the row keeps its
+   * pending background and renderResult sees isPartial in its options.
+   */
+  setResult(
+    result: { content: unknown[]; isError?: boolean },
+    isPartial = false,
+  ): void {
     this.resultContent = result.content;
     this.resultIsError = result.isError ?? false;
+    this.resultIsPartial = isPartial;
     this.hasResult = true;
     this.update();
   }
@@ -219,7 +229,7 @@ export class ToolRow {
     const wrapper = { content: this.resultContent, details: undefined };
     const options: ToolRenderOptions = {
       expanded: this.expandedValue,
-      isPartial: false,
+      isPartial: this.resultIsPartial,
     };
     try {
       this.lastResultComponent = this.definition.renderResult?.(
