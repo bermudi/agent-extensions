@@ -42,6 +42,11 @@ const KILO_GATEWAY_BASE = `${KILO_API_BASE}/api/gateway`;
 const KILO_OPENROUTER_BASE = `${KILO_API_BASE}/api/openrouter`;
 const KILO_DEVICE_AUTH_ENDPOINT = `${KILO_API_BASE}/api/device-auth/codes`;
 const POLL_INTERVAL_MS = 3000;
+// Transient poll failures (network blip, 5xx, momentary DNS) must not kill a
+// login the user may have just approved in the browser. The poll loop retries
+// them on the normal cadence; only this many failures IN A ROW means the
+// network is genuinely down. Exported so tests assert against the real bound.
+export const MAX_CONSECUTIVE_POLL_ERRORS = 5;
 const MODELS_FETCH_TIMEOUT_MS = 10_000;
 // Match pi's built-in remote catalogs: model pickers should normally consume a
 // fresh local snapshot, not turn every open into a network round trip.
@@ -231,11 +236,34 @@ async function loginKilo(
   callbacks.onProgress?.("Waiting for browser authorization...");
 
   const deadline = Date.now() + expiresIn * 1000;
+  let consecutivePollErrors = 0;
   while (Date.now() < deadline) {
     if (callbacks.signal?.aborted) throw new Error("Login cancelled");
 
-    await abortableSleep(POLL_INTERVAL_MS, callbacks.signal);
-    const result = await pollDeviceAuth(code, callbacks.signal);
+    await abortableSleep(pollIntervalMs, callbacks.signal);
+
+    let result: DeviceAuthPollResponse;
+    try {
+      result = await pollDeviceAuth(code, callbacks.signal);
+    } catch (error) {
+      // The user may have already clicked "authorize": one failed poll (5xx,
+      // dropped connection, request timeout) must not orphan the login. Retry
+      // on the normal cadence until MAX_CONSECUTIVE_POLL_ERRORS consecutive
+      // failures say the network is actually down. An aborted signal still
+      // cancels immediately instead of being retried.
+      if (callbacks.signal?.aborted) throw error;
+      consecutivePollErrors++;
+      reportFailure(
+        "kilo_warning",
+        `[kilo] device-login poll failed (${consecutivePollErrors}/${MAX_CONSECUTIVE_POLL_ERRORS}): ${describeError(error)}`,
+      );
+      callbacks.onProgress?.(
+        `Poll failed; retrying (${consecutivePollErrors}/${MAX_CONSECUTIVE_POLL_ERRORS})...`,
+      );
+      if (consecutivePollErrors >= MAX_CONSECUTIVE_POLL_ERRORS) throw error;
+      continue;
+    }
+    consecutivePollErrors = 0;
 
     if (result.status === "approved") {
       if (!result.token) {
@@ -596,9 +624,19 @@ export function getKiloCatalogStatus(): Readonly<KiloCatalogStatus> {
   return kiloCatalogStatus;
 }
 
+// Real poll cadence lives in POLL_INTERVAL_MS; tests shrink it so login retry
+// loops (which sleep between polls) run instantly.
+let pollIntervalMs = POLL_INTERVAL_MS;
+
+/** Tests only: shrink the poll cadence; restored by resetKiloStateForTesting. */
+export function setKiloPollIntervalForTesting(ms: number): void {
+  pollIntervalMs = ms;
+}
+
 /** Tests only: reset module-level warning/display state between cases. */
 export function resetKiloStateForTesting(): void {
   warnedUnrecognizedPersistenceShape = false;
+  pollIntervalMs = POLL_INTERVAL_MS;
   kiloCatalogStatus.modelCount = KILO_FREE_MODELS.length;
   kiloCatalogStatus.checkedAt = 0;
   kiloCatalogStatus.degraded = false;

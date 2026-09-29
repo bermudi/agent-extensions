@@ -1,9 +1,11 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import type { OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import type {
   ExtensionAPI,
   ProviderConfig,
 } from "@earendil-works/pi-coding-agent";
 import kilo, {
+  MAX_CONSECUTIVE_POLL_ERRORS,
   abortableSleep,
   getKiloCatalogStatus,
   getKiloModelCompat,
@@ -12,6 +14,7 @@ import kilo, {
   modelSupportsReasoning,
   parsePrice,
   resetKiloStateForTesting,
+  setKiloPollIntervalForTesting,
   shouldUseResponsesApi,
   thinkingLevelMapFromVariants,
   type OpenRouterModel,
@@ -66,6 +69,40 @@ function model(
 ): OpenRouterModel {
   return { id, name: id, context_length: 8192, pricing };
 }
+
+// Complete OAuthLoginCallbacks for driving config.oauth.login in tests;
+// progress messages are captured so retry UX can be asserted.
+function loginTestCallbacks(signal?: AbortSignal): {
+  callbacks: OAuthLoginCallbacks;
+  progress: string[];
+} {
+  const progress: string[] = [];
+  return {
+    progress,
+    callbacks: {
+      onAuth: () => {},
+      onDeviceCode: () => {},
+      onPrompt: async () => "",
+      onSelect: async () => undefined,
+      onProgress: (message: string) => progress.push(message),
+      signal,
+    },
+  };
+}
+
+function kiloOauthLogin(): (
+  callbacks: OAuthLoginCallbacks,
+) => Promise<{ refresh: string; access: string; expires: number }> {
+  const login = captureKiloProvider().oauth?.login;
+  if (!login) throw new Error("Kilo oauth login was not registered");
+  return login;
+}
+
+const INITIATE_RESPONSE = JSON.stringify({
+  code: "KIL0-TEST",
+  verificationUrl: "https://kilo.ai/activate",
+  expiresIn: 600,
+});
 
 describe("catalog refresh", () => {
   test("extension registration performs no startup fetch", () => {
@@ -973,5 +1010,203 @@ describe("abortableSleep", () => {
     await expect(abortableSleep(50, ac.signal)).rejects.toThrow(
       "Login cancelled",
     );
+  });
+});
+
+describe("device login poll resilience", () => {
+  // These tests drive the real login loop via config.oauth.login with
+  // globalThis.fetch stubbed (same pattern as the catalog-refresh tests):
+  // POST = initiateDeviceAuth, GET = pollDeviceAuth. setKiloPollIntervalForTesting
+  // shrinks the 3s poll cadence (reset by resetKiloStateForTesting in beforeEach)
+  // so retry loops run instantly.
+
+  interface FakeFetch {
+    fetch: typeof fetch;
+    pollCalls: () => number;
+  }
+
+  function stubPollEachTime(poll: (call: number) => Response): FakeFetch {
+    let pollCount = 0;
+    const fake = (async (_input: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return new Response(INITIATE_RESPONSE, { status: 200 });
+      }
+      pollCount++;
+      return poll(pollCount);
+    }) as unknown as typeof fetch;
+    return { fetch: fake, pollCalls: () => pollCount };
+  }
+
+  function approvedResponse(): Response {
+    return new Response(
+      JSON.stringify({ status: "approved", token: "kilo-test-token" }),
+      { status: 200 },
+    );
+  }
+
+  test("tolerates transient poll errors and completes when approval arrives", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      setKiloPollIntervalForTesting(1);
+      // Two 500s, then a pending, then approval: without the retry the first
+      // blip would orphan a code the user may already have authorized.
+      const stub = stubPollEachTime((call) => {
+        if (call <= 2) return new Response("boom", { status: 500 });
+        if (call === 3) return new Response(null, { status: 202 });
+        return approvedResponse();
+      });
+      globalThis.fetch = stub.fetch;
+
+      const { callbacks, progress } = loginTestCallbacks();
+      const credentials = await kiloOauthLogin()(callbacks);
+
+      expect(credentials.refresh).toBe("kilo-test-token");
+      expect(credentials.access).toBe("kilo-test-token");
+      expect(credentials.expires).toBeGreaterThan(Date.now());
+      expect(stub.pollCalls()).toBe(4);
+      // Retries are surfaced, not silent: one log line and one progress
+      // message per transient failure.
+      const warnings = readLogLines().filter(
+        (e) =>
+          e.type === "kilo_warning" &&
+          String(e.message).includes("device-login poll failed"),
+      );
+      expect(warnings).toHaveLength(2);
+      expect(progress.filter((m) => m.includes("retrying"))).toHaveLength(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("the failure bound is consecutive, not cumulative", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      setKiloPollIntervalForTesting(1);
+      // Four failures, one success (pending) to reset the counter, four more
+      // failures, then approval: 8 total errors but never
+      // MAX_CONSECUTIVE_POLL_ERRORS (5) in a row. Cumulative counting would
+      // abort at overall error #5.
+      const callsBeforeBound = MAX_CONSECUTIVE_POLL_ERRORS - 1;
+      const stub = stubPollEachTime((call) => {
+        if (call <= callsBeforeBound)
+          return new Response("boom", { status: 500 });
+        if (call === callsBeforeBound + 1)
+          return new Response(null, { status: 202 });
+        if (call <= callsBeforeBound * 2 + 1) {
+          return new Response("boom", { status: 500 });
+        }
+        return approvedResponse();
+      });
+      globalThis.fetch = stub.fetch;
+
+      const { callbacks } = loginTestCallbacks();
+      const credentials = await kiloOauthLogin()(callbacks);
+
+      expect(credentials.access).toBe("kilo-test-token");
+      expect(stub.pollCalls()).toBe(callsBeforeBound * 2 + 2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("a persistently failing poll gives up after the consecutive bound", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      setKiloPollIntervalForTesting(1);
+      const stub = stubPollEachTime(
+        () => new Response("boom", { status: 500 }),
+      );
+      globalThis.fetch = stub.fetch;
+
+      const { callbacks } = loginTestCallbacks();
+      await expect(kiloOauthLogin()(callbacks)).rejects.toThrow(
+        "Failed to poll device authorization: 500",
+      );
+      expect(stub.pollCalls()).toBe(MAX_CONSECUTIVE_POLL_ERRORS);
+      // The final failure is logged too (n/n in the message).
+      const warnings = readLogLines().filter(
+        (e) =>
+          e.type === "kilo_warning" &&
+          String(e.message).includes(
+            `(${MAX_CONSECUTIVE_POLL_ERRORS}/${MAX_CONSECUTIVE_POLL_ERRORS})`,
+          ),
+      );
+      expect(warnings).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("definitive verdicts still end the login immediately", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      setKiloPollIntervalForTesting(1);
+      // denied: one transient error first, then a 403 — the denial must win
+      // over the retry logic.
+      const denied = stubPollEachTime((call) =>
+        call === 1
+          ? new Response("boom", { status: 500 })
+          : new Response(null, { status: 403 }),
+      );
+      globalThis.fetch = denied.fetch;
+      const { callbacks: deniedCallbacks } = loginTestCallbacks();
+      await expect(kiloOauthLogin()(deniedCallbacks)).rejects.toThrow(
+        "Authorization denied by user.",
+      );
+      expect(denied.pollCalls()).toBe(2);
+
+      // expired: a 410 ends the login on its own.
+      const expired = stubPollEachTime(
+        () => new Response(null, { status: 410 }),
+      );
+      globalThis.fetch = expired.fetch;
+      const { callbacks: expiredCallbacks } = loginTestCallbacks();
+      await expect(kiloOauthLogin()(expiredCallbacks)).rejects.toThrow(
+        "Authorization code expired. Please try again.",
+      );
+      expect(expired.pollCalls()).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("an aborted signal cancels immediately without being retried", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      setKiloPollIntervalForTesting(1);
+      const controller = new AbortController();
+      let pollCount = 0;
+      globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return new Response(INITIATE_RESPONSE, { status: 200 });
+        }
+        pollCount++;
+        // Mimic real fetch: never resolves, rejects when the signal aborts.
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          const abort = () => reject(new Error("This operation was aborted"));
+          if (signal?.aborted) return abort();
+          signal?.addEventListener("abort", abort, { once: true });
+        });
+      }) as unknown as typeof fetch;
+
+      const { callbacks } = loginTestCallbacks(controller.signal);
+      const pending = kiloOauthLogin()(callbacks);
+      // Let the loop reach the first poll, then cancel the login.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      controller.abort();
+      await expect(pending).rejects.toThrow("This operation was aborted");
+      // Exactly one poll attempt: the abort was not swallowed into a retry.
+      expect(pollCount).toBe(1);
+      expect(
+        readLogLines().filter(
+          (e) =>
+            e.type === "kilo_warning" &&
+            String(e.message).includes("device-login poll failed"),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
