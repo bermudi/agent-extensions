@@ -87,6 +87,70 @@ describe("detectLegacyTool", () => {
     allowed("git commit -m 'line1\ngrep foo\nline3'");
   });
 
+  it("blocks env-var assignment prefixes (FOO=bar rm x)", () => {
+    blocked(
+      "FOO=bar rm x",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "PYTHONDONTWRITEBYTECODE=1 python x.py",
+      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
+    );
+    blocked(
+      "A=1 B=2 rm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      'FOO="quoted value" rm file',
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "FOO='single quoted' rm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "FOO=$BASE rm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "FOO=$(echo hi) rm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "FOO+=bar rm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    // Assignment + leading redirect still runs the command.
+    blocked(
+      "FOO=1 > /dev/null rm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "FOO=1 > $OUT rm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "sudo FOO=bar rm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      "FOO=bar\nrm file",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+  });
+
+  it("allows env assignments without a blocked command", () => {
+    allowed("FOO=bar");
+    allowed("FOO=bar echo hi");
+    // The value is the string "rm", not a command.
+    allowed("FOO=rm");
+    allowed("FOO=rm echo hi");
+    // `rm` here is an argument to echo.
+    allowed("FOO=bar echo rm");
+    allowed("echo FOO=bar");
+    allowed("FOO=bar uv run python script.py");
+  });
+
   it("allows command arguments and redirect targets", () => {
     allowed("echo rm");
     allowed("echo read/grep/find/ls");
@@ -190,10 +254,68 @@ describe("detectLegacyTool", () => {
     );
   });
 
-  it("allows $(rm) inside single quotes within unquoted heredoc bodies", () => {
-    // In an unquoted heredoc, single quotes still quote — $(rm) inside
-    // single quotes does NOT execute.
-    allowed("cat <<EOF\necho '$(rm file)'\nEOF");
+  it("blocks $(rm) inside single quotes within unquoted heredoc bodies", () => {
+    // bash-verified: an unquoted heredoc body is double-quote-like — single
+    // quotes are literal characters there, so this substitution RUNS (a
+    // marker-file probe confirmed execution). The historical "single quotes
+    // still quote" model was a false negative. Real suppression requires a
+    // quoted delimiter (<<'EOF'), which stays allowed below.
+    blocked(
+      "cat <<EOF\necho '$(rm file)'\nEOF",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    blocked(
+      'cat <<EOF\necho "$(rm file)"\nEOF',
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+  });
+
+  // ── Executed substitutions: quotes do not hide commands ─────────
+  // Every expectation below was verified against real bash with a
+  // marker-file probe (the command runs ⇔ the marker appears) — see the
+  // scenarios in each comment.
+
+  it("blocks double-quoted command substitutions and backticks", () => {
+    // bash: echo "$(touch m)" and echo "`touch m`" both create the marker.
+    const RM = "rm is blocked — use `trash` instead (recoverable beats gone)";
+    blocked('echo "$(rm x)"', RM);
+    blocked('echo "`rm x`"', RM);
+    blocked("echo `rm x`", RM);
+    blocked('echo "$(echo "$(rm x)")"', RM);
+    // Backslash escapes: only the escaped dollar is inert; a doubled
+    // backslash or a backslash before an unrelated char still executes.
+    allowed('echo "\\$(rm x)"');
+    blocked('echo "\\\\$(rm x)"', RM);
+    blocked('echo "\\q$(rm x)"', RM);
+  });
+
+  it("blocks substitutions inside arithmetic and parameter expansions", () => {
+    const RM = "rm is blocked — use `trash` instead (recoverable beats gone)";
+    // bash: x=$(( $(touch m) + 1 )) runs touch; $(( 1 + 2 )) does not.
+    blocked("x=$(( $(rm x) + 1 ))", RM);
+    allowed("x=$(( 1 + 2 ))");
+    // bash: ${X:-$(touch m)} runs touch.
+    blocked('echo "${X:-$(rm x)}"', RM);
+    blocked("echo ${X:-$(rm x)}", RM);
+    // bash-verified: quotes in an unquoted expansion's word still quote
+    // (literal), but inside double quotes they are literal characters and
+    // the substitution runs — the scanner must inherit the quoting mode.
+    allowed("echo ${X:-'$(rm x)'}");
+    blocked("echo \"${X:-'$(rm x)'}\"", RM);
+    // bash-verified: $"…" (locale) expands substitutions; $'…' (ANSI-C)
+    // does not.
+    blocked('echo $"$(rm x)"', RM);
+    allowed("echo $'$(rm x)'");
+  });
+
+  it("keeps command position across assignment value expansions", () => {
+    // bash: FOO=$HOME rm x runs rm with FOO set — the expansion in the
+    // assignment value must not end command position.
+    blocked(
+      "FOO=$HOME rm x",
+      "rm is blocked — use `trash` instead (recoverable beats gone)",
+    );
+    allowed("FOO=$HOME echo x");
   });
 });
 
@@ -236,6 +358,7 @@ describe("detectLegacyTool with rg rule (glm-5 models)", () => {
     blocked("rg foo && echo done", reason);
     blocked("\\rg foo", reason);
     blocked("{ rg foo; }", reason);
+    blocked("FOO=bar rg -n foo .", reason);
   });
 
   it("blocks rg inside command substitutions and unquoted heredocs", () => {

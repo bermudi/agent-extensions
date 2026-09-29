@@ -1,6 +1,12 @@
 /**
  * /copy-with-model — Copy last assistant message wrapped in a code block
- * tagged with the model name. Escapes backticks if needed.
+ * tagged with the model that WROTE the message. Escapes backticks if needed.
+ *
+ * The tag comes from the message itself (`responseModel` when the provider
+ * echoed the resolved model, else the requested `model`) — never from the
+ * session's *active* model: ask model A, switch to model B, and the fence
+ * must still credit A. The active model is only a fallback for messages
+ * that carry none.
  *
  * Example output for claude-sonnet-4:
  * ```claude-sonnet-4
@@ -16,8 +22,22 @@ import { describeError, extractTextParts } from "./json-file.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-/** Get text content of the last assistant entry from session entries. */
-function getLastAssistantText(entries: any[]): string | undefined {
+/**
+ * What /copy-with-model should put on the clipboard: the last assistant
+ * message's text plus the fence tag.
+ *
+ * `tag` is the model that produced the message — `responseModel` (the model
+ * that actually ran, when the provider reports it) falling back to the
+ * requested `model` — and only then the session's active model. `tag` is
+ * undefined only when neither the message nor the session carries one.
+ *
+ * Returns undefined when there is no assistant message to copy (a trailing
+ * text-less message keeps the previous behavior: no copy).
+ */
+export function buildCopyPayload(
+  entries: any[],
+  activeModel: { provider: string; id: string } | undefined,
+): { text: string; tag?: string } | undefined {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
     if (entry.type !== "message") continue;
@@ -29,17 +49,15 @@ function getLastAssistantText(entries: any[]): string | undefined {
       (!msg.content || msg.content.length === 0)
     )
       continue;
-    const text = extractTextParts(msg.content).join("\n");
-    return text.trim() || undefined;
+    const text = extractTextParts(msg.content).join("\n").trim();
+    if (!text) return undefined;
+    const tag =
+      (typeof msg.responseModel === "string" && msg.responseModel) ||
+      (typeof msg.model === "string" && msg.model) ||
+      activeModel?.id;
+    return { text, tag: tag || undefined };
   }
   return undefined;
-}
-
-/** Derive a short model tag from the full model id. */
-function modelTag(model: { provider: string; id: string }): string {
-  // e.g. "anthropic/claude-sonnet-4" → "claude-sonnet-4"
-  //      "openai/gpt-4o" → "gpt-4o"
-  return model.id;
 }
 
 /**
@@ -77,26 +95,30 @@ function wrapInCodeBlock(tag: string, text: string): string {
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("copy-with-model", {
     description:
-      "Copy last assistant message to clipboard in a code block tagged with the model name",
+      "Copy last assistant message to clipboard in a code block tagged with the model that wrote it",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
 
-      const entries = ctx.sessionManager.getBranch();
-      const text = getLastAssistantText(entries);
+      const payload = buildCopyPayload(
+        ctx.sessionManager.getBranch(),
+        ctx.model,
+      );
 
-      if (!text) {
+      if (!payload) {
         ctx.ui.notify("No assistant messages to copy", "error");
         return;
       }
 
-      const model = ctx.model;
-      if (!model) {
-        ctx.ui.notify("No model selected", "error");
+      const tag = payload.tag;
+      if (!tag) {
+        ctx.ui.notify(
+          "No model recorded for this message and none selected",
+          "error",
+        );
         return;
       }
 
-      const tag = modelTag(model);
-      const wrapped = wrapInCodeBlock(tag, text);
+      const wrapped = wrapInCodeBlock(tag, payload.text);
 
       try {
         await copyToClipboard(wrapped);

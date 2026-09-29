@@ -2,8 +2,13 @@
  * prefer-tools — Enforce modern CLI tooling by blocking the legacy equivalents.
  *
  * A small, quote/heredoc-aware lexer checks each `bash` command for legacy
- * tools in unquoted command position. Quoted strings, heredoc bodies, command
- * substitutions, arithmetic, and plain arguments are ignored.
+ * tools in unquoted command position. Single-quoted strings, quoted heredoc
+ * bodies, and plain arguments are literal. Everything bash actually executes
+ * is parsed instead: `$(...)` and backtick substitutions — unquoted, inside
+ * double quotes (they do NOT suppress substitution), inside `${...}` and
+ * `$((...))` bodies — plus substitutions in unquoted heredoc bodies.
+ * Env-var assignment prefixes (`FOO=bar rm x`) are recognized and skipped so
+ * the real command that follows them is still checked.
  *
  *   rm                  -> trash
  *   python/pip/pytest/  -> uv
@@ -68,6 +73,21 @@ const COMMAND_PREFIX_KEYWORDS = new Set([
 ]);
 
 const WORD_STOP = " \t\n\r|&;<>()\"'`$";
+
+/**
+ * `NAME=value` (or `NAME+=value`) in command position is an env-var
+ * assignment, never the command itself — bash runs the word *after* it.
+ * Without this check the lexer treated `FOO=bar` as the command, found no
+ * rule match, demoted command position, and `rm`/`python` sailed through as
+ * a mere argument (`FOO=bar rm x`, `PYTHONDONTWRITEBYTECODE=1 python x.py`).
+ * The name must be a portable shell identifier, matching bash's own rule —
+ * `1=2 x` is not an assignment in bash either (it is a command name, so the
+ * real command never runs). readWord stops at `$`/quotes, so `FOO="a b"` and
+ * `FOO=$(rm)` yield `FOO=` and still match.
+ */
+function isAssignmentWord(word: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word);
+}
 
 function matchCommand(
   name: string,
@@ -206,6 +226,109 @@ function skipBalancedBraces(s: string, i: number): number {
   return s.length;
 }
 
+/**
+ * Scan a region of source for command substitutions bash will actually
+ * execute — `$(...)` and backticks — and return the matched rule's reason.
+ *
+ * Double quotes do NOT suppress substitution: `echo "$(rm x)"` runs `rm`
+ * (bash-verified), so mode "double" scans their contents with `'` treated as
+ * a literal character. Mode "plain" skips single-quoted spans (nothing runs
+ * there) and descends into double-quoted ones.
+ *
+ * Only substitution constructs are recognized — a bare word is never taken
+ * for a command, so arithmetic like `$(( rm + 1 ))` (a variable named `rm`)
+ * stays allowed while `$(( $(rm) )` is caught. Callers use it for
+ * double-quoted strings, backtick bodies, and the `${...}` / `$((...))`
+ * bodies that readDollar otherwise skips wholesale.
+ */
+function scanExecutedSubs(
+  s: string,
+  start: number,
+  end: number,
+  rules: readonly Rule[],
+  mode: "plain" | "double",
+): string | undefined {
+  let i = start;
+  while (i < end) {
+    const c = s[i];
+    if (c === "\\") {
+      // `"\$(rm)"` does not execute; `"\\$(rm)"` does — either way the
+      // backslash and the char after it are consumed together.
+      i += 2;
+      continue;
+    }
+    if (mode === "plain") {
+      if (c === "'") {
+        i = readQuote(s, i, "'", false);
+        continue;
+      }
+      if (c === '"') {
+        const stop = readQuote(s, i, '"', true);
+        const innerEnd = s[stop - 1] === '"' ? stop - 1 : stop;
+        const reason = scanExecutedSubs(s, i + 1, innerEnd, rules, "double");
+        if (reason) return reason;
+        i = stop;
+        continue;
+      }
+      const next = s[i + 1];
+      if (c === "$" && (next === "'" || next === '"')) {
+        // ANSI-C / locale strings only quote when unquoted; nothing runs
+        // inside either way.
+        i = readQuote(s, i + 1, next, true);
+        continue;
+      }
+    } else if (c === '"') {
+      // Defensive: callers pass the interior of one quoted string.
+      i++;
+      continue;
+    }
+    if (c === "`") {
+      const stop = readQuote(s, i, "`", true);
+      const innerEnd = s[stop - 1] === "`" ? stop - 1 : stop;
+      const reason = detectLegacyTool(s.slice(i + 1, innerEnd), rules);
+      if (reason) return reason;
+      i = stop;
+      continue;
+    }
+    if (c === "$" && s.startsWith("((", i + 1)) {
+      // Arithmetic: not a substitution itself, but its body can contain one —
+      // `$(( $(rm) + 1 ))` runs `rm`. The body itself is never parsed as a
+      // command (see doc comment above). Regions inherit the quoting context
+      // they appear in (arithmetic cannot legally contain quotes anyway).
+      const stop = skipBalancedParens(s, i, 3);
+      const innerEnd =
+        s[stop - 1] === ")" && s[stop - 2] === ")" ? stop - 2 : stop;
+      const reason = scanExecutedSubs(s, i + 3, innerEnd, rules, mode);
+      if (reason) return reason;
+      i = stop;
+      continue;
+    }
+    if (c === "$" && s.startsWith("$(", i)) {
+      const stop = skipBalancedParens(s, i, 2);
+      const innerEnd = s[stop - 1] === ")" ? stop - 1 : stop;
+      const reason = detectLegacyTool(s.slice(i + 2, innerEnd), rules);
+      if (reason) return reason;
+      i = stop;
+      continue;
+    }
+    if (c === "$" && s.startsWith("${", i)) {
+      // Parameter expansion runs substitutions inside: `${X:-$(rm)}`. The
+      // enclosing mode carries over — bash-verified: quotes in an unquoted
+      // expansion's word still quote (`${X:-'$(rm)'}` is literal), but inside
+      // a double-quoted string those quotes are literal characters and the
+      // substitution runs (`"${X:-'$(rm)'}"` executes).
+      const stop = skipBalancedBraces(s, i);
+      const innerEnd = s[stop - 1] === "}" ? stop - 1 : stop;
+      const reason = scanExecutedSubs(s, i + 2, innerEnd, rules, mode);
+      if (reason) return reason;
+      i = stop;
+      continue;
+    }
+    i++;
+  }
+  return undefined;
+}
+
 function readDollar(
   s: string,
   i: number,
@@ -217,7 +340,14 @@ function readDollar(
     return { next: readQuote(s, i + 1, "'", true) };
   }
   if (s.startsWith("((", i + 1)) {
-    return { next: skipBalancedParens(s, i, 3) };
+    // Arithmetic body: skip it, but scan for substitutions that execute
+    // inside it — `$(( $(rm) + 1 ))` runs `rm`.
+    const end = skipBalancedParens(s, i, 3);
+    const innerEnd = s[end - 1] === ")" && s[end - 2] === ")" ? end - 2 : end;
+    return {
+      next: end,
+      reason: scanExecutedSubs(s, i + 3, innerEnd, rules, "plain"),
+    };
   }
   if (s.startsWith("(", i + 1)) {
     const end = skipBalancedParens(s, i, 2);
@@ -227,7 +357,13 @@ function readDollar(
     return { next: end, reason };
   }
   if (s.startsWith("{", i + 1)) {
-    return { next: skipBalancedBraces(s, i) };
+    // Parameter expansion body: `${X:-$(rm)}` executes `rm`.
+    const end = skipBalancedBraces(s, i);
+    const innerEnd = s[end - 1] === "}" ? end - 1 : end;
+    return {
+      next: end,
+      reason: scanExecutedSubs(s, i + 2, innerEnd, rules, "plain"),
+    };
   }
   if (i + 1 < s.length && /[0-9?@*#\-!$]/.test(s[i + 1])) {
     return { next: i + 2 };
@@ -296,37 +432,20 @@ function readHeredocDelimiter(
 }
 
 /**
- * Scan a single heredoc-body line for command substitutions (`$(...)` and
- * backticks) outside of quotes. In an unquoted heredoc these execute, so a
- * `$(rm)` inside the body is a real bypass. Returns the matched rule's
- * reason if a blocked tool is found, undefined otherwise.
+ * Scan a single heredoc-body line for command substitutions bash will
+ * execute. An unquoted heredoc body is double-quote-like: it expands
+ * `$(...)` and backticks, and both quote characters are literal there —
+ * bash-verified, `"$(rm)"` and `'$(rm)'` in the body both run. Only a
+ * backslash suppresses expansion (`\$(rm)` is literal). Returns the matched
+ * rule's reason if a blocked tool is found, undefined otherwise.
  */
 function scanHeredocLineForCommandSubs(
   line: string,
   rules: readonly Rule[],
 ): string | undefined {
   let i = 0;
-  let quote: '"' | "'" | null = null;
   while (i < line.length) {
     const c = line[i];
-    if (quote) {
-      if (c === "\\" && quote === '"' && i + 1 < line.length) {
-        i += 2;
-        continue;
-      }
-      if (c === quote) {
-        quote = null;
-        i++;
-        continue;
-      }
-      i++;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      quote = c;
-      i++;
-      continue;
-    }
     if (c === "\\" && i + 1 < line.length) {
       i += 2;
       continue;
@@ -410,6 +529,11 @@ export function detectLegacyTool(
   const rules = extraRules.length > 0 ? [...RULES, ...extraRules] : RULES;
   let i = 0;
   let commandPos = true;
+  // Set once an env-var assignment word is seen in the current simple
+  // command; cleared wherever a new command starts (every `commandPos = true`
+  // site). While it is set, quotes/expansions/redirect targets belonging to
+  // the assignment must not demote command position.
+  let assignmentPrefix = false;
   let sudoNext = false;
   let skipNextWord = false;
   let redirectTarget = false;
@@ -434,6 +558,7 @@ export function detectLegacyTool(
       i = result.next;
       heredoc = null;
       commandPos = true;
+      assignmentPrefix = false;
       redirectTarget = false;
       sudoNext = false;
       skipNextWord = false;
@@ -453,6 +578,7 @@ export function detectLegacyTool(
       } else {
         commandPos = true;
       }
+      assignmentPrefix = false;
       redirectTarget = false;
       sudoNext = false;
       skipNextWord = false;
@@ -466,6 +592,7 @@ export function detectLegacyTool(
       if (heredoc?.pending) heredoc.pending = false;
       i = nl + 1;
       commandPos = true;
+      assignmentPrefix = false;
       redirectTarget = false;
       sudoNext = false;
       skipNextWord = false;
@@ -477,6 +604,7 @@ export function detectLegacyTool(
       i = op.next;
       if (op.type === "separator") {
         commandPos = true;
+        assignmentPrefix = false;
         redirectTarget = false;
         sudoNext = false;
         skipNextWord = false;
@@ -509,6 +637,7 @@ export function detectLegacyTool(
     if (c === "{" && (i + 1 >= command.length || /\s/.test(command[i + 1]))) {
       i++;
       commandPos = true;
+      assignmentPrefix = false;
       redirectTarget = false;
       sudoNext = false;
       skipNextWord = false;
@@ -519,6 +648,7 @@ export function detectLegacyTool(
     if (c === "}" && (i === 0 || /\s|[;&|()]/.test(command[i - 1]))) {
       i++;
       commandPos = true;
+      assignmentPrefix = false;
       redirectTarget = false;
       sudoNext = false;
       skipNextWord = false;
@@ -527,10 +657,31 @@ export function detectLegacyTool(
 
     if (c === "'" || c === '"' || c === "`") {
       const quote = c;
-      i = readQuote(command, i, quote, quote !== "'");
+      const end = readQuote(command, i, quote, quote !== "'");
+      // Double quotes and backticks execute their contents (single quotes
+      // don't): `echo "$(rm x)"` and `echo \`rm x\`` must be caught like
+      // their unquoted twin.
+      if (quote === '"') {
+        const innerEnd = command[end - 1] === '"' ? end - 1 : end;
+        const reason = scanExecutedSubs(
+          command,
+          i + 1,
+          innerEnd,
+          rules,
+          "double",
+        );
+        if (reason) return reason;
+      } else if (quote === "`") {
+        const innerEnd = command[end - 1] === "`" ? end - 1 : end;
+        const reason = detectLegacyTool(command.slice(i + 1, innerEnd), rules);
+        if (reason) return reason;
+      }
+      i = end;
       if (redirectTarget) redirectTarget = false;
       if (sudoNext) sudoNext = false;
-      if (commandPos) commandPos = false;
+      // Part of an assignment's value (`FOO="a b" rm x`) — not a command
+      // word, so command position survives the quote.
+      if (commandPos && !assignmentPrefix) commandPos = false;
       continue;
     }
 
@@ -541,7 +692,9 @@ export function detectLegacyTool(
         i = d.next;
         if (redirectTarget) redirectTarget = false;
         if (sudoNext) sudoNext = false;
-        if (commandPos) commandPos = false;
+        // Same as quotes: `$VAR` / `$(...)` here expands an assignment value
+        // (`FOO=$BASE rm x`), so it must not end command position either.
+        if (commandPos && !assignmentPrefix) commandPos = false;
       } else {
         i++;
       }
@@ -557,13 +710,22 @@ export function detectLegacyTool(
 
     if (redirectTarget) {
       redirectTarget = false;
-      commandPos = false;
+      // A redirect target is never a command: `FOO=1 > /dev/null rm x` still
+      // runs `rm`, so don't let the target end command position mid-assignment.
+      if (!assignmentPrefix) commandPos = false;
       continue;
     }
 
     if (commandPos) {
       if (word === "sudo") {
         sudoNext = true;
+        continue;
+      }
+      // Env-var assignment prefix: skip it and stay in command position so
+      // the word after it (`rm`, `python`, …) is the one checked. Under
+      // sudo it likewise keeps sudoNext armed (`sudo FOO=bar rm x`).
+      if (isAssignmentWord(word) && !skipNextWord) {
+        assignmentPrefix = true;
         continue;
       }
       if (sudoNext) {

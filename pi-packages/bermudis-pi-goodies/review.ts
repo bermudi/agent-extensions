@@ -1608,8 +1608,14 @@ export default function reviewExtension(pi: ExtensionAPI) {
     const modeHint = useFreshSession ? " (fresh session)" : "";
     ctx.ui.notify(`Starting review: ${hint}${modeHint}`, "info");
 
-    // Send as a user message that triggers a turn
-    pi.sendUserMessage(fullPrompt);
+    // Send as a user message that triggers a turn. deliverAs matters when
+    // pi is mid-stream: without it prompt() throws ("Agent is already
+    // processing. Specify streamingBehavior…") and the runtime swallows the
+    // rejection into a generic send_user_message error — the user sees
+    // "Starting review…" and nothing happens. followUp queues the review for
+    // after the current turn; when idle, deliverAs is ignored, so a normal
+    // start is unchanged. Same contract as the fix-findings send below.
+    pi.sendUserMessage(fullPrompt, { deliverAs: "followUp" });
     return true;
   }
 
