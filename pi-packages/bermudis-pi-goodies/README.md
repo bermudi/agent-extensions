@@ -170,13 +170,23 @@ which reads as a full-screen flash:
    (`firstChanged < prevViewportTop` — width-independent; on a long
    transcript this is any row more than a screenful above the input box).
 
-clean-tui therefore follows two rules in its render paths:
+clean-tui therefore follows three rules in its render paths:
 
 - **Grow-only swaps:** the raw command text a summary may later replace is
-  capped at 99 characters plus an ellipsis (`BASH_BULLET_WIDTH`); summaries
+  capped to a total line budget — head, bullet prefix, and the `(+N lines)`
+  hint together — that fits one terminal row at the current width
+  (`bashLineCap()`; when there is no TTY it falls back to the historical
+  `BASH_BULLET_WIDTH` head plus prefix, and never grows past it). Summaries
   render uncapped. A landing summary can add a wrapped line — a cheap tail
-  update — but never collapses one (rule 1) wherever the raw line fits on a
-  single terminal row.
+  update — but never collapses one (rule 1), on any terminal width.
+- **Viewport-fit bursts:** a collapsed grouped burst renders at most the
+  most recent ~15 bullets (smaller in short panes; `groupedBulletCap()`),
+  with a muted `… +N earlier` under the `×N` title. The title sits at the
+  TOP of the shared box and changes on every new call; an uncapped box
+  eventually outgrows the viewport, putting the title above it — and then
+  every new call is a rule-2 violation, a full-screen flash per call. The
+  cap keeps the title inside the viewport so burst updates stay
+  differential. Expanded views are opt-in and uncapped.
 - **Tail-only refresh:** when a summary lands, only rows that are still
   executing, or that finished while their summary was in flight (bounded by
   a ~10s freshness window), are re-rendered — at landing such rows sit at

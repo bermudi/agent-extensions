@@ -645,6 +645,24 @@ export type BurstToolSpec = {
   onUpsert?: (entry: Entry, args: any, ctx: any) => void;
 };
 
+/** Max bullets the collapsed grouped header renders. The ×N title sits at
+ *  the TOP of the shared box and changes on every new call; once the box
+ *  outgrows the viewport, that line is above pi-tui's viewport top and every
+ *  new call is answered with a full clear-screen + scrollback wipe
+ *  (fullRender on firstChanged < viewportTop — tui-main-screen.js). Keeping
+ *  the box shorter than the terminal keeps the title in view, so every burst
+ *  update stays a differential render. Height-aware because the failure
+ *  threshold is the terminal height, not the burst size: short herdr panes
+ *  must cap smaller. The 10-row slack covers the editor + status footer that
+ *  share the screen; 15 is the comfortable default when there is no TTY.
+ *  Expanded views are opt-in detail and stay uncapped. */
+const GROUPED_BULLET_CAP_MAX = 15;
+function groupedBulletCap(): number {
+  const rows = process.stdout.rows;
+  if (typeof rows !== "number" || rows <= 0) return GROUPED_BULLET_CAP_MAX;
+  return Math.max(3, Math.min(GROUPED_BULLET_CAP_MAX, rows - 10));
+}
+
 /** The shared burst render hooks (renderShell + renderCall + renderResult),
  *  split out of registerBurstTool so extension-owned tools in this package
  *  (vision) can attach the identical skeleton to their own registration —
@@ -692,7 +710,19 @@ export function createBurstRenderer(spec: BurstToolSpec): {
 
       if (isGrouped && isLeader) {
         let header = `${theme.fg("toolTitle", theme.bold(spec.name))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
-        header += `\n${burst.entries.map((e) => spec.bullet(e, theme)).join("\n")}`;
+        let bullets = burst.entries.map((e) => spec.bullet(e, theme));
+        if (!ctx.expanded && bullets.length > groupedBulletCap()) {
+          // Collapse to the most recent bullets, newest at the bottom where
+          // the eye already is; the hidden count sits under the title (see
+          // groupedBulletCap for why this cap is load-bearing).
+          const cap = groupedBulletCap();
+          const hidden = bullets.length - cap;
+          bullets = [
+            theme.fg("muted", `… +${hidden} earlier`),
+            ...bullets.slice(-cap),
+          ];
+        }
+        header += `\n${bullets.join("\n")}`;
         if (ctx.expanded) {
           const details = spec.groupedDetails(burst.entries, theme);
           if (details) header += details;
@@ -756,25 +786,51 @@ function formatReadBullet(entry: Entry, theme: any): string {
 }
 
 /**
- * Command display: first line only, hard-capped, plus a muted "(+N lines)"
- * hint for heredocs/multi-line commands. Full command stays available via
- * expand — a 30-line heredoc must not cost 30 rows of transcript.
+ * Command display: first line only, capped to fit one terminal row, plus a
+ * muted "(+N lines)" hint for heredocs/multi-line commands. Full command
+ * stays available via expand — a 30-line heredoc must not cost 30 rows of
+ * transcript. `cap` is the TOTAL budget for the line, suffix included: the
+ * head is shortened far enough to reserve the hint's own width.
  */
 function formatBashCommand(cmd: string, theme: any, cap: number): string {
   const nl = cmd.indexOf("\n");
   let head = nl === -1 ? cmd : cmd.slice(0, nl);
-  if (head.length > cap) head = head.slice(0, cap - 1) + "…";
-  let out = theme.fg("accent", head);
+  let suffix = "";
   if (nl !== -1) {
     const extra = cmd.split("\n").length - 1;
-    out += theme.fg("muted", ` (+${extra} line${extra === 1 ? "" : "s"})`);
+    suffix = ` (+${extra} line${extra === 1 ? "" : "s"})`;
   }
+  const budget = Math.max(10, cap - suffix.length);
+  if (head.length > budget) head = head.slice(0, budget - 1) + "…";
+  let out = theme.fg("accent", head);
+  if (suffix) out += theme.fg("muted", suffix);
   return out;
 }
 
-// Display width a bullet's command text may occupy before ellipsizing:
-// 99 characters plus the ellipsis itself.
+// Display width a collapsed bash line may occupy before ellipsizing, in
+// UTF-16 units (~ columns for CLI text).
 const BASH_BULLET_WIDTH = 100;
+// Visible width of the grouped bullet prefix: two-space indent + "• " .
+const BULLET_PREFIX_WIDTH = 4;
+// Chrome around the line's text: the bullet prefix plus the Box's 1-column
+// side padding. Solo headers have no prefix, so capping them with the same
+// number just leaves margin.
+const BASH_LINE_CHROME = BULLET_PREFIX_WIDTH + 2;
+
+/** Total visible budget for one collapsed bash line — prefix, head and the
+ *  (+N lines) suffix together — at the CURRENT terminal width. This is the
+ *  flicker guard's teeth: the line must wrap to exactly one row, so a landing
+ *  summary can never occupy fewer rows than the raw text it replaces (pi-tui
+ *  answers a shrink with clearOnShrink — a full clear-screen + scrollback
+ *  wipe). Without a TTY (tests, piped output) the fallback is the historical
+ *  geometry — the bullet prefix plus a 100-unit head — and never grows past
+ *  it, so known-width terminals only ever truncate harder. */
+function bashLineCap(): number {
+  const legacy = BULLET_PREFIX_WIDTH + BASH_BULLET_WIDTH;
+  const cols = process.stdout.columns;
+  if (typeof cols !== "number" || cols <= 0) return legacy;
+  return Math.max(20, Math.min(legacy, cols - BASH_LINE_CHROME));
+}
 
 function formatBashHeader(args: any, theme: any): string {
   const cmd = args.command || "...";
@@ -789,9 +845,10 @@ function formatBashHeader(args: any, theme: any): string {
   // only the shrink direction with a full clear-screen + scrollback wipe
   // (clearOnShrink), i.e. the visible full-screen flash per summarized
   // command (the 0.11.x regression; see clean-tui.test.ts "summary swap is
-  // height-neutral at 110 columns"). Wherever the capped raw line fits on
-  // one terminal row, the swap keeps or adds rows.
-  return formatBashCommand(cmd, theme, BASH_BULLET_WIDTH);
+  // height-neutral at 110 columns"). bashLineCap() reserves room for the
+  // (+N lines) suffix and the terminal width, so the whole raw line fits
+  // one row at any width and the swap keeps or adds rows everywhere.
+  return formatBashCommand(cmd, theme, bashLineCap());
 }
 
 function formatBashBullet(entry: Entry, theme: any): string {
@@ -806,13 +863,20 @@ function formatBashBullet(entry: Entry, theme: any): string {
   }
   const nl = cmd.indexOf("\n");
   let head = nl === -1 ? cmd : cmd.slice(0, nl);
-  if (head.length > BASH_BULLET_WIDTH)
-    head = head.slice(0, BASH_BULLET_WIDTH - 1) + "…";
-  let out = `  ${bullet}${accent(head)}`;
+  let suffix = "";
   if (nl !== -1) {
     const extra = cmd.split("\n").length - 1;
-    out += theme.fg("muted", ` (+${extra} line${extra === 1 ? "" : "s"})`);
+    suffix = ` (+${extra} line${extra === 1 ? "" : "s"})`;
   }
+  // Same cap discipline as formatBashCommand: head + suffix within one row.
+  // Budget is computed on the PLAIN suffix (ANSI added below adds no width).
+  const budget = Math.max(
+    10,
+    bashLineCap() - BULLET_PREFIX_WIDTH - suffix.length,
+  );
+  if (head.length > budget) head = head.slice(0, budget - 1) + "…";
+  let out = `  ${bullet}${accent(head)}`;
+  if (suffix) out += theme.fg("muted", suffix);
   return out;
 }
 

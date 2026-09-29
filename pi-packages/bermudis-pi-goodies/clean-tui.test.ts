@@ -66,6 +66,31 @@ function textOf(component: unknown): string {
   return box?.children?.map((c) => c.text ?? "").join("\n") ?? "";
 }
 
+/** Fake a terminal size for the render guards that read process.stdout
+ *  (bashLineCap, groupedBulletCap). Returns the restore function. */
+function setTerminalSize(size: {
+  columns?: number;
+  rows?: number;
+}): () => void {
+  const originals = new Map<string, PropertyDescriptor | undefined>();
+  const restore = () => {
+    for (const [key, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(process.stdout, key, descriptor);
+      else delete (process.stdout as unknown as Record<string, unknown>)[key];
+    }
+  };
+  for (const [key, value] of Object.entries(size)) {
+    originals.set(key, Object.getOwnPropertyDescriptor(process.stdout, key));
+    Object.defineProperty(process.stdout, key, {
+      value,
+      configurable: true,
+      writable: true,
+      enumerable: true,
+    });
+  }
+  return restore;
+}
+
 /** A replayed assistant message entry carrying tool calls (session format). */
 function assistantMessage(...toolCalls: Array<{ id: string; name: string }>) {
   return {
@@ -1208,6 +1233,107 @@ describe("clean-tui AI summary", () => {
     );
     const after = (row.lastCallComponent as Box).render(110).length;
     expect(after).toBe(before);
+  });
+
+  test("summary swap is height-neutral on a 90-column terminal (width-aware cap)", async () => {
+    // The old guard capped the raw line at a fixed 100 units regardless of
+    // terminal width: below ~106 columns the raw line wrapped to 2 rows and
+    // the landing summary (1 row) SHRANK the box — a clearOnShrink full-render
+    // flash on every summarized command, exactly what the guard exists to
+    // prevent. bashLineCap() now measures the real terminal width, so the raw
+    // line fits one row everywhere and the swap can only add rows.
+    scriptedBackend(() => "Typechecks the extension sources");
+    enableSummariesForTest();
+    const restore = setTerminalSize({ columns: 90 });
+    try {
+      const h = new PiHarness();
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const row = h.row("bash", "narrow");
+      const cmd =
+        "cd ~/build/agent-extensions/pi-packages/bermudis-pi-goodies && rm -rf node_modules/.cache && bun run typecheck";
+      row.setArgs({ command: cmd });
+      // At 90 columns the raw line must already fit one row.
+      const before = (row.lastCallComponent as Box).render(90).length;
+      expect(before).toBe(1);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(textOf(row.lastCallComponent)).toContain(
+        "Typechecks the extension sources",
+      );
+      const after = (row.lastCallComponent as Box).render(90).length;
+      expect(after).toBe(before);
+    } finally {
+      restore();
+    }
+  });
+
+  test("the (+N lines) hint counts against the raw cap (multi-line flicker)", async () => {
+    // A multi-line command with a long first line used to exceed one row even
+    // when "capped": the head was cut at 100 units but the hint was appended
+    // on top, so the raw line wrapped to 2 rows and the landing summary
+    // collapsed the box to 1 row (clearOnShrink flash). The cap is now the
+    // TOTAL line budget — the head reserves the hint's width.
+    scriptedBackend(() => "Migrates the archive log");
+    enableSummariesForTest();
+    const restore = setTerminalSize({ columns: 110 });
+    try {
+      const h = new PiHarness();
+      cleanTui(h.api);
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      const row = h.row("bash", "wide-heredoc");
+      // 111-char first line + 2 lines total → " (+1 line)" hint.
+      const cmd = `echo ${"y".repeat(106)}\necho done`;
+      expect(cmd.split("\n")[0].length).toBeGreaterThan(100);
+      row.setArgs({ command: cmd });
+      const before = (row.lastCallComponent as Box).render(110).length;
+      expect(before).toBe(1);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(textOf(row.lastCallComponent)).toContain(
+        "Migrates the archive log",
+      );
+      const after = (row.lastCallComponent as Box).render(110).length;
+      expect(after).toBe(before);
+    } finally {
+      restore();
+    }
+  });
+
+  test("large bursts cap the collapsed bullet list (viewport-fit guard)", () => {
+    // The ×N title sits at the TOP of the shared burst box and changes on
+    // every new call. Once the box outgrows the viewport, pi-tui answers each
+    // per-call title update with a full clear-screen + scrollback wipe (the
+    // above-viewport-change fullRender escalation). The collapsed list now
+    // keeps only the most recent bullets, so the box stays shorter than the
+    // terminal and every burst update stays differential.
+    const restore = setTerminalSize({ columns: 110, rows: 40 });
+    try {
+      const h = freshHarness();
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
+      h.emit("message_start", { message: { role: "assistant" } });
+      let leader: ToolRow | undefined;
+      for (let i = 0; i < 30; i++) {
+        const row = h.row("read", `r${i}`);
+        row.setArgs({ path: `/tmp/${i}.ts` });
+        if (i === 0) leader = row;
+      }
+      const text = textOf(leader!.lastCallComponent);
+      expect(text).toContain("read ×30"); // count still tells the truth
+      expect(text).toContain("… +15 earlier"); // 40-row terminal → cap 15
+      expect(text).toContain("/tmp/29.ts"); // newest calls stay visible
+      expect(text).not.toContain("/tmp/0.ts"); // oldest collapsed away
+      // Title + hidden hint + 15 bullets: shorter than the 40-row terminal.
+      const lines = (leader!.lastCallComponent as Box).render(110).length;
+      expect(lines).toBeLessThanOrEqual(17);
+
+      // Expanded views are opt-in detail: every bullet stays rendered.
+      leader!.setExpanded(true);
+      expect(textOf(leader!.lastCallComponent)).toContain("/tmp/0.ts");
+    } finally {
+      restore();
+    }
   });
 
   test("summary swaps a row that finished while its summary was in flight", async () => {
