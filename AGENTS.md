@@ -2,6 +2,12 @@
 
 Personal repo for Pi coding agent extensions.
 
+## Pi boundary
+
+- Never patch Pi itself (including its installed package or source) to make an
+  extension work. Use Pi's supported extension APIs; if they cannot provide
+  the requested behavior, explain the limitation and ask before changing scope.
+
 ## Structure
 
 ```
