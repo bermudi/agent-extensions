@@ -726,7 +726,15 @@ export default function (pi: ExtensionAPI) {
       const config: LLMConfig = {
         model,
         apiKey: auth.apiKey,
-        headers: auth.headers,
+        // ProviderHeaders allows null values (pi's "drop this header" marker);
+        // the summarizer's LLM client takes a plain string-valued record.
+        headers: auth.headers
+          ? Object.fromEntries(
+              Object.entries(auth.headers).filter(
+                (entry): entry is [string, string] => entry[1] !== null,
+              ),
+            )
+          : undefined,
       };
 
       // Check if we can summarize in one shot
