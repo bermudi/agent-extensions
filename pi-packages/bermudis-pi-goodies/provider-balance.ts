@@ -68,6 +68,13 @@ const TURN_REFRESH_MIN_INTERVAL_MS = 30_000;
 /** On session start, adopt a sibling/previous session's cache entry younger
  *  than this instead of refetching — rapid session switches then cost nothing. */
 const SESSION_START_CACHE_ADOPT_MS = 15_000;
+/** How long the post-/login poller waits for the new credential to appear,
+ *  at 1s per attempt. Kilo device logins take 30–60s of human time (browser
+ *  round-trip), so a ~9s window (the old 10-attempt cap) usually expired
+ *  before the user finished and the footer kept the old account's balance
+ *  until the next idle poll. 90s covers the human with margin; the poll is a
+ *  local keychain/auth-store read, not a network request. */
+export const AUTH_TRANSITION_MAX_ATTEMPTS = 90;
 /** After a failed provider fetch, idle polls machine-wide back off for this
  *  long via a shared marker in the balance cache. */
 export const FAILURE_BACKOFF_MS = 60_000;
@@ -1445,7 +1452,7 @@ export default function providerBalance(
       try {
         token = await ctx.modelRegistry.getApiKeyForProvider(provider);
       } catch {
-        if (attempts < 10) {
+        if (attempts < AUTH_TRANSITION_MAX_ATTEMPTS) {
           authTransitionTimer = setTimer(() => void check(), 1_000);
         } else {
           authTransitionTimer = undefined;
@@ -1457,7 +1464,7 @@ export default function providerBalance(
         ? balanceCacheKey(provider, token)
         : undefined;
       if (currentCacheKey === previousCacheKey) {
-        if (attempts < 10) {
+        if (attempts < AUTH_TRANSITION_MAX_ATTEMPTS) {
           authTransitionTimer = setTimer(() => void check(), 1_000);
         } else {
           authTransitionTimer = undefined;

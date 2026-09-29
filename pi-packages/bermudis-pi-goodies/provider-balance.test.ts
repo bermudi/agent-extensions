@@ -41,6 +41,7 @@ import providerBalance, {
   writeCachedBalance,
   clearBalanceFailureMarker,
   FAILURE_BACKOFF_MS,
+  AUTH_TRANSITION_MAX_ATTEMPTS,
   formatKiloCatalogStatus,
   mergeSideBadgeIntoStatsLine,
   zaiQuotaToBalance,
@@ -196,7 +197,7 @@ describe("idle refresh lifecycle", () => {
 });
 
 describe("auth transition", () => {
-  test("stops polling after 10 failed lookups instead of running forever", async () => {
+  test("stops polling after the attempt cap instead of running forever", async () => {
     const handlers = new Map<
       string,
       (event: unknown, ctx: ExtensionContext) => unknown
@@ -262,21 +263,24 @@ describe("auth transition", () => {
 
     // The poller is the most recently scheduled timer.
     let pollerIndex = scheduled.length - 1;
-    for (let attempt = 1; attempt <= 10; attempt++) {
+    for (let attempt = 1; attempt <= AUTH_TRANSITION_MAX_ATTEMPTS; attempt++) {
       scheduled[pollerIndex]?.callback();
       await Promise.resolve();
-      // Each failed lookup reschedules (attempts < 10) or stops (attempt 10).
-      if (attempt < 10) {
+      // Each failed lookup reschedules (below the cap) or stops (at the cap).
+      if (attempt < AUTH_TRANSITION_MAX_ATTEMPTS) {
         expect(scheduled.length).toBe(pollerIndex + 2);
         pollerIndex = scheduled.length - 1;
       } else {
-        // After the 10th failure the timer must not reschedule.
+        // At the cap the timer must not reschedule.
         expect(scheduled.length).toBe(pollerIndex + 1);
       }
     }
 
-    // Exactly 10 polling lookups, plus the initial session_start refresh.
-    expect(apiKeyCalls - refreshCallsAtStart).toBe(10);
+    // Exactly AUTH_TRANSITION_MAX_ATTEMPTS polling lookups, plus the initial
+    // session_start refresh.
+    expect(apiKeyCalls - refreshCallsAtStart).toBe(
+      AUTH_TRANSITION_MAX_ATTEMPTS,
+    );
   });
 
   test("anchored /login regex does not match '/logins are bad' (prefix-match bug)", async () => {
@@ -450,9 +454,21 @@ describe("auth transition", () => {
       const repolls = scheduled.filter((entry) => entry.delay === 1_000);
       expect(repolls.length).toBe(1);
 
+      // A Kilo device login takes 30–60s of human time; the old 10-attempt
+      // cap gave up at ~9s and the footer kept the old balance. Poll past
+      // the old window with the token unchanged — the poller must survive.
+      let last = repolls[repolls.length - 1]!;
+      for (let i = 0; i < 45; i++) {
+        last.callback();
+        await flush();
+        const next = scheduled.filter((entry) => entry.delay === 1_000);
+        expect(next.length).toBe(i + 2); // rescheduled despite no new token
+        last = next[next.length - 1]!;
+      }
+
       // The login completes; the surviving poll notices the new credential.
       token = "token-new";
-      repolls[0]!.callback();
+      last.callback();
       await flush();
       expect(fetched).toEqual(["token-old", "token-old", "token-new"]);
     } finally {
