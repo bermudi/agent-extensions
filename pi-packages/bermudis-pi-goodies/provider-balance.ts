@@ -30,7 +30,7 @@ import {
   timeoutSignal,
 } from "./json-file.ts";
 import { getKiloCatalogStatus, type KiloCatalogStatus } from "./kilo.ts";
-import { logGoodiesEvent } from "./goodies-log.ts";
+import { logGoodiesEvent, reportFailure } from "./goodies-log.ts";
 import {
   getSideSessionModel,
   onSideBadgeChange,
@@ -1451,7 +1451,16 @@ export default function providerBalance(
       let token: string | undefined;
       try {
         token = await ctx.modelRegistry.getApiKeyForProvider(provider);
-      } catch {
+      } catch (error) {
+        // pi's getApiKeyForProvider swallows keychain errors and resolves to
+        // undefined, so this catch only fires if that contract changes (the
+        // test double rejects to exercise it). Log the failure — a silent
+        // catch here would hide exactly the breakage that stalls the
+        // post-/login footer — while keeping the retry-until-cap flow.
+        reportFailure(
+          "provider_balance_warning",
+          `[provider-balance] keychain read for "${provider}" failed while waiting for the /login credential swap (attempt ${attempts}/${AUTH_TRANSITION_MAX_ATTEMPTS}): ${describeError(error)}`,
+        );
         if (attempts < AUTH_TRANSITION_MAX_ATTEMPTS) {
           authTransitionTimer = setTimer(() => void check(), 1_000);
         } else {

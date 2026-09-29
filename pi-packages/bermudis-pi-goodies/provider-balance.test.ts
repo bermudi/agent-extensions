@@ -48,6 +48,7 @@ import providerBalance, {
   type BalanceAdapter,
 } from "./provider-balance.ts";
 import { resetSideBadgeState, setSideSessionModel } from "./side-state.ts";
+import { setGoodiesLogPathForTesting } from "./goodies-log.ts";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 
 describe("event latency", () => {
@@ -281,6 +282,104 @@ describe("auth transition", () => {
     expect(apiKeyCalls - refreshCallsAtStart).toBe(
       AUTH_TRANSITION_MAX_ATTEMPTS,
     );
+  });
+
+  test("logs a warning when the keychain read rejects, but keeps the retry flow", async () => {
+    // pi's getApiKeyForProvider swallows keychain errors and resolves to
+    // undefined, so in production this catch is nearly unreachable — the
+    // rejecting test double exercises the defensive path. Regression: the
+    // failure must land in the goodies log (provider + error context, no
+    // credential values) while the poller still retries to its cap.
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: ExtensionContext) => unknown
+    >();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const cleared: unknown[] = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = ((timer: unknown) => {
+      cleared.push(timer);
+    }) as typeof globalThis.clearTimeout;
+
+    const scratchDir = mkdtempSync(
+      join(tmpdir(), "provider-balance-log-test-"),
+    );
+    const scratchLog = join(scratchDir, "goodies.log");
+    setGoodiesLogPathForTesting(scratchLog);
+
+    try {
+      providerBalance(
+        {
+          on(event, handler) {
+            handlers.set(
+              event,
+              handler as (event: unknown, ctx: ExtensionContext) => unknown,
+            );
+          },
+          events: {
+            emit() {},
+            on() {
+              return () => {};
+            },
+          },
+        } as unknown as ExtensionAPI,
+        { setTimeout, clearTimeout, random: () => 0.5 },
+      );
+
+      const ctx = {
+        mode: "tui",
+        model: { provider: "kilo" },
+        isIdle: () => false,
+        ui: { setFooter() {} },
+        sessionManager: { getBranch: () => [] },
+        modelRegistry: {
+          isUsingOAuth: () => false,
+          getApiKeyForProvider: async () => {
+            throw new Error("keychain unavailable");
+          },
+        },
+      } as unknown as ExtensionContext;
+
+      const start = handlers.get("session_start");
+      const input = handlers.get("input");
+      if (!start || !input) throw new Error("missing lifecycle handlers");
+
+      start({}, ctx);
+      await Promise.resolve();
+
+      input({ text: "/login kilo" }, ctx);
+
+      // Drive three poll attempts: each failed lookup must land a warning
+      // in the log AND still reschedule (the retry-until-cap flow).
+      let pollerIndex = scheduled.length - 1;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        scheduled[pollerIndex]?.callback();
+        await Promise.resolve();
+        expect(scheduled.length).toBe(pollerIndex + 2);
+        pollerIndex = scheduled.length - 1;
+      }
+
+      const warnings = readFileSync(scratchLog, "utf-8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((entry) => entry.type === "provider_balance_warning");
+      expect(warnings.length).toBe(3);
+      const first = warnings[0];
+      if (!first) throw new Error("no keychain warning logged");
+      const message = first.message;
+      expect(message).toContain('for "kilo"');
+      expect(message).toContain("keychain unavailable");
+      expect(message).toContain("attempt 1/90");
+    } finally {
+      setGoodiesLogPathForTesting(undefined);
+      await rm(scratchDir, { recursive: true, force: true });
+    }
   });
 
   test("anchored /login regex does not match '/logins are bad' (prefix-match bug)", async () => {
