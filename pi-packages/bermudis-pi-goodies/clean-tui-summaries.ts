@@ -1050,7 +1050,19 @@ async function summarizeWithRetries(job: {
     }
     const attemptStartedAt = Date.now();
     try {
-      return { ok: true, text: await summarizeOnce(), attempts: attempt };
+      const text = await summarizeOnce();
+      // A response that only normalizes to nothing (quotes-only, bare
+      // whitespace) is no summary: throw the same deterministic failure
+      // convertSummaryResponse throws for blank answers. Caching the empty
+      // string would render as the command's whole summary line (blanking
+      // it) and suppress every future re-request, while silently dropping
+      // the result would re-fire a provider call on every rerender — the
+      // non-retryable failure path (log + backoff) is the established
+      // treatment for empty summaries.
+      if (normalizeSummary(text) === "") {
+        throw new Error("empty summary — model output normalizes to nothing");
+      }
+      return { ok: true, text, attempts: attempt };
     } catch (err) {
       lastErr = err;
       if (
