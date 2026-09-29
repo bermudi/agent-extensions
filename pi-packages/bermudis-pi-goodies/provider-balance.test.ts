@@ -669,6 +669,9 @@ describe("footer lifecycle", () => {
           getEntries: () => [],
           getCwd: () => "/work",
           getSessionName: () => undefined,
+          getEntryCount: () => 0,
+          getSessionId: () => "test-session",
+          getLeafId: () => "test-leaf",
         },
         getContextUsage: () => null,
         modelRegistry: {
@@ -1955,6 +1958,9 @@ describe("footer side badge", () => {
           getEntries: () => [],
           getCwd: () => "/work",
           getSessionName: () => undefined,
+          getEntryCount: () => 0,
+          getSessionId: () => "test-session",
+          getLeafId: () => "test-leaf",
         },
         getContextUsage: () => null,
         modelRegistry: {

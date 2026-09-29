@@ -8,7 +8,7 @@
  * KILO_API_KEY after installing the goodies bundle; do not install this file
  * separately alongside the bundle.
  *
- * Design notes (pi 0.84.x; the refresh adapter also accepts Pi 0.80–0.83):
+ * Design notes (pi 0.99.x; the refresh adapter also accepts Pi 0.80–0.84):
  *  - Reads auth via the public ModelRegistry API (getApiKeyForProvider /
  *    getProviderAuthStatus). The older `authStorage` map was removed upstream.
  *  - Dynamic model catalog uses the modern ProviderConfig.refreshModels(context)
@@ -29,6 +29,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { reportFailure } from "./goodies-log.ts";
 import { describeError, timeoutSignal } from "./json-file.ts";
+
+// Pi 0.99 discriminates ProviderModelConfig into chat/image/classifier entries
+// (union indexed access no longer yields compat/thinkingLevelMap). The Kilo
+// gateway serves chat models only — fetchKiloModels filters image generators —
+// so every config kilo produces or restores is the chat variant.
+type KiloModelConfig = Extract<ProviderModelConfig, { reasoning: boolean }>;
 
 // =============================================================================
 // Constants
@@ -391,7 +397,7 @@ export function shouldUseResponsesApi(m: OpenRouterModel): boolean {
 export function getKiloModelCompat(
   m: OpenRouterModel,
   api: Api | undefined,
-): NonNullable<ProviderModelConfig["compat"]> {
+): NonNullable<KiloModelConfig["compat"]> {
   // Responses-API models take OpenAIResponsesCompat, which has no thinkingFormat.
   // sessionAffinityFormat "openai-nosession" suppresses the underscore `session_id`
   // header, which Kilo's strict OpenAI-compatible gateway rejects (the canonical
@@ -402,7 +408,7 @@ export function getKiloModelCompat(
     return {
       sessionAffinityFormat: "openai-nosession",
       supportsLongCacheRetention: false,
-    } as NonNullable<ProviderModelConfig["compat"]>;
+    } as NonNullable<KiloModelConfig["compat"]>;
   }
   // Chat-completions models: Kilo's gateway is OpenRouter-compatible but lives at
   // api.kilo.ai, so pi's URL auto-detection does NOT classify it as OpenRouter.
@@ -421,7 +427,7 @@ export function getKiloModelCompat(
     m.id === "deepseek/deepseek-v4-pro"
       ? { requiresReasoningContentOnAssistantMessages: true }
       : {}),
-  } as NonNullable<ProviderModelConfig["compat"]>;
+  } as NonNullable<KiloModelConfig["compat"]>;
 }
 
 // Pi's selectable thinking levels. Kilo/OpenCode may use variant names such
@@ -454,7 +460,7 @@ function mapVariantEffort(
 /** Derive a Pi thinkingLevelMap from Kilo/OpenCode per-variant reasoning metadata. */
 export function thinkingLevelMapFromVariants(
   variants: NonNullable<OpenRouterModel["opencode"]>["variants"],
-): ProviderModelConfig["thinkingLevelMap"] | undefined {
+): KiloModelConfig["thinkingLevelMap"] | undefined {
   if (!variants || Object.keys(variants).length === 0) return undefined;
 
   const map: Partial<Record<PiThinkingLevel, string | null>> = {};
@@ -484,13 +490,13 @@ export function thinkingLevelMapFromVariants(
     if (map[level] === null) map[level] = effort;
   }
 
-  return map as ProviderModelConfig["thinkingLevelMap"];
+  return map as KiloModelConfig["thinkingLevelMap"];
 }
 
 /** Resolve a Pi thinkingLevelMap: variant metadata first, then known fallbacks. */
 export function getKiloThinkingLevelMap(
   m: OpenRouterModel,
-): ProviderModelConfig["thinkingLevelMap"] | undefined {
+): KiloModelConfig["thinkingLevelMap"] | undefined {
   const fromVariants = thinkingLevelMapFromVariants(m.opencode?.variants);
   if (fromVariants) return fromVariants;
 
@@ -536,7 +542,7 @@ export function modelSupportsReasoning(m: OpenRouterModel): boolean {
 }
 
 /** Map a Kilo/OpenRouter catalog entry to a Pi provider model config. Exported for the live smoke check (scripts/kilo-smoke.ts), which runs the production mapper against the real gateway. */
-export function mapOpenRouterModel(m: OpenRouterModel): ProviderModelConfig {
+export function mapOpenRouterModel(m: OpenRouterModel): KiloModelConfig {
   const inputModalities = m.architecture?.input_modalities ?? ["text"];
   const supportsImages = inputModalities.includes("image");
   const supportsReasoning = modelSupportsReasoning(m);
@@ -642,7 +648,7 @@ export function resetKiloStateForTesting(): void {
   kiloCatalogStatus.degraded = false;
 }
 
-function modelConfigToStoredModel(model: ProviderModelConfig): Model<Api> {
+function modelConfigToStoredModel(model: KiloModelConfig): Model<Api> {
   return {
     ...model,
     provider: KILO_PROVIDER_ID,
@@ -651,7 +657,7 @@ function modelConfigToStoredModel(model: ProviderModelConfig): Model<Api> {
   };
 }
 
-function storedModelToConfig(model: Model<Api>): ProviderModelConfig | null {
+function storedModelToConfig(model: Model<Api>): KiloModelConfig | null {
   if (model.provider !== KILO_PROVIDER_ID) return null;
   return {
     id: model.id,
@@ -687,7 +693,7 @@ async function fetchKiloModels(options?: {
   token?: string;
   freeOnly?: boolean;
   signal?: AbortSignal;
-}): Promise<ProviderModelConfig[]> {
+}): Promise<KiloModelConfig[]> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "User-Agent": "pi-kilo-provider",
