@@ -4225,6 +4225,50 @@ describe("clean-tui history caps", () => {
     expect(stats.invalidateById).toBe(400);
   });
 
+  test("tool-order maps pruned once past the cap; recent ids survive", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    // Stream 601 one-call assistant messages: every toolCall block inserts
+    // into previousToolById/boundaryBeforeById (scanToolOrder) — burst tool
+    // or not, registered row or not. These maps previously grew unbounded
+    // for the life of the process.
+    for (let i = 0; i < 601; i++) {
+      h.emit("message_start", { message: { role: "assistant" } });
+      h.emit("message_update", {
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", id: `t-${i}`, name: "read", arguments: {} },
+          ],
+        },
+      });
+    }
+    const stats = __historyStatsForTesting();
+    // No rows registered, so the entries machinery stayed empty — the order
+    // maps alone crossed the cap and were pruned down to the keep size, in
+    // lockstep with each other.
+    expect(stats.entries).toBe(0);
+    expect(stats.previousToolIds).toBe(400);
+    expect(stats.boundaryBeforeIds).toBe(400);
+    // The newest ordering links survive the prune: two adjacent scanned
+    // calls still group — the second knows the first as its predecessor.
+    h.emit("message_start", { message: { role: "assistant" } });
+    h.emit("message_update", {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "t-601", name: "read", arguments: {} },
+        ],
+      },
+    });
+    const a = h.row("read", "t-600");
+    const b = h.row("read", "t-601");
+    a.setArgs({ path: "/tmp/a.ts" });
+    b.setArgs({ path: "/tmp/b.ts" });
+    expect(textOf(a.lastCallComponent)).toContain("read ×2");
+  });
+
   test("grouping still works at the tail after pruning", () => {
     const h = freshHarness();
     h.emit("session_start", { reason: "startup" });

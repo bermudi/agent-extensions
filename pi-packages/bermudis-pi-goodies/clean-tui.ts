@@ -222,6 +222,7 @@ function scanToolOrder(message: {
     if (!previousToolById.has(block.id)) {
       previousToolById.set(block.id, lastToolCallId);
       boundaryBeforeById.set(block.id, boundary);
+      pruneToolOrderMapsIfNeeded();
       lastToolCallId = block.id;
       // A later event can reveal calls whose components already registered.
       const row = entryById.get(block.id);
@@ -328,6 +329,35 @@ function pruneHistoryIfNeeded(): void {
   }
   entries.splice(0, drop);
   entriesBase += drop;
+}
+
+/**
+ * Cap the tool-order maps (previousToolById / boundaryBeforeById) with the
+ * same MAX/KEEP rule as the history itself. They gain one entry per tool call
+ * ever streamed — burst tool or not — and previously grew unbounded for the
+ * life of the process. Insertion order is toolCall order, the same order the
+ * entries array fills, so oldest-first eviction gives the same window
+ * guarantee: the values are read only while a call's row has yet to register
+ * (upsertEntry) or its message is still streaming (the dedupe and
+ * late-boundary paths below) — both the newest insertions, long past the cap
+ * by the time an id drops off. If a still-streaming id were evicted anyway
+ * (a single message with more calls than the keep window), the re-walk would
+ * re-set it with a later predecessor — and shouldGroup fails closed on a
+ * wrong previousToolCallId (solo row, never a wrong merge), so the failure
+ * direction matches the prune's "renders solo" story. Both maps share their
+ * key set by construction (set and cleared together, never deleted
+ * elsewhere), so evicting through previousToolById keeps them in lockstep.
+ */
+function pruneToolOrderMapsIfNeeded(): void {
+  if (previousToolById.size <= MAX_HISTORY_ENTRIES) return;
+  const drop = previousToolById.size - HISTORY_KEEP_ENTRIES;
+  let dropped = 0;
+  for (const id of previousToolById.keys()) {
+    if (dropped >= drop) break;
+    previousToolById.delete(id);
+    boundaryBeforeById.delete(id);
+    dropped++;
+  }
 }
 
 function upsertEntry(
@@ -600,12 +630,16 @@ export function __historyStatsForTesting(): {
   entryById: number;
   invalidateById: number;
   prunedIds: number;
+  previousToolIds: number;
+  boundaryBeforeIds: number;
 } {
   return {
     entries: entries.length,
     entryById: entryById.size,
     invalidateById: invalidateById.size,
     prunedIds: prunedToolCallIds.size,
+    previousToolIds: previousToolById.size,
+    boundaryBeforeIds: boundaryBeforeById.size,
   };
 }
 
