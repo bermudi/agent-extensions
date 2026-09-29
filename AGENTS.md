@@ -18,14 +18,29 @@ pi-packages/
                          # provenance in details; vision-model system prompt keeps the injection refusal).
                          # Renders via clean-tui's burst skeleton (createBurstRenderer, gated on the
                          # CLEAN_TUI_ACTIVE flag at registration — same contract pi-codex mirrors).
-                         # Needs pi ^0.85.x at runtime (vision uses createReadToolDefinition); peers bumped in lockstep.
+                         # Needs pi ^0.99.x at runtime (vision uses createReadToolDefinition); peers bumped in lockstep.
+                         # 0.99 note (2026-09-29): ProviderModelConfig became a chat/image/classifier union — kilo.ts
+                         # narrows via KiloModelConfig = Extract<…, {reasoning: boolean}>; pi's footer now reads
+                         # sessionManager.getEntryCount/getSessionId/getLeafId (test fixtures carry them).
                          # clean-tui render paths MUST follow the render-safety rules in its
                          # README (pi-tui fullRender escalation: clearOnShrink + above-viewport
                          # changes wipe the screen in regular mode; fullscreen has neither)
+                         # prefer-tools.ts is a NUDGE, not a security boundary: it steers
+                         # well-intentioned models toward modern tools (trash/uv/rg). Don't
+                         # harden it against adversarial bypass or treat exotic false negatives
+                         # as vulnerabilities — predictability (same command, same verdict,
+                         # quoted or not) beats exhaustive bash semantics. (bermudi, 2026-09-29,
+                         # after I scope-crept a quote-handling fix into a 17-case bash-semantics
+                         # matrix framed as 'closing verified bypasses')
                          # kilo drift detection: footer badge (`kilo: stale …`) + kilo_warning
                          # lines in goodies.log + `bun run kilo-smoke` (live catalog check; run
                          # before releasing — DRIFT lines = kilo.ts hardcoded knowledge needs review)
   critique/               # ACTIVE (opt-in): launch the Bun-only Critique TUI from Pi
+  council/                # DEVELOPMENT (not linked in .pi/extensions or ~/.pi/agent/extensions as of
+                         # 2026-09-29): read-only multi-model design council — /council snapshots the
+                         # conversation, polls several models for ballots, renders decisions in a
+                         # dashboard. Pi packages live in devDependencies (0.99 warns on host-provided
+                         # modules listed in dependencies).
   diff/                   # ACTIVE (project-local)
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
   ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
@@ -118,6 +133,8 @@ declared independently in each package that needs them; that duplication is the
 price of true isolation and is intentional.
 
 ## Conventions
+
+- All extensions track the current pi release via per-package devDependencies (pi 0.99.x since 2026-09-29). After a pi upgrade: bump the `@earendil-works/*` pins in lockstep per package, typecheck, test, then smoke with `pi -ne -e <abs entry>` from a scratch cwd.
 
 - `pi-packages/experiments/` — archive of unused/exploratory extensions. Excluded from typecheck; tests run via `bun run test` inside `pi-packages/experiments/` but the dir is not gated as maintained code.
 - Active extensions live at `pi-packages/<name>/`. New keepers go there; experiments go in `pi-packages/experiments/`.
