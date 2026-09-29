@@ -46,6 +46,8 @@ export interface RenderContext {
   isPartial: boolean;
   /** False while the call's JSON args are still streaming in. */
   argsComplete: boolean;
+  /** True once pi's markExecutionStarted() has run for this row. */
+  executionStarted: boolean;
   isError: boolean;
   cwd: string;
   showImages: boolean;
@@ -139,7 +141,9 @@ export class ToolRow {
 
   private argsValue: unknown;
   private argsComplete = true;
+  private executionStartedValue = false;
   private resultContent?: unknown[];
+  private resultDetails?: unknown;
   private resultIsError = false;
   private resultIsPartial = false;
   private hasResult = false;
@@ -163,6 +167,7 @@ export class ToolRow {
       expanded: row.expandedValue,
       isPartial: false,
       argsComplete: row.argsComplete,
+      executionStarted: row.executionStartedValue,
       isError: row.resultIsError,
       cwd: process.cwd(),
       showImages: true,
@@ -187,15 +192,24 @@ export class ToolRow {
    * Deliver a result. `isPartial: true` mirrors pi's updateResult(result,
    * isPartial) streaming path (bash onUpdate ticks): the row keeps its
    * pending background and renderResult sees isPartial in its options.
+   * `details` lands on the renderResult wrapper like pi's
+   * `{ content, details }` (truncation metadata, fullOutputPath, …).
    */
   setResult(
-    result: { content: unknown[]; isError?: boolean },
+    result: { content: unknown[]; isError?: boolean; details?: unknown },
     isPartial = false,
   ): void {
     this.resultContent = result.content;
+    this.resultDetails = result.details;
     this.resultIsError = result.isError ?? false;
     this.resultIsPartial = isPartial;
     this.hasResult = true;
+    this.update();
+  }
+
+  /** Mirror pi's markExecutionStarted(): flags ctx.executionStarted, re-renders. */
+  markStarted(): void {
+    this.executionStartedValue = true;
     this.update();
   }
 
@@ -226,7 +240,10 @@ export class ToolRow {
     }
     if (!this.hasResult) return;
     // Fresh wrapper object every pass, stable content ref — like pi.
-    const wrapper = { content: this.resultContent, details: undefined };
+    const wrapper = {
+      content: this.resultContent,
+      details: this.resultDetails,
+    };
     const options: ToolRenderOptions = {
       expanded: this.expandedValue,
       isPartial: this.resultIsPartial,

@@ -1,5 +1,5 @@
 import { describe, expect, test, afterEach, beforeEach } from "bun:test";
-import { Box, Container } from "@earendil-works/pi-tui";
+import { Box, Container, setCapabilityOverrides } from "@earendil-works/pi-tui";
 import {
   createBashToolDefinition,
   createEditToolDefinition,
@@ -39,7 +39,7 @@ import vision, {
 } from "./vision";
 import { PiHarness, type Theme, type ToolRow } from "pi-harness";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   setSummaryModel,
   setThinkingSummariesEnabled,
@@ -4415,5 +4415,195 @@ describe("clean-tui expanded view parity", () => {
     expect(text).not.toContain('""');
     expect(text).toContain("shot.png");
     expect(text).toContain("... 18 more lines");
+  });
+});
+
+describe("clean-tui pi 0.99 parity", () => {
+  test("read range suffix treats null offset/limit as absent (pi #9996)", () => {
+    // pi 0.99 fixed its own read renderer for strict-schema models that send
+    // null for omitted optional fields; the old `!== undefined` checks
+    // rendered full-file reads as `file:1` and `offset:5, limit:null` as
+    // `:5-4`. readRangeSuffix mirrors pi's formatReadLineRange exactly.
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const r = h.row("read", "r");
+    r.setArgs({ path: "/tmp/a.ts", offset: null, limit: null });
+    let text = textOf(r.lastCallComponent);
+    expect(text).toContain("/tmp/a.ts");
+    expect(text).not.toContain(":1");
+    r.setArgs({ path: "/tmp/a.ts", offset: 5, limit: null });
+    text = textOf(r.lastCallComponent);
+    expect(text).toContain(":5");
+    expect(text).not.toContain(":5-");
+    r.setArgs({ path: "/tmp/a.ts", offset: 2, limit: 3 });
+    text = textOf(r.lastCallComponent);
+    expect(text).toContain(":2-4");
+    // Grouped bullets carry the same rule (own segment: `r` above must not
+    // join the group and steal the leader render).
+    h.emit("message_start", { message: { role: "user", content: "next" } });
+    const a = h.row("read", "a");
+    a.setArgs({ path: "/tmp/b.ts", offset: null, limit: null });
+    const b = h.row("read", "b");
+    b.setArgs({ path: "/tmp/c.ts", offset: null, limit: null });
+    a.setResult({ content: [] });
+    b.setResult({ content: [] });
+    text = textOf(a.lastCallComponent);
+    expect(text).toContain("/tmp/b.ts");
+    expect(text).toContain("/tmp/c.ts");
+    expect(text).not.toContain(":1");
+  });
+
+  test("paths become OSC-8 hyperlinks only when the terminal supports them", () => {
+    // Parity with pi's renderToolPath: the styled path display is wrapped in
+    // a terminal hyperlink whose target is the cwd-resolved file URL. With
+    // the capability off (test env) the bytes must not appear at all.
+    setCapabilityOverrides({ hyperlinks: false });
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const r = h.row("read", "r");
+    r.setArgs({ path: "src/foo.ts" });
+    expect(textOf(r.lastCallComponent)).not.toContain("\x1b]8;;");
+    setCapabilityOverrides({ hyperlinks: true });
+    try {
+      r.setArgs({ path: "src/foo.ts" });
+      const text = textOf(r.lastCallComponent);
+      expect(text).toContain("\x1b]8;;file://");
+      expect(text).toContain(`file://${resolve(process.cwd(), "src/foo.ts")}`);
+    } finally {
+      setCapabilityOverrides({ hyperlinks: false });
+    }
+  });
+
+  test("expanded read output is syntax highlighted for code files", () => {
+    // pi's read renderer highlights known languages; the highlighting path
+    // must bypass our per-line toolOutput styling (the highlighter owns the
+    // colors), while errors and unknown extensions keep the plain style.
+    const colorTheme: Theme = {
+      fg: (c, t) => `<${c}>${t}`,
+      bg: (c, t) => `<${c}>${t}`,
+      bold: (t) => t,
+    };
+    const h = new PiHarness({ theme: colorTheme });
+    cleanTui(h.api);
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const code = h.row("read", "code");
+    code.setArgs({ path: "/tmp/x.ts" });
+    code.setResult({ content: [{ type: "text", text: "const a = 1;" }] });
+    code.setExpanded(true);
+    const codeText = textOf(code.lastCallComponent);
+    expect(codeText).toContain("const a = 1;");
+    expect(codeText).not.toContain("<toolOutput>const a = 1;");
+    // Each scenario in its own segment so every row renders as its leader.
+    h.emit("message_start", { message: { role: "user", content: "next" } });
+    const failed = h.row("read", "failed");
+    failed.setArgs({ path: "/tmp/missing.ts" });
+    failed.setResult({
+      content: [{ type: "text", text: "File not found" }],
+      isError: true,
+    });
+    failed.setExpanded(true);
+    expect(textOf(failed.lastCallComponent)).toContain(
+      "<toolOutput>File not found",
+    );
+    h.emit("message_start", { message: { role: "user", content: "next" } });
+    const plain = h.row("read", "plain");
+    plain.setArgs({ path: "/tmp/notes.txt" });
+    plain.setResult({ content: [{ type: "text", text: "just words" }] });
+    plain.setExpanded(true);
+    expect(textOf(plain.lastCallComponent)).toContain("<toolOutput>just words");
+  });
+
+  test("read expanded output surfaces pi's truncation warning from details", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const r = h.row("read", "r");
+    r.setArgs({ path: "/tmp/big.ts" });
+    r.setResult({
+      content: [{ type: "text", text: "line 1\nline 2" }],
+      details: {
+        truncation: {
+          truncated: true,
+          truncatedBy: "lines",
+          outputLines: 200,
+          totalLines: 900,
+          maxLines: 200,
+        },
+      },
+    });
+    r.setExpanded(true);
+    expect(textOf(r.lastCallComponent)).toContain(
+      "[Truncated: showing 200 of 900 lines (200 line limit)]",
+    );
+  });
+
+  test("grep shows limit N and the match-limit truncation warning", () => {
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const r = h.row("grep", "r");
+    r.setArgs({ pattern: "foo", path: ".", limit: 100 });
+    expect(textOf(r.lastCallComponent)).toContain(" limit 100");
+    r.setResult({
+      content: [{ type: "text", text: "a.ts:1:foo" }],
+      details: { matchLimitReached: 100, linesTruncated: true },
+    });
+    r.setExpanded(true);
+    expect(textOf(r.lastCallComponent)).toContain(
+      "[Truncated: 100 matches limit, some lines truncated]",
+    );
+  });
+
+  test("bash expanded view strips the truncation footer, warns, and times the run", () => {
+    // pi's bash renderer cuts the `[Showing lines … Full output: …]` footer
+    // out of the text (its facts return as a styled warning) and appends a
+    // Took line from execution start to result. The footer must not survive
+    // in the body; the warning must appear exactly once.
+    const h = freshHarness();
+    h.emit("session_start", { reason: "startup" });
+    h.emit("agent_start");
+    const r = h.row("bash", "r");
+    r.setArgs({ command: "cat big.log" });
+    r.markStarted();
+    r.setResult({
+      content: [
+        {
+          type: "text",
+          text: "line 1\n\n[Showing lines 1-2000 of 9000. Full output: /tmp/pi-bash-out.txt]",
+        },
+      ],
+      details: {
+        truncation: {
+          truncated: true,
+          truncatedBy: "lines",
+          outputLines: 2000,
+          totalLines: 9000,
+        },
+        fullOutputPath: "/tmp/pi-bash-out.txt",
+      },
+    });
+    r.setExpanded(true);
+    const text = textOf(r.lastCallComponent);
+    expect(text).not.toContain("[Showing lines");
+    expect(text).toContain("Full output: /tmp/pi-bash-out.txt");
+    expect(text).toContain("Truncated: showing 2000 of 9000 lines");
+    expect(text.match(/Full output: \/tmp\/pi-bash-out\.txt/g)).toHaveLength(1);
+    expect(text).toMatch(/Took 0\.\d+s/);
+    // Grouped details put took on the command label instead (own segment so
+    // this pair groups with itself, not with `r` above).
+    h.emit("message_start", { message: { role: "user", content: "next" } });
+    const a = h.row("bash", "a");
+    a.setArgs({ command: "echo one" });
+    a.markStarted();
+    a.setResult({ content: [{ type: "text", text: "one" }] });
+    const b = h.row("bash", "b");
+    b.setArgs({ command: "echo two" });
+    b.markStarted();
+    b.setResult({ content: [{ type: "text", text: "two" }] });
+    a.setExpanded(true);
+    expect(textOf(a.lastCallComponent)).toContain("(took ");
   });
 });

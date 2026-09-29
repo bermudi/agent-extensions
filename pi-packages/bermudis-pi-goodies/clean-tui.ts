@@ -35,9 +35,22 @@ import {
   createLsToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
+  formatSize,
+  getLanguageFromPath,
+  highlightCode,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Text } from "@earendil-works/pi-tui";
+import {
+  Box,
+  Container,
+  Text,
+  getCapabilities,
+  hyperlink,
+} from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { readFileSync } from "node:fs";
 import { logGoodiesEvent } from "./goodies-log.ts";
 import { isCleanTuiActive, setCleanTuiActive } from "./clean-tui-active.ts";
@@ -122,6 +135,38 @@ export function shortenPath(path: string): string {
   return path;
 }
 
+/** Tabs → three spaces before highlighting (pi's replaceTabs: rendered tab
+ *  width inside highlighted code is unpredictable across terminals). */
+function replaceTabs(text: string): string {
+  return text.replace(/\t/g, "   ");
+}
+
+/** Line-range suffix (`:12-40`) for a read call. Mirrors pi's
+ *  formatReadLineRange: strict tool schemas make models send null for
+ *  omitted offset/limit, and null must read as absent — `!== undefined`
+ *  checks rendered full-file reads as `file:1` (pi #9996, fixed natively
+ *  in 0.99). */
+function readRangeSuffix(args: any): string {
+  if (args?.offset == null && args?.limit == null) return "";
+  const start = args.offset ?? 1;
+  const end = args.limit != null ? start + args.limit - 1 : "";
+  return `:${start}${end ? `-${end}` : ""}`;
+}
+
+/** OSC-8 terminal hyperlink around an already-styled path display, when the
+ *  terminal supports them — parity with pi's own tool rows (renderToolPath),
+ *  so ctrl+click opens the file from our rows too. Target is the raw path
+ *  resolved against cwd; the visible text keeps clean-tui's shortening. */
+function hyperlinkPath(styled: string, rawPath: unknown, cwd?: string): string {
+  if (typeof rawPath !== "string" || !rawPath || !cwd) return styled;
+  if (!getCapabilities().hyperlinks) return styled;
+  try {
+    return hyperlink(styled, pathToFileURL(resolve(cwd, rawPath)).href);
+  } catch {
+    return styled;
+  }
+}
+
 function resultText(result: {
   content: Array<{ type: string; text?: string }>;
 }): string | undefined {
@@ -175,6 +220,10 @@ export type Entry = {
   /** True while only streaming (partial) results have arrived — bash ticks.
    *  The row is still pending; resultAt/isError wait for the final result. */
   isPartial?: boolean;
+  /** When ctx.executionStarted first fired for this call (bash "Took" lines).
+   *  Stamped once; replayed/re-registered rows never execute, so they stay
+   *  undefined and render no timing. */
+  startedAt?: number;
 };
 
 let liveSeg = 0;
@@ -670,13 +719,22 @@ function makeBox(
  * note — a cut with no note reads as the complete output. Every burst tool's
  * grouped details use this so the expanded view stays even across tools;
  * missing info is skipped or guarded by the callers, never interpolated.
+ *
+ * With `lang`, the WHOLE text is highlighted before slicing (pi's read
+ * renderer rule — a slice highlighted alone mis-colors multi-line constructs
+ * that span the cut). Callers are expanded-only paths, so the full-text
+ * highlight cost is paid exactly where pi pays it.
  */
-export function previewLines(txt: string, theme: any, max = 12): string {
-  const lines = txt.split("\n");
-  const shown = lines
-    .slice(0, max)
-    .map((l) => theme.fg("toolOutput", l))
-    .join("\n");
+export function previewLines(
+  txt: string,
+  theme: any,
+  max = 12,
+  lang?: string,
+): string {
+  const lines = lang
+    ? highlightCode(replaceTabs(txt), lang)
+    : txt.split("\n").map((l) => theme.fg("toolOutput", l));
+  const shown = lines.slice(0, max).join("\n");
   const remaining = lines.length - max;
   return remaining > 0
     ? `${shown}\n${theme.fg("muted", `... ${remaining} more lines`)}`
@@ -687,10 +745,15 @@ export function previewLines(txt: string, theme: any, max = 12): string {
  *  grouped/solo/pending/error rules once for every tool that uses it. */
 export type BurstToolSpec = {
   name: string;
-  /** Bullet line for one entry inside a grouped header. */
-  bullet: (entry: Entry, theme: any) => string;
+  /** Bullet line for one entry inside a grouped header. cwd comes from the
+   *  row's render context (path hyperlinks); implementations may ignore it. */
+  bullet: (entry: Entry, theme: any, cwd: string | undefined) => string;
   /** Extra lines appended to the grouped header when expanded (or ""). */
-  groupedDetails: (entries: Entry[], theme: any) => string;
+  groupedDetails: (
+    entries: Entry[],
+    theme: any,
+    cwd: string | undefined,
+  ) => string;
   /** Solo (ungrouped) header line, without expanded output. */
   soloHeader: (args: any, theme: any, ctx: any) => string;
   /** Extra lines appended to the solo header when expanded (or ""). */
@@ -735,6 +798,10 @@ export function createBurstRenderer(spec: BurstToolSpec): {
         args,
         ctx.invalidate,
       );
+      // Stamp execution start once (bash "Took" lines); pi's
+      // markExecutionStarted fires before the first result-bearing render.
+      if (ctx.executionStarted && entry.startedAt === undefined)
+        entry.startedAt = Date.now();
       spec.onUpsert?.(entry, args, ctx);
       const burst = getBurstForId(ctx.toolCallId);
       const isGrouped = burst && burst.entries.length > 1;
@@ -764,7 +831,7 @@ export function createBurstRenderer(spec: BurstToolSpec): {
 
       if (isGrouped && isLeader) {
         let header = `${theme.fg("toolTitle", theme.bold(spec.name))} ${theme.fg("muted", `×${burst.entries.length}`)}`;
-        let bullets = burst.entries.map((e) => spec.bullet(e, theme));
+        let bullets = burst.entries.map((e) => spec.bullet(e, theme, ctx.cwd));
         if (!ctx.expanded && bullets.length > groupedBulletCap()) {
           // Collapse to the most recent bullets, newest at the bottom where
           // the eye already is; the hidden count sits under the title (see
@@ -778,7 +845,7 @@ export function createBurstRenderer(spec: BurstToolSpec): {
         }
         header += `\n${bullets.join("\n")}`;
         if (ctx.expanded) {
-          const details = spec.groupedDetails(burst.entries, theme);
+          const details = spec.groupedDetails(burst.entries, theme, ctx.cwd);
           if (details) header += details;
         }
         return makeBox(theme, pending, isError, header);
@@ -811,30 +878,28 @@ export function createBurstRenderer(spec: BurstToolSpec): {
 }
 
 // ── Per-tool helpers ────────────────────────────────────────────
-function formatReadHeader(args: any, theme: any): string {
-  const path = shortenPath(args.path || "");
-  let display = path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
-  if (args.offset !== undefined || args.limit !== undefined) {
-    const start = args.offset ?? 1;
-    const end = args.limit !== undefined ? start + args.limit - 1 : "";
-    display += theme.fg("warning", `:${start}${end ? `-${end}` : ""}`);
-  }
+function formatReadHeader(args: any, theme: any, cwd?: string): string {
+  const rawPath: string = args.path || "";
+  const path = shortenPath(rawPath || "...");
+  let display = rawPath
+    ? hyperlinkPath(theme.fg("accent", path), rawPath, cwd)
+    : theme.fg("toolOutput", "...");
+  const range = readRangeSuffix(args);
+  if (range) display += theme.fg("warning", range);
   return display;
 }
 
-function formatReadBullet(entry: Entry, theme: any): string {
+function formatReadBullet(entry: Entry, theme: any, cwd?: string): string {
   const args = entry.args;
-  const path = shortenPath(args.path || "...");
+  const rawPath: string = args.path || "...";
+  const path = shortenPath(rawPath);
   // Failed calls get red text so a single failure is visible inside a grouped
   // burst without poisoning the whole box's background (see renderCall: the
   // grouped box never takes the error color, whichever call failed).
   const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
-  let line = `  ${theme.fg("muted", "•")} ${accent(path)}`;
-  if (args.offset !== undefined || args.limit !== undefined) {
-    const start = args.offset ?? 1;
-    const end = args.limit !== undefined ? start + args.limit - 1 : "";
-    line += theme.fg("warning", `:${start}${end ? `-${end}` : ""}`);
-  }
+  let line = `  ${theme.fg("muted", "•")} ${hyperlinkPath(accent(path), args.path, cwd)}`;
+  const range = readRangeSuffix(args);
+  if (range) line += theme.fg("warning", range);
   if (entry.hasImage) line += theme.fg("success", " [image]");
   return line;
 }
@@ -934,39 +999,194 @@ function formatBashBullet(entry: Entry, theme: any): string {
   return out;
 }
 
-function formatWriteBullet(entry: Entry, theme: any): string {
+function formatWriteBullet(entry: Entry, theme: any, cwd?: string): string {
   const path = shortenPath(entry.args.path || "...");
   const lines = entry.args.content ? entry.args.content.split("\n").length : 0;
   const info = lines ? theme.fg("muted", ` (${lines} lines)`) : "";
   const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
-  return `  ${theme.fg("muted", "•")} ${accent(path)}${info}`;
+  return `  ${theme.fg("muted", "•")} ${hyperlinkPath(accent(path), entry.args.path, cwd)}${info}`;
 }
 
-function formatEditBullet(entry: Entry, theme: any): string {
+function formatEditBullet(entry: Entry, theme: any, cwd?: string): string {
   const path = shortenPath(entry.args.path || "...");
   const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
-  return `  ${theme.fg("muted", "•")} ${accent(path)}`;
+  return `  ${theme.fg("muted", "•")} ${hyperlinkPath(accent(path), entry.args.path, cwd)}`;
 }
 
-function formatFindBullet(entry: Entry, theme: any): string {
+function formatFindBullet(entry: Entry, theme: any, cwd?: string): string {
   const pat = entry.args.pattern || "";
   const path = shortenPath(entry.args.path || ".");
   const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
-  return `  ${theme.fg("muted", "•")} ${accent(pat)}${theme.fg("toolOutput", ` in ${path}`)}`;
+  // The link covers exactly the path text — not the " in " join.
+  const linkedPath = hyperlinkPath(
+    theme.fg("toolOutput", path),
+    entry.args.path || ".",
+    cwd,
+  );
+  return `  ${theme.fg("muted", "•")} ${accent(pat)}${theme.fg("toolOutput", " in ")}${linkedPath}`;
 }
 
-function formatGrepBullet(entry: Entry, theme: any): string {
+function formatGrepBullet(entry: Entry, theme: any, cwd?: string): string {
   const pat = entry.args.pattern || "";
   const path = shortenPath(entry.args.path || ".");
   const glob = entry.args.glob ? ` (${entry.args.glob})` : "";
   const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
-  return `  ${theme.fg("muted", "•")} ${accent(`/${pat}/`)}${theme.fg("toolOutput", ` in ${path}${glob}`)}`;
+  const tail = `${glob}${entry.args.limit != null ? ` limit ${entry.args.limit}` : ""}`;
+  const linkedPath = hyperlinkPath(
+    theme.fg("toolOutput", path),
+    entry.args.path || ".",
+    cwd,
+  );
+  return `  ${theme.fg("muted", "•")} ${accent(`/${pat}/`)}${theme.fg("toolOutput", " in ")}${linkedPath}${tail ? theme.fg("toolOutput", tail) : ""}`;
 }
 
-function formatLsBullet(entry: Entry, theme: any): string {
+function formatLsBullet(entry: Entry, theme: any, cwd?: string): string {
   const path = shortenPath(entry.args.path || ".");
   const accent = (s: string) => theme.fg(entry.isError ? "error" : "accent", s);
-  return `  ${theme.fg("muted", "•")} ${accent(path)}`;
+  return `  ${theme.fg("muted", "•")} ${hyperlinkPath(accent(path), entry.args.path, cwd)}`;
+}
+
+// ── Result-details metadata (expanded views) ────────────────────
+// Pi's own renderers surface result.details as styled warning lines —
+// truncation facts, the bash full-output file, execution timing. The
+// collapsed "... N more lines" note alone hides WHY an output is short;
+// these mirror pi's expanded views so detail rows don't lie by omission.
+
+/** Pi's truncation details shape (read/grep/ls/find/bash share it). */
+type TruncationLike = {
+  truncated?: boolean;
+  truncatedBy?: "lines" | "bytes" | null;
+  outputLines?: number;
+  totalLines?: number;
+  maxLines?: number;
+  maxBytes?: number;
+  firstLineExceedsLimit?: boolean;
+};
+
+/** Pi's formatDuration: 3.4s / 12m 5s / 1h 04m. */
+function formatDuration(ms: number): string {
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const totalSeconds = Math.floor(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainder = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${remainder}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/** Timing for a finished call whose execution start we saw. Replay and
+ *  crash-recovered rows never executed in this process — no timing, honest.
+ *  Empty string when unknown; `tookLine` for a standalone row, `tookSuffix`
+ *  to ride a command label. */
+function tookDuration(entry: Entry): number | undefined {
+  if (entry.startedAt === undefined || entry.resultAt === undefined)
+    return undefined;
+  return Math.max(0, entry.resultAt - entry.startedAt);
+}
+
+function tookSuffix(entry: Entry): string {
+  const ms = tookDuration(entry);
+  return ms === undefined ? "" : ` (took ${formatDuration(ms)})`;
+}
+
+function tookLine(entry: Entry): string {
+  const ms = tookDuration(entry);
+  return ms === undefined ? "" : `Took ${formatDuration(ms)}`;
+}
+
+/** Read: pi's formatReadResult truncation lines. */
+function readTruncationWarning(
+  truncation: TruncationLike,
+  theme: any,
+): string | undefined {
+  if (truncation.firstLineExceedsLimit)
+    return theme.fg(
+      "warning",
+      `[First line exceeds ${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit]`,
+    );
+  if (truncation.truncatedBy === "lines")
+    return theme.fg(
+      "warning",
+      `[Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${truncation.maxLines ?? DEFAULT_MAX_LINES} line limit)]`,
+    );
+  return theme.fg(
+    "warning",
+    `[Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)]`,
+  );
+}
+
+/** Search tools (grep/ls/find): pi's joined `[Truncated: …]` line. */
+function searchTruncationWarning(
+  details: {
+    truncation?: TruncationLike;
+    matchLimitReached?: number;
+    entryLimitReached?: number;
+    resultLimitReached?: number;
+    linesTruncated?: boolean;
+  },
+  theme: any,
+  limitNoun: string,
+): string | undefined {
+  const items: string[] = [];
+  const limit =
+    details.matchLimitReached ??
+    details.entryLimitReached ??
+    details.resultLimitReached;
+  if (limit !== undefined) items.push(`${limit} ${limitNoun} limit`);
+  if (details.truncation?.truncated)
+    items.push(
+      `${formatSize(details.truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit`,
+    );
+  if (details.linesTruncated) items.push("some lines truncated");
+  if (!items.length) return undefined;
+  return theme.fg("warning", `[Truncated: ${items.join(", ")}]`);
+}
+
+/** Bash output with pi's truncation footer stripped once details confirm it —
+ *  the footer's facts return as a styled warning (bashWarnings) instead of
+ *  sitting mid-output as raw text. */
+function bashOutputText(entry: Entry): string | undefined {
+  const txt = resultText(entry.result as any)?.trim();
+  if (!txt) return undefined;
+  const details = entry.result?.details as
+    | { truncation?: { truncated?: boolean }; fullOutputPath?: string }
+    | undefined;
+  if (
+    details?.truncation?.truncated &&
+    details.fullOutputPath &&
+    txt.endsWith("]")
+  ) {
+    const footerStart = txt.lastIndexOf("\n\n[");
+    if (
+      footerStart !== -1 &&
+      txt.slice(footerStart).includes(details.fullOutputPath)
+    )
+      return txt.slice(0, footerStart).trimEnd();
+  }
+  return txt;
+}
+
+/** Bash: pi's `[Full output: …. Truncated: …]` warning line. */
+function bashWarnings(entry: Entry, theme: any): string | undefined {
+  const details = (entry.result?.details ?? undefined) as
+    { truncation?: TruncationLike; fullOutputPath?: string } | undefined;
+  if (!details) return undefined;
+  const truncation = details.truncation;
+  if (!details.fullOutputPath && !truncation?.truncated) return undefined;
+  const warnings: string[] = [];
+  if (details.fullOutputPath)
+    warnings.push(`Full output: ${details.fullOutputPath}`);
+  if (truncation?.truncated) {
+    if (truncation.truncatedBy === "lines")
+      warnings.push(
+        `Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`,
+      );
+    else
+      warnings.push(
+        `Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)`,
+      );
+  }
+  return theme.fg("warning", `[${warnings.join(". ")}]`);
 }
 
 /** Extension version from the package manifest, for the load line. */
@@ -1183,38 +1403,62 @@ export default function cleanTui(pi: ExtensionAPI): void {
   registerBurstTool({
     name: "read",
     bullet: formatReadBullet,
-    groupedDetails(entries, theme) {
+    groupedDetails(entries, theme, cwd) {
       const details: string[] = [];
       for (const e of entries) {
+        const rawPath: string = e.args.path || "...";
+        const label = hyperlinkPath(
+          theme.fg("muted", `— ${shortenPath(rawPath)}`),
+          e.args.path,
+          cwd,
+        );
         if (!e.result) {
-          details.push(
-            theme.fg(
-              "warning",
-              `— ${shortenPath(e.args.path || "...")}: pending`,
-            ),
-          );
+          details.push(`${label}${theme.fg("warning", ": pending")}`);
           continue;
         }
         const txt = resultText(e.result as any);
         if (!txt) continue;
-        details.push(
-          `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}:\n${previewLines(txt, theme)}`,
-        );
+        // Highlight with the file's language on success (pi's rule — error
+        // output is prose, not code), whole-text-then-slice (previewLines).
+        const lang =
+          !e.isError && e.args.path
+            ? getLanguageFromPath(e.args.path)
+            : undefined;
+        let block = previewLines(txt, theme, 12, lang);
+        const truncation = (e.result.details as { truncation?: TruncationLike })
+          ?.truncation;
+        if (truncation?.truncated)
+          block += `\n${readTruncationWarning(truncation, theme)}`;
+        details.push(`\n${label}:\n${block}`);
       }
       return details.length ? `\n${details.join("\n")}` : "";
     },
-    soloHeader(args, theme) {
-      return `${theme.fg("toolTitle", theme.bold("read"))} ${formatReadHeader(args, theme)}`;
+    soloHeader(args, theme, ctx) {
+      return `${theme.fg("toolTitle", theme.bold("read"))} ${formatReadHeader(args, theme, ctx?.cwd)}`;
     },
     soloExpanded(entry, _args, theme) {
       if (!entry.result) return "";
       const txt = resultText(entry.result as any);
-      return txt
-        ? txt
+      if (!txt) return "";
+      // Same highlighting rule as grouped details; pi highlights read
+      // results whenever they render (its collapsed view is empty), so the
+      // cost profile matches pi exactly: paid only on expanded renders.
+      const lang =
+        !entry.isError && entry.args.path
+          ? getLanguageFromPath(entry.args.path)
+          : undefined;
+      const body = lang
+        ? highlightCode(replaceTabs(txt), lang).join("\n")
+        : txt
             .split("\n")
             .map((l) => theme.fg("toolOutput", l))
-            .join("\n")
-        : "";
+            .join("\n");
+      const truncation = (
+        entry.result.details as { truncation?: TruncationLike } | undefined
+      )?.truncation;
+      if (truncation?.truncated)
+        return `${body}\n${readTruncationWarning(truncation, theme)}`;
+      return body;
     },
   });
 
@@ -1233,25 +1477,29 @@ export default function cleanTui(pi: ExtensionAPI): void {
       if (ctx.argsComplete !== false && args.command)
         requestSummary(args.command);
     },
-    groupedDetails(entries, theme) {
+    groupedDetails(entries, theme, _cwd) {
       const details: string[] = [];
       for (const e of entries) {
         // Expanded details show each call's full command, uncapped — same
         // rule as the solo expanded header. Output appends when present;
-        // empty output still reveals the command it came from.
+        // empty output still reveals the command it came from. Truncation
+        // footers are stripped (bashOutputText) and their facts surface as
+        // the warning line pi renders; took rides the command label.
         const cmd = theme.fg("accent", e.args.command || "...");
+        const took = theme.fg("muted", tookSuffix(e));
         if (!e.result) {
           details.push(theme.fg("warning", `— $ ${cmd}: pending`));
           continue;
         }
-        const txt = resultText(e.result as any)?.trim();
+        const txt = bashOutputText(e);
         if (!txt) {
-          details.push(`\n${theme.fg("muted", `— $ ${cmd}`)}`);
+          details.push(`\n${theme.fg("muted", `— $ ${cmd}`)}${took}`);
           continue;
         }
-        details.push(
-          `\n${theme.fg("muted", `— $ ${cmd}`)}:\n${previewLines(txt, theme)}`,
-        );
+        let block = previewLines(txt, theme);
+        const warn = bashWarnings(e, theme);
+        if (warn) block += `\n${warn}`;
+        details.push(`\n${theme.fg("muted", `— $ ${cmd}`)}${took}:\n${block}`);
       }
       return details.length ? `\n${details.join("\n")}` : "";
     },
@@ -1269,12 +1517,20 @@ export default function cleanTui(pi: ExtensionAPI): void {
     soloExpanded(entry, _args, theme) {
       // The expanded header carries the full command; this adds the output.
       if (!entry.result) return "";
-      const txt = resultText(entry.result as any)?.trim();
-      if (!txt) return "";
-      return txt
-        .split("\n")
-        .map((l: string) => theme.fg("toolOutput", l))
-        .join("\n");
+      const txt = bashOutputText(entry);
+      const parts: string[] = [];
+      if (txt)
+        parts.push(
+          txt
+            .split("\n")
+            .map((l: string) => theme.fg("toolOutput", l))
+            .join("\n"),
+        );
+      const warn = bashWarnings(entry, theme);
+      if (warn) parts.push(warn);
+      const took = tookLine(entry);
+      if (took) parts.push(theme.fg("muted", took));
+      return parts.join("\n");
     },
   });
 
@@ -1282,7 +1538,7 @@ export default function cleanTui(pi: ExtensionAPI): void {
   registerBurstTool({
     name: "write",
     bullet: formatWriteBullet,
-    groupedDetails(entries, theme) {
+    groupedDetails(entries, theme, cwd) {
       // pi renders a write result only when the call failed (a success is
       // "Successfully wrote N bytes", which it hides); showing it here in the
       // error color painted every successful expanded write red.
@@ -1290,14 +1546,14 @@ export default function cleanTui(pi: ExtensionAPI): void {
         .filter((e) => e.isError && e.result && resultText(e.result as any))
         .map(
           (e) =>
-            `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}: ${theme.fg("error", resultText(e.result as any)!)}`,
+            `\n${hyperlinkPath(theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`), e.args.path, cwd)}: ${theme.fg("error", resultText(e.result as any)!)}`,
         )
         .join("");
     },
-    soloHeader(args, theme) {
-      const path = shortenPath(args.path || "");
-      const display = path
-        ? theme.fg("accent", path)
+    soloHeader(args, theme, ctx) {
+      const path = shortenPath(args.path || "...");
+      const display = args.path
+        ? hyperlinkPath(theme.fg("accent", path), args.path, ctx?.cwd)
         : theme.fg("toolOutput", "...");
       const lines = args.content ? args.content.split("\n").length : 0;
       const info = lines > 0 ? theme.fg("muted", ` (${lines} lines)`) : "";
@@ -1315,18 +1571,18 @@ export default function cleanTui(pi: ExtensionAPI): void {
   registerBurstTool({
     name: "edit",
     bullet: formatEditBullet,
-    groupedDetails(entries, theme) {
+    groupedDetails(entries, theme, cwd) {
       return entries
         .map((e) => {
           const txt = e.result ? resultText(e.result as any) : undefined;
           return txt
-            ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`)}:\n${previewLines(txt, theme)}`
+            ? `\n${hyperlinkPath(theme.fg("muted", `— ${shortenPath(e.args.path || "...")}`), e.args.path, cwd)}:\n${previewLines(txt, theme)}`
             : "";
         })
         .join("");
     },
-    soloHeader(args, theme) {
-      return `${theme.fg("toolTitle", theme.bold("edit"))} ${theme.fg("accent", shortenPath(args.path || "..."))}`;
+    soloHeader(args, theme, ctx) {
+      return `${theme.fg("toolTitle", theme.bold("edit"))} ${hyperlinkPath(theme.fg("accent", shortenPath(args.path || "...")), args.path, ctx?.cwd)}`;
     },
     soloExpanded(entry, _args, theme) {
       if (!entry.result) return "";
@@ -1345,24 +1601,36 @@ export default function cleanTui(pi: ExtensionAPI): void {
           const txt = e.result
             ? resultText(e.result as any)?.trim()
             : undefined;
-          return txt
-            ? `\n${theme.fg("muted", `— ${e.args.pattern ?? ""}`)}:\n${previewLines(txt, theme)}`
-            : "";
+          if (!txt) return "";
+          let block = previewLines(txt, theme);
+          const warn = searchTruncationWarning(
+            e.result?.details ?? {},
+            theme,
+            "results",
+          );
+          if (warn) block += `\n${warn}`;
+          return `\n${theme.fg("muted", `— ${e.args.pattern ?? ""}`)}:\n${block}`;
         })
         .join("");
     },
-    soloHeader(args, theme) {
-      return `${theme.fg("toolTitle", theme.bold("find"))} ${theme.fg("accent", args.pattern || "")}${theme.fg("toolOutput", ` in ${shortenPath(args.path || ".")}`)}`;
+    soloHeader(args, theme, ctx) {
+      const path = shortenPath(args.path || ".");
+      return `${theme.fg("toolTitle", theme.bold("find"))} ${theme.fg("accent", args.pattern || "")}${theme.fg("toolOutput", " in ")}${hyperlinkPath(theme.fg("toolOutput", path), args.path || ".", ctx?.cwd)}`;
     },
     soloExpanded(entry, _args, theme) {
       if (!entry.result) return "";
       const txt = resultText(entry.result as any)?.trim();
-      return txt
-        ? txt
-            .split("\n")
-            .map((l) => theme.fg("toolOutput", l))
-            .join("\n")
-        : "";
+      if (!txt) return "";
+      const body = txt
+        .split("\n")
+        .map((l) => theme.fg("toolOutput", l))
+        .join("\n");
+      const warn = searchTruncationWarning(
+        entry.result?.details ?? {},
+        theme,
+        "results",
+      );
+      return warn ? `${body}\n${warn}` : body;
     },
   });
 
@@ -1370,32 +1638,46 @@ export default function cleanTui(pi: ExtensionAPI): void {
   registerBurstTool({
     name: "grep",
     bullet: formatGrepBullet,
-    groupedDetails(entries, theme) {
+    groupedDetails(entries, theme, cwd) {
       return entries
         .map((e) => {
           const txt = e.result
             ? resultText(e.result as any)?.trim()
             : undefined;
-          return txt
-            ? `\n${theme.fg("muted", `— /${e.args.pattern ?? ""}/`)}:\n${previewLines(txt, theme)}`
-            : "";
+          if (!txt) return "";
+          let block = previewLines(txt, theme);
+          const warn = searchTruncationWarning(
+            e.result?.details ?? {},
+            theme,
+            "matches",
+          );
+          if (warn) block += `\n${warn}`;
+          return `\n${theme.fg("muted", `— /${e.args.pattern ?? ""}/`)}:\n${block}`;
         })
         .join("");
     },
-    soloHeader(args, theme) {
-      let line = `${theme.fg("toolTitle", theme.bold("grep"))} ${theme.fg("accent", `/${args.pattern || ""}/`)}${theme.fg("toolOutput", ` in ${shortenPath(args.path || ".")}`)}`;
+    soloHeader(args, theme, ctx) {
+      const path = shortenPath(args.path || ".");
+      let line = `${theme.fg("toolTitle", theme.bold("grep"))} ${theme.fg("accent", `/${args.pattern || ""}/`)}${theme.fg("toolOutput", " in ")}${hyperlinkPath(theme.fg("toolOutput", path), args.path || ".", ctx?.cwd)}`;
       if (args.glob) line += theme.fg("toolOutput", ` (${args.glob})`);
+      if (args.limit != null)
+        line += theme.fg("toolOutput", ` limit ${args.limit}`);
       return line;
     },
     soloExpanded(entry, _args, theme) {
       if (!entry.result) return "";
       const txt = resultText(entry.result as any)?.trim();
-      return txt
-        ? txt
-            .split("\n")
-            .map((l) => theme.fg("toolOutput", l))
-            .join("\n")
-        : "";
+      if (!txt) return "";
+      const body = txt
+        .split("\n")
+        .map((l) => theme.fg("toolOutput", l))
+        .join("\n");
+      const warn = searchTruncationWarning(
+        entry.result?.details ?? {},
+        theme,
+        "matches",
+      );
+      return warn ? `${body}\n${warn}` : body;
     },
   });
 
@@ -1403,30 +1685,41 @@ export default function cleanTui(pi: ExtensionAPI): void {
   registerBurstTool({
     name: "ls",
     bullet: formatLsBullet,
-    groupedDetails(entries, theme) {
+    groupedDetails(entries, theme, cwd) {
       return entries
         .map((e) => {
           const txt = e.result
             ? resultText(e.result as any)?.trim()
             : undefined;
-          return txt
-            ? `\n${theme.fg("muted", `— ${shortenPath(e.args.path || ".")}`)}:\n${previewLines(txt, theme)}`
-            : "";
+          if (!txt) return "";
+          let block = previewLines(txt, theme);
+          const warn = searchTruncationWarning(
+            e.result?.details ?? {},
+            theme,
+            "entries",
+          );
+          if (warn) block += `\n${warn}`;
+          return `\n${hyperlinkPath(theme.fg("muted", `— ${shortenPath(e.args.path || ".")}`), e.args.path || ".", cwd)}:\n${block}`;
         })
         .join("");
     },
-    soloHeader(args, theme) {
-      return `${theme.fg("toolTitle", theme.bold("ls"))} ${theme.fg("accent", shortenPath(args.path || "."))}`;
+    soloHeader(args, theme, ctx) {
+      return `${theme.fg("toolTitle", theme.bold("ls"))} ${hyperlinkPath(theme.fg("accent", shortenPath(args.path || ".")), args.path || ".", ctx?.cwd)}`;
     },
     soloExpanded(entry, _args, theme) {
       if (!entry.result) return "";
       const txt = resultText(entry.result as any)?.trim();
-      return txt
-        ? txt
-            .split("\n")
-            .map((l) => theme.fg("toolOutput", l))
-            .join("\n")
-        : "";
+      if (!txt) return "";
+      const body = txt
+        .split("\n")
+        .map((l) => theme.fg("toolOutput", l))
+        .join("\n");
+      const warn = searchTruncationWarning(
+        entry.result?.details ?? {},
+        theme,
+        "entries",
+      );
+      return warn ? `${body}\n${warn}` : body;
     },
   });
   for (const spec of specs) installBurstTool(spec);
