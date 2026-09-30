@@ -48,6 +48,13 @@ import {
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
+// Hermetic suite: pi-tui auto-detects OSC-8 hyperlink support, so on a
+// capable terminal (e.g. Ghostty) path wrapping would break plain-text
+// assertions like `toContain("write /tmp/one.txt")`. Force the capability
+// off for every test; the dedicated hyperlink test overrides to true
+// locally and restores this default in its finally block.
+setCapabilityOverrides({ hyperlinks: false });
+
 // Every cleanTui() load appends a line to the summary log; keep all tests off
 // the real ~/.pi/agent/goodies.log by pointing at throwaway storage per test.
 beforeEach(() => {
