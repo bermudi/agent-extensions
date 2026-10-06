@@ -1,14 +1,16 @@
 /**
  * vision-core — pure logic for the `vision` tool.
  *
- * No pi imports: structural types stand in for pi's registry/model objects so
- * this module (and its tests) run under plain `bun` without a pi install.
+ * No pi runtime imports: structural types stand in for registry/model objects.
+ * The request context uses pi's types so incomplete replay messages cannot
+ * silently cross the completion boundary.
  * index.ts wires these against the real pi APIs.
  */
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
+import type { Context, Message } from "@earendil-works/pi-ai/compat";
 
 // --- structural stand-ins for pi types ---------------------------------------
 
@@ -16,6 +18,7 @@ import { dirname, extname, join, resolve } from "node:path";
 export interface ModelLike {
   id: string;
   provider: string;
+  api: string;
   input: string[];
 }
 
@@ -558,9 +561,10 @@ export const VISION_SYSTEM_PROMPT = [
 export function buildVisionContext(
   prompt: string,
   image: { data: string; mimeType: string },
+  model: ModelLike,
   history: StoredTurn[] = [],
-): object {
-  const past = history.flatMap((turn) => [
+): Context {
+  const past = history.flatMap<Message>((turn) => [
     {
       role: "user",
       content: [{ type: "text", text: turn.question }],
@@ -569,6 +573,21 @@ export function buildVisionContext(
     {
       role: "assistant",
       content: [{ type: "text", text: turn.answer }],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      stopReason: "stop",
+      // These are text-only replays, not the original provider responses.
+      // Zero usage makes Pi estimate this request's actual content instead of
+      // treating a previous request's token count as an authoritative prefix.
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
       timestamp: Date.now(),
     },
   ]);
@@ -644,7 +663,7 @@ export interface VisionToolDeps {
   /** pi-ai completeSimple (injected so tests stub it). */
   complete(
     model: ModelLike,
-    context: object,
+    context: Context,
     options: {
       apiKey?: string;
       headers?: Record<string, string | null>;
@@ -760,6 +779,7 @@ export async function runVisionTool(
           data: image.data as string,
           mimeType: image.mimeType as string,
         },
+        transport.model,
         history,
       ),
       {

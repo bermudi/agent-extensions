@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
   DEFAULT_MAX_TOKENS,
   MIME,
@@ -45,11 +46,13 @@ function fakeRegistry(models: ModelLike[], missingAuth = false): RegistryLike {
 const VISION_MODEL: ModelLike = {
   id: "gemini-2.5-flash",
   provider: "google",
+  api: "google-generative-ai",
   input: ["text", "image"],
 };
 const TEXT_MODEL: ModelLike = {
   id: "deepseek-v4-flash",
   provider: "deepseek",
+  api: "openai-completions",
   input: ["text"],
 };
 
@@ -273,6 +276,7 @@ describe("findVisionModel", () => {
     const nested: ModelLike = {
       id: "vendor/gem-x",
       provider: "openrouter",
+      api: "openai-completions",
       input: ["text", "image"],
     };
     expect(
@@ -307,7 +311,7 @@ describe("suggestVisionModels", () => {
     const models = [
       TEXT_MODEL,
       VISION_MODEL,
-      { id: "gemini-2.5-pro", provider: "google", input: ["text", "image"] },
+      { ...VISION_MODEL, id: "gemini-2.5-pro" },
     ];
     const suggestions = suggestVisionModels(
       fakeRegistry(models),
@@ -414,11 +418,41 @@ describe("convertVisionResponse", () => {
 });
 
 describe("buildVisionContext", () => {
+  test("follow-up history survives Pi's real context token estimator", () => {
+    const ctx = buildVisionContext(
+      "Which exact line does the arrow point at?",
+      { data: "QQ==", mimeType: "image/png" },
+      VISION_MODEL,
+      [
+        {
+          question: "Describe the screenshot.",
+          answer: "A working status line.",
+        },
+      ],
+    );
+    const replay = ctx.messages[1];
+    expect(replay.role).toBe("assistant");
+    if (replay.role !== "assistant")
+      throw new Error("Expected assistant replay");
+    expect(replay.api).toBe(VISION_MODEL.api);
+    expect(replay.provider).toBe(VISION_MODEL.provider);
+    expect(replay.model).toBe(VISION_MODEL.id);
+    expect(replay.stopReason).toBe("stop");
+    const estimate = estimateContextTokens(ctx.messages);
+    expect(estimate.tokens).toBeGreaterThan(0);
+    expect(estimate.usageTokens).toBe(0);
+    expect(estimate.lastUsageIndex).toBeNull();
+  });
+
   test("carries system prompt, question, image, timestamp", () => {
-    const ctx = buildVisionContext("what color?", {
-      data: "QQ==",
-      mimeType: "image/png",
-    }) as {
+    const ctx = buildVisionContext(
+      "what color?",
+      {
+        data: "QQ==",
+        mimeType: "image/png",
+      },
+      VISION_MODEL,
+    ) as {
       systemPrompt: string;
       messages: Array<{
         role: string;
@@ -447,6 +481,7 @@ describe("buildVisionContext", () => {
     const ctx = buildVisionContext(
       "next question",
       { data: "QQ==", mimeType: "image/png" },
+      VISION_MODEL,
       [
         { question: "q1", answer: "a1" },
         { question: "q2", answer: "a2" },

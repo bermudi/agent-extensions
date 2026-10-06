@@ -381,18 +381,14 @@ export default function (pi: ExtensionAPI): void {
             ) as Promise<{ content: ContentBlockLike[]; isError?: boolean }>,
           readRaw: readRawImage,
           complete: (model, context, options) =>
-            completeSimple(
-              model as never,
-              context as never,
-              {
-                apiKey: options.apiKey,
-                headers: options.headers,
-                maxTokens: options.maxTokens,
-                signal: options.signal,
-                timeoutMs: 120_000,
-                maxRetries: 1,
-              } as never,
-            ) as Promise<never>,
+            completeSimple(model as never, context, {
+              apiKey: options.apiKey,
+              headers: options.headers,
+              maxTokens: options.maxTokens,
+              signal: options.signal,
+              timeoutMs: 120_000,
+              maxRetries: 1,
+            } as never) as Promise<never>,
         },
         (text) =>
           onUpdate?.({
