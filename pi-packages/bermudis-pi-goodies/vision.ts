@@ -133,6 +133,13 @@ function questionPreview(prompt: unknown, cap: number): string {
   return head;
 }
 
+/** Expanded views show the raw truth: the whole prompt, uncapped — the cap
+ *  is a compact-view aid, and ctrl+o exists to reveal what was actually
+ *  asked (bash's expanded-command rule; multi-line renders multi-line). */
+function fullQuestion(prompt: unknown): string {
+  return typeof prompt === "string" ? prompt : "";
+}
+
 /** Answer text of a recorded vision result (its content is one text block). */
 function answerText(result: unknown): string {
   const content = (result as { content?: Array<{ text?: string }> } | undefined)
@@ -160,8 +167,10 @@ const visionBurstSpec = {
         // Read-view rule: info that is missing is skipped, never rendered as
         // junk (no `: ""` when a prompt is absent) — and long answers get the
         // same 12-line preview + "... N more lines" note as every other tool.
+        // Details render only when expanded, so questions show uncapped
+        // (same rule as bash's expanded details).
         const follow = e.args.followUp ? " (follow-up)" : "";
-        const q = questionPreview(e.args.prompt, 90);
+        const q = fullQuestion(e.args.prompt);
         const label = `— ${shortenPath(e.args.path || "...")}${follow}${q ? `: "${q}"` : ""}`;
         if (!e.result) return `\n${theme.fg("warning", `${label} (pending)`)}`;
         const txt = answerText(e.result);
@@ -170,9 +179,14 @@ const visionBurstSpec = {
       })
       .join("");
   },
-  soloHeader(args: any, theme: any) {
+  soloHeader(args: any, theme: any, ctx: any) {
     const follow = args.followUp ? theme.fg("muted", " (follow-up)") : "";
-    const q = questionPreview(args.prompt, 90);
+    // Expanded shows the full question, uncapped — the 90-char preview is a
+    // compact-view aid, and the whole point of ctrl+o is to reveal what was
+    // actually asked (same rule as bash's expanded command).
+    const q = ctx?.expanded
+      ? fullQuestion(args.prompt)
+      : questionPreview(args.prompt, 90);
     return `${theme.fg("toolTitle", theme.bold("vision"))} ${theme.fg("accent", shortenPath(args.path || "..."))}${follow}${q ? ` ${theme.fg("toolOutput", `"${q}"`)}` : ""}`;
   },
   soloExpanded(entry: any, _args: any, theme: any) {

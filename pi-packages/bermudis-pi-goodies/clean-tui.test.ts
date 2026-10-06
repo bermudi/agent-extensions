@@ -260,6 +260,22 @@ describe("clean-tui vision rows", () => {
     expect(textOf(row.lastCallComponent)).toContain("Token expired");
   });
 
+  test("solo expanded shows the full question, uncapped", () => {
+    const h = visionHarness();
+    const row = h.row("vision", "v1");
+    const prompt = `head ${"m".repeat(120)} tailmarker`;
+    row.setArgs({ path: "/tmp/shot.png", prompt });
+    row.setResult({ content: [{ type: "text", text: "answer" }] });
+    // Compact view: 90-char preview cuts before the tail …
+    const collapsed = textOf(row.lastCallComponent);
+    expect(collapsed).toContain("head");
+    expect(collapsed).toContain("…");
+    expect(collapsed).not.toContain("tailmarker");
+    // … expanded: the raw question, uncapped (bash's expanded-command rule).
+    row.setExpanded(true);
+    expect(textOf(row.lastCallComponent)).toContain("tailmarker");
+  });
+
   test("follow-up annotated in the header", () => {
     const h = visionHarness();
     const row = h.row("vision", "v1");
@@ -300,6 +316,29 @@ describe("clean-tui vision rows", () => {
     const expanded = textOf(a.lastCallComponent);
     expect(expanded).toContain("answer one");
     expect(expanded).toContain("answer two");
+  });
+
+  test("grouped expanded details show full questions, uncapped", () => {
+    const h = visionHarness();
+    h.ctx.sessionManager.branch = [
+      assistantMessage(
+        { id: "a", name: "vision" },
+        { id: "b", name: "vision" },
+      ),
+    ];
+    h.emit("session_start", { reason: "resume" });
+    const a = h.row("vision", "a");
+    const b = h.row("vision", "b");
+    a.setArgs({
+      path: "/tmp/one.png",
+      prompt: `head ${"m".repeat(120)} tailmarker`,
+    });
+    b.setArgs({ path: "/tmp/two.png", prompt: "q2" });
+    a.setResult({ content: [{ type: "text", text: "answer one" }] });
+    b.setResult({ content: [{ type: "text", text: "answer two" }] });
+    // Details render only when expanded → questions show uncapped there.
+    a.setExpanded(true);
+    expect(textOf(a.lastCallComponent)).toContain("tailmarker");
   });
 
   test("solo error row keeps the error out of the collapsed header", () => {
