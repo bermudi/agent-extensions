@@ -23,10 +23,17 @@ extensions. One entry point, thirteen independent features.
 
 ## Install
 
-After publishing the package to npm:
+First install, pinned to a published version:
 
 ```bash
 pi install npm:bermudis-pi-goodies@0.27.0
+```
+
+Picking up a new release on an existing install (`pi install` is not the
+update path):
+
+```bash
+pi update --extensions
 ```
 
 Remove any old `bermudis-pi-goodies.ts` symlink before reloading Pi. Each
