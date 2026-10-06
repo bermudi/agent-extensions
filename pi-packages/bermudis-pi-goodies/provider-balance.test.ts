@@ -47,7 +47,11 @@ import providerBalance, {
   zaiQuotaToBalance,
   type BalanceAdapter,
 } from "./provider-balance.ts";
-import { resetSideBadgeState, setSideSessionModel } from "./side-state.ts";
+import {
+  resetSideBadgeState,
+  setSideLensTokens,
+  setSideSessionModel,
+} from "./side-state.ts";
 import { setGoodiesLogPathForTesting } from "./goodies-log.ts";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -2000,6 +2004,57 @@ describe("mergeSideBadgeIntoStatsLine", () => {
   test("returns undefined for an empty line", () => {
     expect(mergeSideBadgeIntoStatsLine("", 80, theme)).toBeUndefined();
   });
+
+  test("appends the lens suffix after the model readout", () => {
+    const left = "↑1k ↓2k 1.0%/100k (auto)";
+    const badge = "side: (zai) glm-5.3 • max · ~46k lensed";
+    const line = statsLine(left, "(zai) glm-5.3 • max", 80);
+    const merged = mergeSideBadgeIntoStatsLine(
+      line,
+      80,
+      theme,
+      "side: ",
+      " · ~46k lensed",
+    );
+    expect(merged).toBeDefined();
+    expect(visibleWidth(merged!)).toBe(80);
+    const padding = " ".repeat(80 - left.length - badge.length);
+    expect(stripTerminalSequences(merged!)).toBe(left + padding + badge);
+  });
+
+  test("drops the suffix before truncating the badge itself", () => {
+    // room for the bare badge (25 cols) but not badge + suffix (38 cols)
+    const left = "↑1k ↓2k 1.0%/100k (auto)";
+    const line = statsLine(left, "(zai) glm-5.3 • max", 55);
+    const merged = mergeSideBadgeIntoStatsLine(
+      line,
+      55,
+      theme,
+      "side: ",
+      " · ~46k lensed",
+    );
+    expect(merged).toBeDefined();
+    expect(visibleWidth(merged!)).toBe(55);
+    const plain = stripTerminalSequences(merged!);
+    expect(plain.endsWith("side: (zai) glm-5.3 • max")).toBe(true);
+    expect(plain).not.toContain("lensed");
+  });
+
+  test("suffix never survives when the bare badge must truncate", () => {
+    const left = "↑1k ↓2k 1.0%/100k (auto)";
+    const line = statsLine(left, "(zai) glm-5.3 • max", 45);
+    const merged = mergeSideBadgeIntoStatsLine(
+      line,
+      45,
+      theme,
+      "side: ",
+      " · ~46k lensed",
+    );
+    expect(merged).toBeDefined();
+    expect(visibleWidth(merged!)).toBe(45);
+    expect(stripTerminalSequences(merged!)).not.toContain("lensed");
+    expect(stripTerminalSequences(merged!)).toContain("side: ");
+  });
 });
 
 describe("footer side badge", () => {
@@ -2108,6 +2163,14 @@ describe("footer side badge", () => {
       lines = host.renderMounted();
       expect(lines[1]).toContain("side: kilo-model");
       expect(lines.join("\n")).not.toContain("\nside: ");
+
+      // Lens estimate present: the badge carries the honest suffix too.
+      setSideLensTokens(46_000);
+      lines = host.renderMounted();
+      expect(lines[1]).toContain("side: kilo-model · ~46k lensed");
+      setSideLensTokens(undefined);
+      lines = host.renderMounted();
+      expect(lines[1]).not.toContain("lensed");
 
       // Side session closed: badge disappears again.
       setSideSessionModel(undefined);

@@ -32,6 +32,7 @@ import {
 import { getKiloCatalogStatus, type KiloCatalogStatus } from "./kilo.ts";
 import { logGoodiesEvent, reportFailure } from "./goodies-log.ts";
 import {
+  formatSideLensSuffix,
   getSideSessionModel,
   onSideBadgeChange,
   setMergedSideBadgeInstalled,
@@ -1306,11 +1307,13 @@ const SGR_SEQUENCE = /\x1b\[[0-9;:]*m/g;
 
 /**
  * Prepend a badge to the right-aligned model readout of the stats line pi's
- * FooterComponent produced: `side: (zai) glm-5.3 • max`. The line is built
- * as `<dim statsLeft><dim padding + model>` — split at the opener of the
- * final styled run (the last SGR sequence is its closer, so the opener is
- * the second-to-last), keep the left half verbatim (it may carry a colored
- * context percentage), and rebuild the right half around the badge.
+ * FooterComponent produced: `side: (zai) glm-5.3 • max · ~46k lensed`. The
+ * line is built as `<dim statsLeft><dim padding + model>` — split at the
+ * opener of the final styled run (the last SGR sequence is its closer, so
+ * the opener is the second-to-last), keep the left half verbatim (it may
+ * carry a colored context percentage), and rebuild the right half around
+ * the badge. A suffix that does not fit is dropped before the badge itself
+ * is ever truncated — the model name outranks the token estimate.
  *
  * Returns undefined when the line lacks that two-run shape — the caller then
  * leaves the line untouched and the /side badge falls back to a status line.
@@ -1322,6 +1325,7 @@ export function mergeSideBadgeIntoStatsLine(
   width: number,
   theme: FooterTheme,
   prefix = "side: ",
+  suffix = "",
 ): string | undefined {
   if (!line || width <= 0) return undefined;
   const runs = [...line.matchAll(SGR_SEQUENCE)];
@@ -1332,14 +1336,17 @@ export function mergeSideBadgeIntoStatsLine(
   const tail = stripTerminalSequences(line.slice(opener)).trim();
   if (!tail || !stripTerminalSequences(head).trim()) return undefined;
 
-  const labeled = `${prefix}${tail}`;
+  const withSuffix = `${prefix}${tail}${suffix}`;
+  const bare = `${prefix}${tail}`;
   const headWidth = visibleWidth(head);
   const room = width - headWidth - 2; // pi keeps ≥2 columns between the halves
   if (room <= 0) return undefined;
   const right =
-    visibleWidth(labeled) <= room
-      ? labeled
-      : truncateToWidth(labeled, room, "");
+    visibleWidth(withSuffix) <= room
+      ? withSuffix
+      : visibleWidth(bare) <= room
+        ? bare
+        : truncateToWidth(bare, room, "");
   const padding = " ".repeat(
     Math.max(2, width - headWidth - visibleWidth(right)),
   );
@@ -1781,6 +1788,8 @@ export default function providerBalance(
               lines[1],
               width,
               theme,
+              "side: ",
+              formatSideLensSuffix(),
             );
             if (statsLine !== undefined) {
               lines[1] = statsLine;

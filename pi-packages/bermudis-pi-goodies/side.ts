@@ -28,9 +28,13 @@
  * limb that is ever resumed delivers only newer turns. v1 always starts a
  * fresh side limb, but the bookkeeping keeps that future-safe.
  *
- * Known cosmetic limitation: the footer's context-usage estimate reflects the
- * raw session branch, not the lens output, so it over-reports while a side
- * session is active.
+ * Known limitation: pi's footer context-usage estimate (and its pre-send
+ * compaction threshold) reflect the raw session branch, not the lens
+ * output — the footer over-reports while a side session is active, and
+ * premature auto-compaction is possible on large side consults (the lens
+ * is compaction-aware and survives it; the main limb is never touched).
+ * The side badge carries pi's own estimator applied to the lensed messages
+ * ("· ~46k lensed") as the honest counterpoint to the inflated figure.
  */
 
 import type {
@@ -43,15 +47,18 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   ModelSelectorComponent,
+  estimateTokens,
   sessionEntryToContextMessages,
 } from "@earendil-works/pi-coding-agent";
 import { describeError, extractTextParts } from "./json-file.ts";
 import { buildTrajectory, renderTrajectory } from "./copy-trajectory.ts";
 import { logGoodiesEvent } from "./goodies-log.ts";
 import {
+  formatSideLensSuffix,
   getSideSessionModel,
   isMergedSideBadgeActive,
   onSideBadgeChange,
+  setSideLensTokens,
   setSideSessionModel,
   type SideModelRef,
 } from "./side-state.ts";
@@ -298,6 +305,22 @@ export function buildLensMessages(
   return messages;
 }
 
+/**
+ * Estimate the token size of the lensed request pi will actually send
+ * (quote + side-native messages), using pi's own chars/4 estimator so the
+ * number is comparable with the footer's raw-branch estimate. Undefined
+ * when markerIdx does not mark a side session.
+ */
+export function estimateLensedContextTokens(
+  awareEntries: readonly SessionEntry[],
+  rawBranch: readonly SessionEntry[],
+  markerIdx: number,
+): number | undefined {
+  const messages = buildLensMessages(awareEntries, rawBranch, markerIdx, []);
+  if (!messages) return undefined;
+  return messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Handoff: what the main agent is given at exit
 // ---------------------------------------------------------------------------
@@ -511,7 +534,7 @@ export function applySideStatus(ctx: ExtensionContext): void {
   const model: SideModelRef | undefined = getSideSessionModel();
   const text =
     model && !isMergedSideBadgeActive()
-      ? `side: ${modelRef(model)}`
+      ? `side: ${modelRef(model)}${formatSideLensSuffix()}`
       : undefined;
   ctx.ui.setStatus("side", text);
 }
@@ -545,6 +568,26 @@ export function activeSideModel(
     }
   }
   return markerData.sideModel;
+}
+
+/**
+ * Refresh the badge's lensed-context estimate from the live branch —
+ * undefined on non-side branches, so the suffix also clears on exit and
+ * navigation. O(branch text) char counting: cheap per turn, far too hot
+ * for per-frame footer renders (those read the cached side-state value).
+ */
+function refreshSideLens(ctx: ExtensionContext): void {
+  const raw = ctx.sessionManager.getBranch();
+  const markerIdx = findSideBoundary(raw);
+  let tokens: number | undefined;
+  if (markerIdx !== -1) {
+    tokens = estimateLensedContextTokens(
+      ctx.sessionManager.buildContextEntries(),
+      raw,
+      markerIdx,
+    );
+  }
+  setSideLensTokens(tokens);
 }
 
 async function summarizeDelta(
@@ -627,6 +670,7 @@ export default function side(pi: ExtensionAPI): void {
       setSideSessionModel(undefined);
       applySideStatus(ctx);
     }
+    refreshSideLens(ctx);
   });
 
   // Restore the badge when a session resumes already on a side limb. The
@@ -650,7 +694,16 @@ export default function side(pi: ExtensionAPI): void {
       setSideSessionModel(undefined);
       applySideStatus(ctx);
     }
+    refreshSideLens(ctx);
   });
+
+  // The lensed-context estimate the badge carries: the quote is frozen at
+  // entry, so it only moves when the side limb grows, compaction rewrites
+  // the view, or navigation changes the limb. Non-side events are a cheap
+  // marker scan that ends in a no-op set.
+  pi.on("turn_start", (_event, ctx) => refreshSideLens(ctx));
+  pi.on("message_end", (_event, ctx) => refreshSideLens(ctx));
+  pi.on("session_compact", (_event, ctx) => refreshSideLens(ctx));
 
   // The footer-rendered badge needs a re-render when side state changes;
   // the status-line fallback needs re-applying when the merged footer

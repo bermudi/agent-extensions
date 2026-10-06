@@ -373,11 +373,16 @@ session. `/side-exit` closes it and chooses what the main agent receives.
 How it works:
 
 - **Badge**: while a side session is open, the footer's model readout becomes
-  `side: (zai) glm-5.3 • max` — the provider-balance footer prepends the
-  badge to the stats line instead of adding a separate `side:` status line
-  (which remains the fallback when that footer is not mounted). The readout
-  tracks mid-side ctrl+l switches, and the badge clears on exit or when
-  switching to a session that is not in a side consultation.
+  `side: (zai) glm-5.3 • max · ~46k lensed` — the provider-balance footer
+  prepends the badge to the stats line instead of adding a separate `side:`
+  status line (which remains the fallback when that footer is not mounted).
+  The `~46k lensed` suffix is the estimated size of the request the lens will
+  actually send (quote + side turns, pi's own chars/4 estimator): pi's footer
+  context-usage figure estimates the raw session branch, which the lens then
+  rewrites at the wire, so it over-reports during side sessions. The suffix
+  is dropped first when the line gets tight. The readout tracks mid-side
+  ctrl+l switches, and the badge clears on exit or when switching to a
+  session that is not in a side consultation.
 - **Entry**: `/side` opens pi's own model selector (falls back to a plain
   selector when pi's internal runtime is not reachable; in headless modes pass
   the model explicitly as `/side provider/model-id[:level]`). The main agent's

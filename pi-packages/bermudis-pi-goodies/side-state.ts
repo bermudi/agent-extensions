@@ -54,6 +54,42 @@ export function getSideSessionModel(): SideModelRef | undefined {
   return activeModel;
 }
 
+let lensTokens: number | undefined;
+
+/**
+ * side.ts: estimated token size of the LENSED request (the quote + side
+ * turns actually sent to the side model), via pi's own chars/4 estimator
+ * so it stays comparable with the footer's raw-branch figure. Undefined on
+ * non-side branches — pi's footer estimate is correct there.
+ *
+ * Why: pi's footer context-usage and pre-send compaction threshold both
+ * estimate the RAW session projection; the side lens rewrites the request
+ * at the wire, after every estimator. The footer therefore over-reports
+ * while a side session is active. The badge carries this estimate as the
+ * honest counterpoint.
+ */
+export function setSideLensTokens(tokens: number | undefined): void {
+  if (lensTokens === tokens) return;
+  lensTokens = tokens;
+  emit();
+}
+
+export function getSideLensTokens(): number | undefined {
+  return lensTokens;
+}
+
+/** Badge suffix for the lensed estimate: " · ~46k lensed", or "" when off. */
+export function formatSideLensSuffix(): string {
+  if (lensTokens === undefined || lensTokens < 1_000) return "";
+  return ` · ~${formatSideLensTokens(lensTokens)} lensed`;
+}
+
+function formatSideLensTokens(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 10_000) return `${Math.round(tokens / 1_000)}k`;
+  return `${(tokens / 1_000).toFixed(1)}k`;
+}
+
 /** provider-balance: its footer now owns (or handed back) the stats line. */
 export function setMergedSideBadgeInstalled(installed: boolean): void {
   if (mergedInstalled === installed) return;
@@ -88,6 +124,7 @@ export function onSideBadgeChange(listener: () => void): () => void {
 /** Test-only: restore the pristine module state (undefined/false/false). */
 export function resetSideBadgeState(): void {
   activeModel = undefined;
+  lensTokens = undefined;
   mergedInstalled = false;
   mergedRendered = false;
   listeners.clear();

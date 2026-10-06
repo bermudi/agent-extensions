@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import {
+  estimateTokens,
+  sessionEntryToContextMessages,
+} from "@earendil-works/pi-coding-agent";
 import type {
   CustomEntry,
   CustomMessageEntry,
@@ -12,6 +16,7 @@ import {
   buildTrajectoryHandoff,
   collectCoveredUpTo,
   deltaSideEntries,
+  estimateLensedContextTokens,
   filterExitCompletions,
   filterSideModelCompletions,
   findSideBoundary,
@@ -20,9 +25,12 @@ import {
   parseSideMarkerData,
 } from "./side.ts";
 import {
+  formatSideLensSuffix,
+  onSideBadgeChange,
   resetSideBadgeState,
   setMergedSideBadgeInstalled,
   setMergedSideBadgeRendered,
+  setSideLensTokens,
   setSideSessionModel,
 } from "./side-state.ts";
 
@@ -85,6 +93,23 @@ function handoffEntry(details: unknown, timestamp = 4): CustomMessageEntry {
     id: id(),
     parentId: "root",
     timestamp: new Date(timestamp).toISOString(),
+  };
+}
+
+function toolResultEntry(text: string, timestamp = 2): MessageEntry {
+  return {
+    type: "message",
+    id: id(),
+    parentId: "root",
+    timestamp: new Date(timestamp).toISOString(),
+    message: {
+      role: "toolResult",
+      toolCallId: "call-1",
+      toolName: "read",
+      content: [{ type: "text", text }],
+      isError: false,
+      timestamp,
+    },
   };
 }
 
@@ -562,6 +587,15 @@ describe("applySideStatus badge policy", () => {
     expect(calls).toEqual([["side", "side: zai/glm-5.3"]]);
   });
 
+  test("status line carries the lensed estimate when present", () => {
+    resetSideBadgeState();
+    setSideSessionModel({ provider: "zai", id: "glm-5.3" });
+    setSideLensTokens(46_000);
+    const { ctx, calls } = captureStatus();
+    applySideStatus(ctx);
+    expect(calls).toEqual([["side", "side: zai/glm-5.3 · ~46k lensed"]]);
+  });
+
   test("suppresses the status line while the merged footer badge is live", () => {
     resetSideBadgeState();
     setSideSessionModel({ provider: "zai", id: "glm-5.3" });
@@ -588,5 +622,88 @@ describe("applySideStatus badge policy", () => {
     const { ctx, calls } = captureStatus();
     applySideStatus(ctx);
     expect(calls).toEqual([["side", undefined]]);
+  });
+});
+
+describe("estimateLensedContextTokens", () => {
+  test("undefined when the branch is not a side session", () => {
+    const branch = [
+      userEntry("hello"),
+      assistantEntry("hi there", "anthropic/sonnet-4.5"),
+    ];
+    expect(
+      estimateLensedContextTokens(branch, branch, findSideBoundary(branch)),
+    ).toBeUndefined();
+  });
+
+  test("counts quote + side turns, not the raw branch's tool activity", () => {
+    // Tool-heavy main history: raw projection carries the tool result
+    // verbatim; the lens quote strips tool activity (buildTrajectory keeps
+    // only user/assistant text), so the lensed estimate must come out
+    // smaller — the over-report correction the badge exists for.
+    const branch: SessionEntry[] = [
+      userEntry("read the whole file and review it"),
+      assistantEntry("Reading it now.", "anthropic/sonnet-4.5"),
+      toolResultEntry("x".repeat(80_000)),
+      assistantEntry("The file is fine.", "anthropic/sonnet-4.5"),
+      markerEntry(markerData),
+      userEntry("what are your thoughts on this?"),
+      assistantEntry("Three reservations.", "kilo/glm-5.3"),
+    ];
+    const idx = findSideBoundary(branch);
+    expect(idx).toBe(4);
+
+    const lensed = estimateLensedContextTokens(branch, branch, idx);
+    expect(lensed).toBeDefined();
+    expect(lensed!).toBeGreaterThan(0);
+
+    const raw = branch
+      .flatMap((entry) => sessionEntryToContextMessages(entry))
+      .reduce((sum, message) => sum + estimateTokens(message), 0);
+    expect(lensed!).toBeLessThan(raw);
+  });
+
+  test("grows as the side limb grows", () => {
+    const base = branchWithSide();
+    const idx = findSideBoundary(base);
+    const before = estimateLensedContextTokens(base, base, idx);
+    expect(before).toBeDefined();
+
+    const grown = [...base, userEntry("one more question")];
+    const after = estimateLensedContextTokens(grown, grown, idx);
+    expect(after).toBeDefined();
+    expect(after!).toBeGreaterThan(before!);
+  });
+});
+
+describe("formatSideLensSuffix", () => {
+  test("empty while no side session (or sub-1k estimate) is active", () => {
+    resetSideBadgeState();
+    expect(formatSideLensSuffix()).toBe("");
+    setSideLensTokens(999);
+    expect(formatSideLensSuffix()).toBe("");
+  });
+
+  test("formats k and M magnitudes", () => {
+    resetSideBadgeState();
+    setSideLensTokens(46_000);
+    expect(formatSideLensSuffix()).toBe(" · ~46k lensed");
+    setSideLensTokens(9_700);
+    expect(formatSideLensSuffix()).toBe(" · ~9.7k lensed");
+    setSideLensTokens(1_234_567);
+    expect(formatSideLensSuffix()).toBe(" · ~1.2M lensed");
+  });
+
+  test("emits only when the estimate actually changes", () => {
+    resetSideBadgeState();
+    let calls = 0;
+    const off = onSideBadgeChange(() => {
+      calls++;
+    });
+    setSideLensTokens(100);
+    setSideLensTokens(100); // unchanged — no emit
+    setSideLensTokens(undefined);
+    off();
+    expect(calls).toBe(2);
   });
 });
