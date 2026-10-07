@@ -438,10 +438,13 @@ Details worth knowing:
   path. (`deliverAs: "nextTurn"` would only queue in memory and die with
   the process.)
 - The footer's context-usage estimate reflects the raw session branch, not
-  the lens output, so it over-reports while a side session is active — by
-  the full uncompacted main history at worst, shrinking after compaction
-  (the lens renders compaction summaries into the quote rather than
-  resending summarized-away turns). Compaction summaries that cover side
+  the lens output, so it can over-report while a side session is active.
+  Threshold auto-compaction is vetoed when the **lensed side request**
+  fits the side model's window (including system/tool overhead and the
+  configured token reserve), rather than trusting the main model's usage.
+  The quoted main transcript still counts toward that window. Manual
+  `/compact` and actual context-overflow recovery remain available.
+  Compaction summaries that cover side
   turns are quoted with an explicit who-is-who caveat instead of passing as
   the consultant's own history.
 - Both quote directions carry an explicit untrusted-evidence preamble:

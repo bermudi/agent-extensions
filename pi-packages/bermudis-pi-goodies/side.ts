@@ -28,11 +28,10 @@
  * limb that is ever resumed delivers only newer turns. v1 always starts a
  * fresh side limb, but the bookkeeping keeps that future-safe.
  *
- * Known limitation: pi's footer context-usage estimate (and its pre-send
- * compaction threshold) reflect the raw session branch, not the lens
- * output — the footer over-reports while a side session is active, and
- * premature auto-compaction is possible on large side consults (the lens
- * is compaction-aware and survives it; the main limb is never touched).
+ * Pi's footer context-usage estimate reflects the raw session branch, not
+ * the lens output, so the footer over-reports during side sessions. A
+ * session_before_compact guard vetoes threshold compaction when the lensed
+ * request fits; manual compaction and actual overflow recovery still run.
  * The side badge carries pi's own estimator applied to the lensed messages
  * ("· ~46k lensed") as the honest counterpoint to the inflated figure.
  */
@@ -44,11 +43,14 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
   SessionEntry,
+  ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 import {
   ModelSelectorComponent,
+  calculateContextTokens,
   estimateTokens,
   sessionEntryToContextMessages,
+  shouldCompact,
 } from "@earendil-works/pi-coding-agent";
 import { describeError, extractTextParts } from "./json-file.ts";
 import { buildTrajectory, renderTrajectory } from "./copy-trajectory.ts";
@@ -319,6 +321,50 @@ export function estimateLensedContextTokens(
   const messages = buildLensMessages(awareEntries, rawBranch, markerIdx, []);
   if (!messages) return undefined;
   return messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+}
+
+/**
+ * Conservative side-request budget. Main-model usage cannot leak into this
+ * estimate: its assistant turns have already become quoted user text.
+ * Include system/tool overhead before the first side response, and trust
+ * valid SIDE usage as a floor (it includes provider-visible overhead).
+ */
+export function estimateSideCompactionTokens(
+  messages: ContextEvent["messages"],
+  systemPrompt: string,
+  tools: readonly Pick<ToolInfo, "name" | "description" | "parameters">[],
+  rawBranch: readonly SessionEntry[],
+): number {
+  // Kept responses still carry pre-compaction usage. Match by source
+  // message identity, not timestamp: branch order is the provenance Pi uses.
+  const lastInvalidation = rawBranch.findLastIndex(
+    (entry) => entry.type === "compaction" || entry.type === "context_edit",
+  );
+  const validUsageMessages = new Set(
+    rawBranch
+      .slice(lastInvalidation + 1)
+      .flatMap((entry) => sessionEntryToContextMessages(entry)),
+  );
+  const estimated =
+    messages.reduce((sum, message) => sum + estimateTokens(message), 0) +
+    Math.ceil(systemPrompt.length / 4) +
+    Math.ceil(JSON.stringify(tools).length / 4);
+  let trailing = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!;
+    if (
+      message.role === "assistant" &&
+      validUsageMessages.has(message) &&
+      message.stopReason !== "error" &&
+      message.stopReason !== "aborted" &&
+      message.usage
+    ) {
+      const usage = calculateContextTokens(message.usage);
+      if (usage > 0) return Math.max(estimated, usage + trailing);
+    }
+    trailing += estimateTokens(message);
+  }
+  return estimated;
 }
 
 // ---------------------------------------------------------------------------
@@ -627,6 +673,52 @@ let modelRegistryRef: ExtensionContext["modelRegistry"] | undefined;
 let lastBadgeCtx: ExtensionContext | undefined;
 
 export default function side(pi: ExtensionAPI): void {
+  // Pi checks the raw projection BEFORE emitting `context`. Recheck the
+  // same threshold against our lens at its supported cancellation boundary.
+  // Never veto manual compaction or a real provider overflow.
+  pi.on("session_before_compact", (event, ctx) => {
+    if (event.reason !== "threshold" || !ctx.model) return;
+    const raw = ctx.sessionManager.getBranch();
+    const markerIdx = findSideBoundary(raw);
+    const marker = raw[markerIdx];
+    if (marker?.type !== "custom" || !parseSideMarkerData(marker.data)) return;
+    const messages = buildLensMessages(
+      ctx.sessionManager.buildContextEntries(),
+      raw,
+      markerIdx,
+      [],
+    );
+    if (!messages || ctx.model.contextWindow <= 0) return;
+    const activeTools = new Set(pi.getActiveTools());
+    const tokens = estimateSideCompactionTokens(
+      messages,
+      ctx.getSystemPrompt(),
+      pi
+        .getAllTools()
+        .filter((tool) => activeTools.has(tool.name))
+        .map(({ name, description, parameters }) => ({
+          name,
+          description,
+          parameters,
+        })),
+      raw,
+    );
+    const needed = shouldCompact(
+      tokens,
+      ctx.model.contextWindow,
+      event.preparation.settings,
+    );
+    logGoodiesEvent({
+      type: "side_compaction_check",
+      raw_tokens: event.preparation.tokensBefore,
+      side_tokens: tokens,
+      context_window: ctx.model.contextWindow,
+      reserve_tokens: event.preparation.settings.reserveTokens,
+      cancelled: !needed,
+    });
+    if (!needed) return { cancel: true };
+  });
+
   // Lens: rewrite side-agent requests so the main trajectory arrives as an
   // attributed quote instead of the side model's own history. Detection uses
   // the raw branch (the marker is always an ancestor there); content uses

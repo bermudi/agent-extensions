@@ -17,6 +17,7 @@ import {
   collectCoveredUpTo,
   deltaSideEntries,
   estimateLensedContextTokens,
+  estimateSideCompactionTokens,
   filterExitCompletions,
   filterSideModelCompletions,
   findSideBoundary,
@@ -673,6 +674,61 @@ describe("estimateLensedContextTokens", () => {
     const after = estimateLensedContextTokens(grown, grown, idx);
     expect(after).toBeDefined();
     expect(after!).toBeGreaterThan(before!);
+  });
+});
+
+describe("estimateSideCompactionTokens", () => {
+  test("includes system prompt and declared tool schemas", () => {
+    const messages = [userEntry("hi").message];
+    const tools = [
+      {
+        name: "read",
+        description: "Read a file",
+        parameters: { type: "object" },
+      },
+    ];
+    expect(
+      estimateSideCompactionTokens(messages, "system prompt", tools, []),
+    ).toBe(
+      estimateTokens(messages[0]!) +
+        Math.ceil("system prompt".length / 4) +
+        Math.ceil(JSON.stringify(tools).length / 4),
+    );
+  });
+
+  test("valid side usage plus trailing turns is a floor; failed usage is not", () => {
+    const assistant = assistantEntry("yes", "kilo/glm-5.3").message;
+    if (assistant.role !== "assistant") throw new Error("expected assistant");
+    const withUsage = {
+      ...assistant,
+      stopReason: "stop" as const,
+      usage: {
+        input: 90_000,
+        output: 100,
+        cacheRead: 1_000,
+        cacheWrite: 0,
+        totalTokens: 91_100,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    };
+    const next = userEntry("next question").message;
+    const branch: SessionEntry[] = [
+      { ...assistantEntry("", "kilo/glm-5.3"), message: withUsage },
+      { ...userEntry(""), message: next },
+    ];
+    expect(
+      estimateSideCompactionTokens([withUsage, next], "", [], branch),
+    ).toBe(91_100 + estimateTokens(next));
+    for (const stopReason of ["error", "aborted"] as const) {
+      const failed = { ...withUsage, stopReason };
+      const failedBranch: SessionEntry[] = [
+        { ...assistantEntry("", "kilo/glm-5.3"), message: failed },
+        branch[1]!,
+      ];
+      expect(
+        estimateSideCompactionTokens([failed, next], "", [], failedBranch),
+      ).toBe(estimateTokens(failed) + estimateTokens(next) + 1);
+    }
   });
 });
 
