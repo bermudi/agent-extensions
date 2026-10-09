@@ -73,6 +73,25 @@ function textOf(component: unknown): string {
   return box?.children?.map((c) => c.text ?? "").join("\n") ?? "";
 }
 
+/**
+ * Wait for an async pipeline to produce an observable condition. Fixed sleeps
+ * (setTimeout(40) + assert) flake when the full suite loads the runner — the
+ * event loop can stall past any chosen constant. Poll the real condition
+ * instead; throwing here fails the test loudly with the elapsed budget.
+ */
+async function waitFor(
+  condition: () => boolean,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 /** Fake a terminal size for the render guards that read process.stdout
  *  (bashLineCap, groupedBulletCap). Returns the restore function. */
 function setTerminalSize(size: {
@@ -2175,7 +2194,13 @@ describe("clean-tui AI summary", () => {
     h.emit("agent_start");
     const row = h.row("bash", "wire");
     row.setArgs({ command: heredoc });
-    await new Promise((r) => setTimeout(r, 40));
+    // The mocked fetch feeds the summary pipeline asynchronously; poll for
+    // the landing instead of sleeping a fixed 40ms (flaked under load).
+    await waitFor(() =>
+      textOf(row.lastCallComponent).includes(
+        "Appends reboot log to migration file",
+      ),
+    );
     expect(textOf(row.lastCallComponent)).toContain(
       "Appends reboot log to migration file",
     );
