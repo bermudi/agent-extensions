@@ -15,7 +15,8 @@
  * - /side-exit navigates back to the recorded tip, restores the main model,
  *   and hands the main agent the side conversation — also as an attributed
  *   quote — with the mode chosen at exit: trajectory (full transcript),
- *   summary (the side model summarizes), or nothing.
+ *   summary (the side model summarizes, shown as a cancellable progress
+ *   widget above the editor), or nothing.
  *
  * Durability: handoffs are appended as custom-message entries via
  * sendMessage({ triggerTurn: false }) while idle, which writes the session
@@ -640,6 +641,7 @@ async function summarizeDelta(
   ctx: ExtensionCommandContext,
   sideModel: ModelRef,
   transcript: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const model = ctx.modelRegistry.find(sideModel.provider, sideModel.id);
   if (!model) {
@@ -647,20 +649,82 @@ async function summarizeDelta(
       `${modelRef(sideModel)} is no longer available to summarize — use trajectory or nothing`,
     );
   }
-  const response = await ctx.modelRegistry.complete(model, {
-    messages: [
-      {
-        role: "user",
-        timestamp: Date.now(),
-        content: [
-          { type: "text", text: `${SUMMARY_INSTRUCTIONS}\n\n${transcript}` },
-        ],
-      },
-    ],
-  });
+  const response = await ctx.modelRegistry.complete(
+    model,
+    {
+      messages: [
+        {
+          role: "user",
+          timestamp: Date.now(),
+          content: [
+            { type: "text", text: `${SUMMARY_INSTRUCTIONS}\n\n${transcript}` },
+          ],
+        },
+      ],
+    },
+    { signal },
+  );
   const text = extractTextParts(response.content).join("\n").trim();
   if (!text) throw new Error("side model returned an empty summary");
   return text;
+}
+
+type SummaryOutcome =
+  | { ok: true; text: string }
+  | { ok: false; cancelled: true }
+  | { ok: false; cancelled: false; error: unknown };
+
+const SUMMARIZE_WIDGET_KEY = "bermudis-pi-goodies.side-summarize";
+
+/** Widget lines render above the editor; stay single-line on narrow terminals. */
+function truncateWidgetLine(text: string, max = 80): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/**
+ * Exit summarization with visible, cancellable UI: a progress widget above
+ * the editor for the whole call, Esc to abort. The picker closes the moment
+ * the mode is chosen; without these the UI then sits silent until the model
+ * answers, which reads as a freeze on long consultations.
+ *
+ * setWidget/onTerminalInput are optional-called because harness stubs and
+ * limited (non-interactive) contexts lack them; headless keeps the old
+ * no-feedback behavior, which is all it ever had.
+ */
+export async function summarizeWithProgress(
+  ctx: ExtensionCommandContext,
+  sideModel: ModelRef,
+  transcript: string,
+  turnCount: number,
+): Promise<SummaryOutcome> {
+  const abort = new AbortController();
+  const turns = `${turnCount} ${turnCount === 1 ? "turn" : "turns"}`;
+  const line = truncateWidgetLine(
+    `⟳ summarizing side consultation (${turns}) with ${modelRef(sideModel)} — esc cancels`,
+  );
+  const unsubscribe = ctx.ui?.onTerminalInput?.((data) => {
+    // A bare Esc arrives as exactly "\x1b" (pi's stdin buffer flushes a lone
+    // ESC after its escape timeout); sequences like arrow keys arrive as
+    // longer chunks and pass through untouched.
+    if (data === "\x1b") {
+      abort.abort();
+      return { consume: true };
+    }
+    return undefined;
+  });
+  ctx.ui?.setWidget?.(SUMMARIZE_WIDGET_KEY, [line]);
+  try {
+    const text = await summarizeDelta(ctx, sideModel, transcript, abort.signal);
+    return { ok: true, text };
+  } catch (error) {
+    // Any rejection after our own Esc is a cancel, whatever error shape the
+    // provider surfaces; other errors ride the fail-closed exit path.
+    if (abort.signal.aborted) return { ok: false, cancelled: true };
+    return { ok: false, cancelled: false, error };
+  } finally {
+    unsubscribe?.();
+    ctx.ui?.setWidget?.(SUMMARIZE_WIDGET_KEY, undefined);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,20 +1088,28 @@ export default function side(pi: ExtensionAPI): void {
       // mode (fail-closed) rather than exiting empty-handed.
       let summaryText: string | undefined;
       if (mode === "summary" && deltaTurns.length > 0) {
-        try {
-          summaryText = await summarizeDelta(
-            ctx,
-            effectiveSide,
-            renderTrajectory(deltaTurns),
-          );
-        } catch (error) {
-          logGoodiesEvent({
-            type: "side_summary_failed",
-            error: describeError(error),
-          });
-          ctx.ui.notify(`side-exit: ${describeError(error)}`, "error");
+        const result = await summarizeWithProgress(
+          ctx,
+          effectiveSide,
+          renderTrajectory(deltaTurns),
+          deltaTurns.length,
+        );
+        if (!result.ok) {
+          if (result.cancelled) {
+            ctx.ui.notify(
+              "side-exit: summarization cancelled — still in the side session",
+              "warning",
+            );
+          } else {
+            logGoodiesEvent({
+              type: "side_summary_failed",
+              error: describeError(result.error),
+            });
+            ctx.ui.notify(`side-exit: ${describeError(result.error)}`, "error");
+          }
           return;
         }
+        summaryText = result.text;
       }
 
       const result = await ctx.navigateTree(marker.data.mainTipId, {

@@ -6,6 +6,7 @@ import {
 import type {
   CustomEntry,
   CustomMessageEntry,
+  ExtensionCommandContext,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -24,6 +25,7 @@ import {
   parseExitMode,
   parseModelArg,
   parseSideMarkerData,
+  summarizeWithProgress,
 } from "./side.ts";
 import {
   formatSideLensSuffix,
@@ -761,5 +763,151 @@ describe("formatSideLensSuffix", () => {
     setSideLensTokens(undefined);
     off();
     expect(calls).toBe(2);
+  });
+});
+
+describe("summarizeWithProgress", () => {
+  const sideModel = { provider: "kilo", id: "glm-5.3" };
+  const WIDGET_KEY = "bermudis-pi-goodies.side-summarize";
+  const reply = {
+    content: [{ type: "text", text: "The consultant agreed." }],
+  };
+
+  function deferred<T>(): {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (error: unknown) => void;
+  } {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  type InputHandler = (
+    data: string,
+  ) => { consume?: boolean; data?: string } | undefined;
+
+  function fakeCtx(complete: (signal?: AbortSignal) => Promise<unknown>): {
+    ctx: ExtensionCommandContext;
+    widgets: Array<[string, string[] | undefined]>;
+    getInput: () => InputHandler | undefined;
+    isUnsubscribed: () => boolean;
+  } {
+    const widgets: Array<[string, string[] | undefined]> = [];
+    let inputHandler: InputHandler | undefined;
+    let unsubscribed = false;
+    const ctx = {
+      hasUI: true,
+      ui: {
+        setWidget(key: string, content: string[] | undefined) {
+          widgets.push([key, content]);
+        },
+        onTerminalInput(handler: InputHandler) {
+          inputHandler = handler;
+          return () => {
+            unsubscribed = true;
+          };
+        },
+      },
+      modelRegistry: {
+        find: () => ({ provider: sideModel.provider, id: sideModel.id }),
+        complete: (
+          _model: unknown,
+          _context: unknown,
+          options?: { signal?: AbortSignal },
+        ) => complete(options?.signal),
+      },
+    } as unknown as ExtensionCommandContext;
+    return {
+      ctx,
+      widgets,
+      getInput: () => inputHandler,
+      isUnsubscribed: () => unsubscribed,
+    };
+  }
+
+  test("shows a progress widget for the whole call, then cleans up", async () => {
+    const gate = deferred<unknown>();
+    const h = fakeCtx(() => gate.promise);
+    const pending = summarizeWithProgress(h.ctx, sideModel, "transcript", 3);
+    // summarizeWithProgress runs its UI setup synchronously before the first
+    // await, so the widget is already up while the call is in flight — the
+    // whole point: the UI must move the moment the picker closes.
+    expect(h.widgets).toEqual([
+      [
+        WIDGET_KEY,
+        [
+          expect.stringContaining(
+            "summarizing side consultation (3 turns) with kilo/glm-5.3",
+          ),
+        ],
+      ],
+    ]);
+    expect(h.widgets[0]?.[1]?.[0]).toContain("esc cancels");
+    gate.resolve(reply);
+    const result = await pending;
+    expect(result).toEqual({ ok: true, text: "The consultant agreed." });
+    expect(h.widgets[h.widgets.length - 1]).toEqual([WIDGET_KEY, undefined]);
+    expect(h.isUnsubscribed()).toBe(true);
+  });
+
+  test("Esc aborts the call and reports cancelled, still cleaning up", async () => {
+    const h = fakeCtx(
+      (signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(new Error("Request was aborted")),
+            { once: true },
+          );
+        }),
+    );
+    const pending = summarizeWithProgress(h.ctx, sideModel, "transcript", 1);
+    const handler = h.getInput();
+    expect(handler).toBeDefined();
+    // Only a bare Esc cancels; escape sequences must pass through.
+    expect(handler("\x1b[A")).toBeUndefined();
+    expect(handler("\x1b[<u")).toBeUndefined();
+    expect(handler("\x1b")).toEqual({ consume: true });
+    const result = await pending;
+    expect(result).toEqual({ ok: false, cancelled: true });
+    expect(h.widgets[h.widgets.length - 1]).toEqual([WIDGET_KEY, undefined]);
+    expect(h.isUnsubscribed()).toBe(true);
+  });
+
+  test("non-abort failures surface as errors, not cancels", async () => {
+    const h = fakeCtx(() => Promise.reject(new Error("429 slow down")));
+    const result = await summarizeWithProgress(h.ctx, sideModel, "t", 2);
+    if (result.ok || result.cancelled) {
+      throw new Error("expected the error outcome");
+    }
+    expect((result.error as Error).message).toBe("429 slow down");
+    expect(h.widgets[h.widgets.length - 1]).toEqual([WIDGET_KEY, undefined]);
+    expect(h.isUnsubscribed()).toBe(true);
+  });
+
+  test("works without UI methods (headless/limited contexts)", async () => {
+    const ctx = {
+      hasUI: false,
+      modelRegistry: {
+        find: () => ({ provider: sideModel.provider, id: sideModel.id }),
+        complete: () => Promise.resolve(reply),
+      },
+    } as unknown as ExtensionCommandContext;
+    const result = await summarizeWithProgress(ctx, sideModel, "t", 1);
+    expect(result).toEqual({ ok: true, text: "The consultant agreed." });
+  });
+
+  test("the progress line never wraps on narrow terminals", async () => {
+    const longModel = { provider: "kilo", id: "x".repeat(120) };
+    const h = fakeCtx(() => Promise.resolve(reply));
+    await summarizeWithProgress(h.ctx, longModel, "t", 12);
+    const line = h.widgets[0]?.[1]?.[0] ?? "";
+    expect(line.length).toBeLessThanOrEqual(80);
+    expect(line.endsWith("…")).toBe(true);
   });
 });
