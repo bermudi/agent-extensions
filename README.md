@@ -51,7 +51,6 @@ This is a bundle of independent features sharing one Pi extension entry point:
 |---|---|---|
 | `copy-with-model` | `/copy-with-model` | Copies the last assistant reply as a fenced code block tagged with the model name. Supports common Linux, macOS, and Windows clipboard paths, with an OSC 52 fallback. |
 | `name-with-ai` | `/name-with-ai [name]` | Generates a short session name from the first user message, or sets a supplied name directly. Uses the current Pi model. |
-| `zed` | `/z` | Opens the current working directory in a new Zed window. Uses `zeditor` on Linux and `zed` elsewhere. |
 | `prefer-tools` | `tool_call` hook | Blocks `rm` in command position in favor of `trash`, and blocks bare `python`, `pip`, `pytest`, and `mypy` in favor of `uv`. Quoted text, heredocs, arguments, and similar non-command occurrences are ignored. |
 | `kilo` | Provider / `/login kilo` | Adds the Kilo Gateway provider, including a free-router fallback, cached authenticated catalog refresh, device-code login, and OpenRouter-compatible routing. |
 | `provider-balance` | Footer | Displays Kilo or OpenRouter credits, z.ai token-plan quota, or OpenAI Codex subscription quota beside the working-directory footer line when authenticated. |
