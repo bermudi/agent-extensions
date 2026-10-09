@@ -2125,9 +2125,9 @@ Instructions:
     endReviewInProgress = true;
     try {
       const choice = await ctx.ui.select("Finish review:", [
-        "Return only",
         "Return and fix findings",
         "Return and summarize",
+        "Return only",
       ]);
 
       if (choice === undefined) {
