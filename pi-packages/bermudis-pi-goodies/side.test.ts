@@ -910,4 +910,68 @@ describe("summarizeWithProgress", () => {
     expect(line.length).toBeLessThanOrEqual(80);
     expect(line.endsWith("…")).toBe(true);
   });
+
+  test("a resolved aborted completion reports cancelled, not success", async () => {
+    // complete() RESOLVES aborted calls with partial text (retryAssistantCall
+    // returns the partial message as-is) rather than rejecting, so the
+    // abort-signal check in the catch never fires on this path — the
+    // stopReason check in summarizeDelta must carry the cancel instead.
+    const partial = {
+      stopReason: "aborted" as const,
+      content: [{ type: "text", text: "Partial summary be" }],
+    };
+    const h = fakeCtx(() => Promise.resolve(partial));
+    const result = await summarizeWithProgress(h.ctx, sideModel, "t", 2);
+    expect(result).toEqual({ ok: false, cancelled: true });
+    expect(h.widgets[h.widgets.length - 1]).toEqual([WIDGET_KEY, undefined]);
+    expect(h.isUnsubscribed()).toBe(true);
+  });
+
+  test("a resolved errored completion with partial text fails closed, not as a summary", async () => {
+    // A transient provider error mid-stream also RESOLVES, with stopReason
+    // "error" and the partial text preserved. It must not be delivered as a
+    // complete summary: it has to ride the fail-closed error path.
+    const partial = {
+      stopReason: "error" as const,
+      errorMessage: "upstream connection reset",
+      content: [{ type: "text", text: "Truncated summary wi" }],
+    };
+    const h = fakeCtx(() => Promise.resolve(partial));
+    const result = await summarizeWithProgress(h.ctx, sideModel, "t", 2);
+    expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ cancelled: false });
+    expect(h.isUnsubscribed()).toBe(true);
+  });
+
+  test("the progress line fits a narrow terminal's real width", async () => {
+    // Pi renders string-array widgets as Text(line, 1, 0): one column of
+    // side padding, so the line must fit (columns − 2) to stay single-line.
+    const cols = process.stdout.columns;
+    Object.defineProperty(process.stdout, "columns", {
+      value: 40,
+      configurable: true,
+      writable: true,
+      enumerable: true,
+    });
+    try {
+      const longModel = { provider: "kilo", id: "x".repeat(120) };
+      const h = fakeCtx(() => Promise.resolve(reply));
+      await summarizeWithProgress(h.ctx, longModel, "t", 12);
+      const line = h.widgets[0]?.[1]?.[0] ?? "";
+      expect(line.length).toBeLessThanOrEqual(38);
+      expect(line.endsWith("…")).toBe(true);
+    } finally {
+      if (cols === undefined) {
+        delete (process.stdout as unknown as Record<string, unknown>)
+          .columns;
+      } else {
+        Object.defineProperty(process.stdout, "columns", {
+          value: cols,
+          configurable: true,
+          writable: true,
+          enumerable: true,
+        });
+      }
+    }
+  });
 });

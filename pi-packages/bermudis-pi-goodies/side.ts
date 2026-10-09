@@ -637,6 +637,19 @@ function refreshSideLens(ctx: ExtensionContext): void {
   setSideLensTokens(tokens);
 }
 
+/**
+ * The summarizer's completion resolved with stopReason "aborted" (partial
+ * text after an Esc) instead of rejecting — the caller's abort-signal check
+ * never fires on that path, so this sentinel carries the cancel out to the
+ * SummaryOutcome boundary below.
+ */
+class SummaryAbortedError extends Error {
+  constructor() {
+    super("side model summary was aborted");
+    this.name = "SummaryAbortedError";
+  }
+}
+
 async function summarizeDelta(
   ctx: ExtensionCommandContext,
   sideModel: ModelRef,
@@ -665,6 +678,17 @@ async function summarizeDelta(
     { signal },
   );
   const text = extractTextParts(response.content).join("\n").trim();
+  // complete() RESOLVES failed and aborted calls (providers mark stopReason
+  // "error" or "aborted" and keep the partial text) rather than rejecting.
+  // Left alone, a truncated reply would reach the main agent as a finished
+  // summary. "aborted" becomes the cancel sentinel; "error" becomes a real
+  // failure so it rides the fail-closed exit path with the provider's message.
+  if (response.stopReason === "aborted") throw new SummaryAbortedError();
+  if (response.stopReason === "error") {
+    throw new Error(
+      `side model summary failed: ${response.errorMessage ?? "unknown error"}`,
+    );
+  }
   if (!text) throw new Error("side model returned an empty summary");
   return text;
 }
@@ -676,8 +700,25 @@ type SummaryOutcome =
 
 const SUMMARIZE_WIDGET_KEY = "bermudis-pi-goodies.side-summarize";
 
+/** Fallback budget when there is no TTY to measure (tests, piped output). */
+const WIDGET_LINE_FALLBACK_WIDTH = 80;
+
+/**
+ * Visible budget for the summarize progress line. Pi renders string-array
+ * widgets as Text(line, 1, 0) — one column of side padding — so the line
+ * wraps past (terminal width − 2). Without a TTY fall back to the
+ * historical 80 and never grow past it, so known-width terminals only ever
+ * truncate harder (same pattern as clean-tui's bashLineCap).
+ */
+function widgetLineCap(): number {
+  const cols = process.stdout.columns;
+  if (typeof cols !== "number" || cols <= 0)
+    return WIDGET_LINE_FALLBACK_WIDTH;
+  return Math.max(20, Math.min(WIDGET_LINE_FALLBACK_WIDTH, cols - 2));
+}
+
 /** Widget lines render above the editor; stay single-line on narrow terminals. */
-function truncateWidgetLine(text: string, max = 80): string {
+function truncateWidgetLine(text: string, max = widgetLineCap()): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
@@ -717,9 +758,13 @@ export async function summarizeWithProgress(
     const text = await summarizeDelta(ctx, sideModel, transcript, abort.signal);
     return { ok: true, text };
   } catch (error) {
-    // Any rejection after our own Esc is a cancel, whatever error shape the
-    // provider surfaces; other errors ride the fail-closed exit path.
-    if (abort.signal.aborted) return { ok: false, cancelled: true };
+    // Cancellation reaches here two ways: our own Esc (signal aborted, which
+    // may surface as a rejection or a resolved "aborted" message that
+    // summarizeDelta turns into the sentinel). Either way the user asked to
+    // stop, so it rides the stay-in-side-session path. Every other error,
+    // including a resolved "error" message, rides the fail-closed exit path.
+    if (abort.signal.aborted || error instanceof SummaryAbortedError)
+      return { ok: false, cancelled: true };
     return { ok: false, cancelled: false, error };
   } finally {
     unsubscribe?.();
