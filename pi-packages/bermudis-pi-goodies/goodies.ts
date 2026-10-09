@@ -34,7 +34,6 @@ type FeatureName =
   | "copy-with-model"
   | "copy-trajectory"
   | "name-with-ai"
-  | "zed"
   | "prefer-tools"
   | "keep-model"
   | "model-thinking"
@@ -50,7 +49,6 @@ const FEATURES: FeatureName[] = [
   "copy-with-model",
   "copy-trajectory",
   "name-with-ai",
-  "zed",
   "prefer-tools",
   "keep-model",
   "model-thinking",

@@ -6,7 +6,6 @@
  *   - copy-with-model  /copy-with-model  copy last reply tagged with the model
  *   - copy-trajectory  /copy-trajectory  copy the whole conversation (text only) to the clipboard
  *   - name-with-ai     /name-with-ai     generate a session name via the model
- *   - zed              /z                open Zed on cwd
  *   - prefer-tools     hook              block legacy tools (trash/uv; blocks rg on glm-5.*)
  *   - keep-model       hook              preserve the active model across /new
  *   - model-thinking   /model-thinking   per-model default thinking levels, applied on switch
@@ -38,7 +37,6 @@ import tps from "./tps.ts";
 import vision from "./vision.ts";
 import side from "./side.ts";
 import nameWithAi from "./name-with-ai.ts";
-import zed from "./zed.ts";
 import preferTools from "./prefer-tools.ts";
 import goodies, { isEnabled } from "./goodies.ts";
 import { setCleanTuiActive } from "./clean-tui.ts";
@@ -51,7 +49,6 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   if (isEnabled("copy-with-model")) copyWithModel(pi);
   if (isEnabled("copy-trajectory")) copyTrajectory(pi);
   if (isEnabled("name-with-ai")) nameWithAi(pi);
-  if (isEnabled("zed")) zed(pi);
   if (isEnabled("prefer-tools")) preferTools(pi);
   if (isEnabled("keep-model")) keepModelOnNew(pi);
   if (isEnabled("model-thinking")) modelThinking(pi);
