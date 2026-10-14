@@ -48,6 +48,12 @@
  *   after the abort is discarded and the review state is cleared, so a stale
  *   {active: true} entry can't resurrect the review widget (pi exposes no
  *   cancellation for an in-flight navigateTree summarization)
+ * - RPC-host compatibility (T3 Code drives Pi with --mode rpc, where
+ *   ctx.ui.custom resolves to undefined and /review silently cancelled):
+ *   the preset, base-branch, and commit selectors fall back to plain
+ *   ctx.ui.select dialogs when ctx.mode !== "tui", the end-review loader
+ *   only renders in TUI mode, and the review widget renders as string
+ *   lines outside the TUI
  */
 
 import type {
@@ -99,6 +105,15 @@ function setReviewWidget(ctx: ExtensionContext, active: boolean) {
   if (!ctx.hasUI) return;
   if (!active) {
     ctx.ui.setWidget("review", undefined);
+    return;
+  }
+
+  // Component factories only render in the TUI; RPC hosts like T3 Code show
+  // the plain string lines instead.
+  if (ctx.mode !== "tui") {
+    ctx.ui.setWidget("review", [
+      "Review session active, return with /end-review",
+    ]);
     return;
   }
 
@@ -846,6 +861,37 @@ function getUserFacingHint(target: ReviewTarget): string {
   }
 }
 
+/**
+ * One ctx.ui.select option: the plain dialog has no description column, so
+ * the description rides inline in the label.
+ */
+export function selectOptionLabel(label: string, description?: string): string {
+  const trimmed = description?.trim();
+  return trimmed ? `${label} ${trimmed}` : label;
+}
+
+/**
+ * Build ctx.ui.select options from value/label/description items and a
+ * lookup that maps a chosen option back to its value. Used by the selectors'
+ * non-TUI fallbacks, where ctx.ui.custom components can't render (RPC hosts
+ * like T3 Code) and only plain dialogs are available. The recommended index
+ * gets a " (recommended)" suffix since plain dialogs can't preselect.
+ */
+export function buildSelectOptions<T extends string>(
+  items: ReadonlyArray<{ value: T; label: string; description?: string }>,
+  recommendedIndex = -1,
+): { options: string[]; valueFor: (option: string) => T | undefined } {
+  const valueByOption = new Map<string, T>();
+  const options = items.map((item, index) => {
+    const option = selectOptionLabel(item.label, item.description);
+    const marked =
+      index === recommendedIndex ? `${option} (recommended)` : option;
+    valueByOption.set(marked, item.value);
+    return marked;
+  });
+  return { options, valueFor: (option: string) => valueByOption.get(option) };
+}
+
 // Review preset options for the selector (keep this order stable)
 const REVIEW_PRESETS = [
   {
@@ -1162,56 +1208,79 @@ export default function reviewExtension(pi: ExtensionAPI) {
         },
       ];
 
-      const result = await ctx.ui.custom<ReviewPresetValue | null>(
-        (tui, theme, _kb, done) => {
-          const container = new Container();
-          container.addChild(
-            new DynamicBorder((str) => theme.fg("accent", str)),
-          );
-          container.addChild(
-            new Text(theme.fg("accent", theme.bold("Select a review preset"))),
-          );
+      let result: ReviewPresetValue | null;
+      if (ctx.mode === "tui") {
+        result = await ctx.ui.custom<ReviewPresetValue | null>(
+          (tui, theme, _kb, done) => {
+            const container = new Container();
+            container.addChild(
+              new DynamicBorder((str) => theme.fg("accent", str)),
+            );
+            container.addChild(
+              new Text(
+                theme.fg("accent", theme.bold("Select a review preset")),
+              ),
+            );
 
-          const selectList = new SelectList(items, Math.min(items.length, 10), {
-            selectedPrefix: (text) => theme.fg("accent", text),
-            selectedText: (text) => theme.fg("accent", text),
-            description: (text) => theme.fg("muted", text),
-            scrollInfo: (text) => theme.fg("dim", text),
-            noMatch: (text) => theme.fg("warning", text),
-          });
+            const selectList = new SelectList(
+              items,
+              Math.min(items.length, 10),
+              {
+                selectedPrefix: (text) => theme.fg("accent", text),
+                selectedText: (text) => theme.fg("accent", text),
+                description: (text) => theme.fg("muted", text),
+                scrollInfo: (text) => theme.fg("dim", text),
+                noMatch: (text) => theme.fg("warning", text),
+              },
+            );
 
-          // Preselect the smart default without reordering the list
-          if (smartDefaultIndex >= 0) {
-            selectList.setSelectedIndex(smartDefaultIndex);
-          }
+            // Preselect the smart default without reordering the list
+            if (smartDefaultIndex >= 0) {
+              selectList.setSelectedIndex(smartDefaultIndex);
+            }
 
-          selectList.onSelect = (item) => done(item.value as ReviewPresetValue);
-          selectList.onCancel = () => done(null);
+            selectList.onSelect = (item) =>
+              done(item.value as ReviewPresetValue);
+            selectList.onCancel = () => done(null);
 
-          container.addChild(selectList);
-          container.addChild(
-            new Text(
-              theme.fg("dim", "Press enter to confirm or esc to go back"),
-            ),
-          );
-          container.addChild(
-            new DynamicBorder((str) => theme.fg("accent", str)),
-          );
+            container.addChild(selectList);
+            container.addChild(
+              new Text(
+                theme.fg("dim", "Press enter to confirm or esc to go back"),
+              ),
+            );
+            container.addChild(
+              new DynamicBorder((str) => theme.fg("accent", str)),
+            );
 
-          return {
-            render(width: number) {
-              return container.render(width);
-            },
-            invalidate() {
-              container.invalidate();
-            },
-            handleInput(data: string) {
-              selectList.handleInput(data);
-              tui.requestRender();
-            },
-          };
-        },
-      );
+            return {
+              render(width: number) {
+                return container.render(width);
+              },
+              invalidate() {
+                container.invalidate();
+              },
+              handleInput(data: string) {
+                selectList.handleInput(data);
+                tui.requestRender();
+              },
+            };
+          },
+        );
+      } else {
+        // Outside the TUI (RPC hosts like T3 Code) ctx.ui.custom resolves to
+        // undefined, so use the plain select dialog, which works everywhere.
+        const { options, valueFor } = buildSelectOptions<ReviewPresetValue>(
+          items.map((item) => ({
+            value: item.value as ReviewPresetValue,
+            label: item.label,
+            description: item.description,
+          })),
+          smartDefaultIndex,
+        );
+        const selected = await ctx.ui.select("Select a review preset", options);
+        result = selected === undefined ? null : (valueFor(selected) ?? null);
+      }
 
       if (!result) return null;
 
@@ -1335,102 +1404,119 @@ export default function reviewExtension(pi: ExtensionAPI) {
       return { value: branch, label: branch, description };
     });
 
-    const result = await ctx.ui.custom<string | null>(
-      (tui, theme, keybindings, done) => {
-        const container = new Container();
-        container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-        container.addChild(
-          new Text(theme.fg("accent", theme.bold("Select base branch"))),
-        );
-
-        const searchInput = new Input();
-        container.addChild(searchInput);
-        container.addChild(new Spacer(1));
-
-        const listContainer = new Container();
-        container.addChild(listContainer);
-        container.addChild(
-          new Text(
-            theme.fg("dim", "Type to filter • enter to select • esc to cancel"),
-          ),
-        );
-        container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-
-        let filteredItems = items;
-        let selectList: SelectList | null = null;
-
-        const updateList = () => {
-          listContainer.clear();
-          if (filteredItems.length === 0) {
-            listContainer.addChild(
-              new Text(theme.fg("warning", "  No matching branches")),
-            );
-            selectList = null;
-            return;
-          }
-
-          selectList = new SelectList(
-            filteredItems,
-            Math.min(filteredItems.length, 10),
-            {
-              selectedPrefix: (text) => theme.fg("accent", text),
-              selectedText: (text) => theme.fg("accent", text),
-              description: (text) => theme.fg("muted", text),
-              scrollInfo: (text) => theme.fg("dim", text),
-              noMatch: (text) => theme.fg("warning", text),
-            },
+    let result: string | null;
+    if (ctx.mode === "tui") {
+      result = await ctx.ui.custom<string | null>(
+        (tui, theme, keybindings, done) => {
+          const container = new Container();
+          container.addChild(
+            new DynamicBorder((str) => theme.fg("accent", str)),
+          );
+          container.addChild(
+            new Text(theme.fg("accent", theme.bold("Select base branch"))),
           );
 
-          selectList.onSelect = (item) => done(item.value);
-          selectList.onCancel = () => done(null);
-          listContainer.addChild(selectList);
-        };
+          const searchInput = new Input();
+          container.addChild(searchInput);
+          container.addChild(new Spacer(1));
 
-        const applyFilter = () => {
-          const query = searchInput.getValue();
-          filteredItems = query
-            ? fuzzyFilter(
-                items,
-                query,
-                (item) =>
-                  `${item.label} ${item.value} ${item.description ?? ""}`,
-              )
-            : items;
-          updateList();
-        };
+          const listContainer = new Container();
+          container.addChild(listContainer);
+          container.addChild(
+            new Text(
+              theme.fg(
+                "dim",
+                "Type to filter • enter to select • esc to cancel",
+              ),
+            ),
+          );
+          container.addChild(
+            new DynamicBorder((str) => theme.fg("accent", str)),
+          );
 
-        applyFilter();
+          let filteredItems = items;
+          let selectList: SelectList | null = null;
 
-        return {
-          render(width: number) {
-            return container.render(width);
-          },
-          invalidate() {
-            container.invalidate();
-          },
-          handleInput(data: string) {
-            if (
-              keybindings.matches(data, "tui.select.up") ||
-              keybindings.matches(data, "tui.select.down") ||
-              keybindings.matches(data, "tui.select.confirm") ||
-              keybindings.matches(data, "tui.select.cancel")
-            ) {
-              if (selectList) {
-                selectList.handleInput(data);
-              } else if (keybindings.matches(data, "tui.select.cancel")) {
-                done(null);
-              }
-              tui.requestRender();
+          const updateList = () => {
+            listContainer.clear();
+            if (filteredItems.length === 0) {
+              listContainer.addChild(
+                new Text(theme.fg("warning", "  No matching branches")),
+              );
+              selectList = null;
               return;
             }
 
-            searchInput.handleInput(data);
-            applyFilter();
-            tui.requestRender();
-          },
-        };
-      },
-    );
+            selectList = new SelectList(
+              filteredItems,
+              Math.min(filteredItems.length, 10),
+              {
+                selectedPrefix: (text) => theme.fg("accent", text),
+                selectedText: (text) => theme.fg("accent", text),
+                description: (text) => theme.fg("muted", text),
+                scrollInfo: (text) => theme.fg("dim", text),
+                noMatch: (text) => theme.fg("warning", text),
+              },
+            );
+
+            selectList.onSelect = (item) => done(item.value);
+            selectList.onCancel = () => done(null);
+            listContainer.addChild(selectList);
+          };
+
+          const applyFilter = () => {
+            const query = searchInput.getValue();
+            filteredItems = query
+              ? fuzzyFilter(
+                  items,
+                  query,
+                  (item) =>
+                    `${item.label} ${item.value} ${item.description ?? ""}`,
+                )
+              : items;
+            updateList();
+          };
+
+          applyFilter();
+
+          return {
+            render(width: number) {
+              return container.render(width);
+            },
+            invalidate() {
+              container.invalidate();
+            },
+            handleInput(data: string) {
+              if (
+                keybindings.matches(data, "tui.select.up") ||
+                keybindings.matches(data, "tui.select.down") ||
+                keybindings.matches(data, "tui.select.confirm") ||
+                keybindings.matches(data, "tui.select.cancel")
+              ) {
+                if (selectList) {
+                  selectList.handleInput(data);
+                } else if (keybindings.matches(data, "tui.select.cancel")) {
+                  done(null);
+                }
+                tui.requestRender();
+                return;
+              }
+
+              searchInput.handleInput(data);
+              applyFilter();
+              tui.requestRender();
+            },
+          };
+        },
+      );
+    } else {
+      // Outside the TUI (RPC hosts like T3 Code) ctx.ui.custom resolves to
+      // undefined, so offer the branches as a plain select dialog. The
+      // fuzzy filter is lost — descriptions ride inline in the labels.
+      const { options, valueFor } = buildSelectOptions(items);
+      const selected = await ctx.ui.select("Select base branch", options);
+      result = selected === undefined ? null : (valueFor(selected) ?? null);
+    }
 
     if (!result) return null;
     return { type: "baseBranch", branch: result };
@@ -1455,109 +1541,129 @@ export default function reviewExtension(pi: ExtensionAPI) {
       description: "",
     }));
 
-    const result = await ctx.ui.custom<{ sha: string; title: string } | null>(
-      (tui, theme, keybindings, done) => {
-        const container = new Container();
-        container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-        container.addChild(
-          new Text(theme.fg("accent", theme.bold("Select commit to review"))),
-        );
-
-        const searchInput = new Input();
-        container.addChild(searchInput);
-        container.addChild(new Spacer(1));
-
-        const listContainer = new Container();
-        container.addChild(listContainer);
-        container.addChild(
-          new Text(
-            theme.fg("dim", "Type to filter • enter to select • esc to cancel"),
-          ),
-        );
-        container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-
-        let filteredItems = items;
-        let selectList: SelectList | null = null;
-
-        const updateList = () => {
-          listContainer.clear();
-          if (filteredItems.length === 0) {
-            listContainer.addChild(
-              new Text(theme.fg("warning", "  No matching commits")),
-            );
-            selectList = null;
-            return;
-          }
-
-          selectList = new SelectList(
-            filteredItems,
-            Math.min(filteredItems.length, 10),
-            {
-              selectedPrefix: (text) => theme.fg("accent", text),
-              selectedText: (text) => theme.fg("accent", text),
-              description: (text) => theme.fg("muted", text),
-              scrollInfo: (text) => theme.fg("dim", text),
-              noMatch: (text) => theme.fg("warning", text),
-            },
+    let result: { sha: string; title: string } | null;
+    if (ctx.mode === "tui") {
+      result = await ctx.ui.custom<{ sha: string; title: string } | null>(
+        (tui, theme, keybindings, done) => {
+          const container = new Container();
+          container.addChild(
+            new DynamicBorder((str) => theme.fg("accent", str)),
+          );
+          container.addChild(
+            new Text(theme.fg("accent", theme.bold("Select commit to review"))),
           );
 
-          selectList.onSelect = (item) => {
-            const commit = commits.find((c) => c.sha === item.value);
-            if (commit) {
-              done(commit);
-            } else {
-              done(null);
-            }
-          };
-          selectList.onCancel = () => done(null);
-          listContainer.addChild(selectList);
-        };
+          const searchInput = new Input();
+          container.addChild(searchInput);
+          container.addChild(new Spacer(1));
 
-        const applyFilter = () => {
-          const query = searchInput.getValue();
-          filteredItems = query
-            ? fuzzyFilter(
-                items,
-                query,
-                (item) =>
-                  `${item.label} ${item.value} ${item.description ?? ""}`,
-              )
-            : items;
-          updateList();
-        };
+          const listContainer = new Container();
+          container.addChild(listContainer);
+          container.addChild(
+            new Text(
+              theme.fg(
+                "dim",
+                "Type to filter • enter to select • esc to cancel",
+              ),
+            ),
+          );
+          container.addChild(
+            new DynamicBorder((str) => theme.fg("accent", str)),
+          );
 
-        applyFilter();
+          let filteredItems = items;
+          let selectList: SelectList | null = null;
 
-        return {
-          render(width: number) {
-            return container.render(width);
-          },
-          invalidate() {
-            container.invalidate();
-          },
-          handleInput(data: string) {
-            if (
-              keybindings.matches(data, "tui.select.up") ||
-              keybindings.matches(data, "tui.select.down") ||
-              keybindings.matches(data, "tui.select.confirm") ||
-              keybindings.matches(data, "tui.select.cancel")
-            ) {
-              if (selectList) {
-                selectList.handleInput(data);
-              } else if (keybindings.matches(data, "tui.select.cancel")) {
-                done(null);
-              }
-              tui.requestRender();
+          const updateList = () => {
+            listContainer.clear();
+            if (filteredItems.length === 0) {
+              listContainer.addChild(
+                new Text(theme.fg("warning", "  No matching commits")),
+              );
+              selectList = null;
               return;
             }
 
-            searchInput.handleInput(data);
-            applyFilter();
-            tui.requestRender();
-          },
-        };
-      },
-    );
+            selectList = new SelectList(
+              filteredItems,
+              Math.min(filteredItems.length, 10),
+              {
+                selectedPrefix: (text) => theme.fg("accent", text),
+                selectedText: (text) => theme.fg("accent", text),
+                description: (text) => theme.fg("muted", text),
+                scrollInfo: (text) => theme.fg("dim", text),
+                noMatch: (text) => theme.fg("warning", text),
+              },
+            );
+
+            selectList.onSelect = (item) => {
+              const commit = commits.find((c) => c.sha === item.value);
+              if (commit) {
+                done(commit);
+              } else {
+                done(null);
+              }
+            };
+            selectList.onCancel = () => done(null);
+            listContainer.addChild(selectList);
+          };
+
+          const applyFilter = () => {
+            const query = searchInput.getValue();
+            filteredItems = query
+              ? fuzzyFilter(
+                  items,
+                  query,
+                  (item) =>
+                    `${item.label} ${item.value} ${item.description ?? ""}`,
+                )
+              : items;
+            updateList();
+          };
+
+          applyFilter();
+
+          return {
+            render(width: number) {
+              return container.render(width);
+            },
+            invalidate() {
+              container.invalidate();
+            },
+            handleInput(data: string) {
+              if (
+                keybindings.matches(data, "tui.select.up") ||
+                keybindings.matches(data, "tui.select.down") ||
+                keybindings.matches(data, "tui.select.confirm") ||
+                keybindings.matches(data, "tui.select.cancel")
+              ) {
+                if (selectList) {
+                  selectList.handleInput(data);
+                } else if (keybindings.matches(data, "tui.select.cancel")) {
+                  done(null);
+                }
+                tui.requestRender();
+                return;
+              }
+
+              searchInput.handleInput(data);
+              applyFilter();
+              tui.requestRender();
+            },
+          };
+        },
+      );
+    } else {
+      // Outside the TUI (RPC hosts like T3 Code) ctx.ui.custom resolves to
+      // undefined, so offer the recent commits as a plain select dialog.
+      const { options, valueFor } = buildSelectOptions(
+        items.map((item) => ({ value: item.value, label: item.label })),
+      );
+      const selected = await ctx.ui.select("Select commit to review", options);
+      const sha = selected === undefined ? undefined : valueFor(selected);
+      const commit = commits.find((c) => c.sha === sha);
+      result = commit ? { sha: commit.sha, title: commit.title } : null;
+    }
 
     if (!result) return null;
     return { type: "commit", sha: result.sha, title: result.title };
@@ -1932,7 +2038,9 @@ Instructions:
     originId: string,
     showLoader: boolean,
   ): Promise<{ cancelled: boolean; error?: string } | null> {
-    if (showLoader && ctx.hasUI) {
+    // The loader is a ctx.ui.custom component, which only renders in the
+    // TUI; RPC hosts (T3 Code) get undefined back, so there navigate directly.
+    if (showLoader && ctx.mode === "tui") {
       return ctx.ui.custom<{ cancelled: boolean; error?: string } | null>(
         (tui, theme, _kb, done) => {
           const loader = new BorderedLoader(

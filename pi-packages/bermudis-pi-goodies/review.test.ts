@@ -6,12 +6,51 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import reviewExtension, {
   buildReviewPrompt,
+  buildSelectOptions,
   completeReviewArgument,
   parseArgs,
   parsePrReference,
   parseReviewPaths,
   tokenizeArgs,
 } from "./review";
+
+describe("buildSelectOptions (non-TUI select fallback)", () => {
+  test("description rides inline in the label; bare labels pass through", () => {
+    const { options, valueFor } = buildSelectOptions([
+      { value: "a", label: "Review uncommitted changes", description: "" },
+      {
+        value: "b",
+        label: "Review against a base branch",
+        description: "(local or origin/*)",
+      },
+      { value: "c", label: "Review a commit" },
+    ]);
+    expect(options).toEqual([
+      "Review uncommitted changes",
+      "Review against a base branch (local or origin/*)",
+      "Review a commit",
+    ]);
+    expect(valueFor("Review a commit")).toBe("c");
+    expect(valueFor("Review uncommitted changes")).toBe("a");
+    expect(valueFor("unknown option")).toBeUndefined();
+  });
+
+  test("recommended index gets a suffix and still maps back to its value", () => {
+    const { options, valueFor } = buildSelectOptions(
+      [
+        { value: "uncommitted", label: "Review uncommitted changes" },
+        { value: "commit", label: "Review a commit" },
+      ],
+      1,
+    );
+    expect(options).toEqual([
+      "Review uncommitted changes",
+      "Review a commit (recommended)",
+    ]);
+    expect(valueFor("Review a commit (recommended)")).toBe("commit");
+    expect(valueFor("Review a commit")).toBeUndefined();
+  });
+});
 
 describe("/review argument completion", () => {
   test("verbs complete with trailing space only when they take a value", () => {
@@ -423,6 +462,7 @@ describe("/end-review summarization loader abort (stale review-state fix)", () =
 
     const ctx = {
       hasUI: true,
+      mode: "tui",
       cwd: "/",
       sessionManager: {
         getBranch: () => branchEntries,
