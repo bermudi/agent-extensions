@@ -10,7 +10,9 @@
  * Env-var assignment prefixes (`FOO=bar rm x`) are recognized and skipped so
  * the real command that follows them is still checked.
  *
- *   rm                  -> trash
+ *   rm                  -> trash <path>   (moves to the trash can; recoverable)
+ *   trash-rm            -> blocked       (permanently deletes from the trash can)
+ *   trash-empty         -> blocked       (permanently empties the trash can)
  *   python/pip/pytest/  -> uv
  *     mypy
  *
@@ -31,7 +33,13 @@ interface Rule {
 const RULES: Rule[] = [
   {
     names: ["rm"],
-    reason: "rm is blocked — use `trash` instead (recoverable beats gone)",
+    reason:
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
+  },
+  {
+    names: ["trash-rm", "trash-empty"],
+    reason:
+      "trash-rm and trash-empty are blocked — they delete permanently from the trash can. Use `trash <path>` to move files to the trash (recoverable).",
   },
   {
     names: ["python", "python3", "pip", "pip3", "pytest", "mypy"],

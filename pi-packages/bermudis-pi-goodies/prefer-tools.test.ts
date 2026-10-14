@@ -16,7 +16,7 @@ describe("detectLegacyTool", () => {
   it("blocks direct legacy commands", () => {
     blocked(
       "rm -rf /",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "python script.py",
@@ -47,11 +47,11 @@ describe("detectLegacyTool", () => {
   it("blocks sudo and absolute/relative paths", () => {
     blocked(
       "sudo rm -rf /",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "/bin/rm -rf /",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "./python script.py",
@@ -73,6 +73,20 @@ describe("detectLegacyTool", () => {
     allowed("uv run pytest");
     allowed("uv run mypy");
     allowed("trash file");
+    allowed("trash notes.md");
+    allowed("trash-put notes.md");
+    allowed("trash-list");
+    allowed("trash-restore");
+  });
+
+  it("blocks trash-rm and trash-empty (permanent deletes from the trash can)", () => {
+    const TRASH_RM =
+      "trash-rm and trash-empty are blocked — they delete permanently from the trash can. Use `trash <path>` to move files to the trash (recoverable).";
+    blocked("trash-rm foo", TRASH_RM);
+    blocked("trash-rm '*.o'", TRASH_RM);
+    blocked("/usr/bin/trash-rm foo", TRASH_RM);
+    blocked("trash-empty", TRASH_RM);
+    blocked("trash a && trash-rm a", TRASH_RM);
   });
 
   it("allows heredoc bodies", () => {
@@ -90,7 +104,7 @@ describe("detectLegacyTool", () => {
   it("blocks env-var assignment prefixes (FOO=bar rm x)", () => {
     blocked(
       "FOO=bar rm x",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "PYTHONDONTWRITEBYTECODE=1 python x.py",
@@ -98,44 +112,44 @@ describe("detectLegacyTool", () => {
     );
     blocked(
       "A=1 B=2 rm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       'FOO="quoted value" rm file',
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "FOO='single quoted' rm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "FOO=$BASE rm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "FOO=$(echo hi) rm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "FOO+=bar rm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     // Assignment + leading redirect still runs the command.
     blocked(
       "FOO=1 > /dev/null rm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "FOO=1 > $OUT rm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "sudo FOO=bar rm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "FOO=bar\nrm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
   });
 
@@ -160,7 +174,7 @@ describe("detectLegacyTool", () => {
   it("blocks command substitutions outside quotes", () => {
     blocked(
       "echo $(sudo rm -rf /)",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
   });
 
@@ -177,7 +191,7 @@ describe("detectLegacyTool", () => {
   it("blocks backslash-escaped commands (\\rm)", () => {
     blocked(
       "\\rm -rf /",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "\\python script.py",
@@ -188,33 +202,33 @@ describe("detectLegacyTool", () => {
   it("blocks commands inside brace groups ({ rm; })", () => {
     blocked(
       "{ rm -rf /; }",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "{ rm file; }",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
   });
 
   it("blocks sudo with option arguments (sudo -u root rm)", () => {
     blocked(
       "sudo -u root rm -rf /",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "sudo -g wheel rm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "sudo -u root -g wheel rm file",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
   });
 
   it("blocks command substitutions in unquoted heredoc bodies", () => {
     blocked(
       "cat <<EOF\n$(rm -rf /)\nEOF",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       "cat <<EOF\n$(python evil.py)\nEOF",
@@ -222,7 +236,7 @@ describe("detectLegacyTool", () => {
     );
     blocked(
       "cat <<EOF\n`rm file`\nEOF",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
   });
 
@@ -250,7 +264,7 @@ describe("detectLegacyTool", () => {
   it("blocks nested command substitutions in unquoted heredocs", () => {
     blocked(
       "cat <<EOF\n$(echo $(rm file))\nEOF",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
   });
 
@@ -262,11 +276,11 @@ describe("detectLegacyTool", () => {
     // quoted delimiter (<<'EOF'), which stays allowed below.
     blocked(
       "cat <<EOF\necho '$(rm file)'\nEOF",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
       'cat <<EOF\necho "$(rm file)"\nEOF',
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
   });
 
@@ -277,7 +291,8 @@ describe("detectLegacyTool", () => {
 
   it("blocks double-quoted command substitutions and backticks", () => {
     // bash: echo "$(touch m)" and echo "`touch m`" both create the marker.
-    const RM = "rm is blocked — use `trash` instead (recoverable beats gone)";
+    const RM =
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.";
     blocked('echo "$(rm x)"', RM);
     blocked('echo "`rm x`"', RM);
     blocked("echo `rm x`", RM);
@@ -290,7 +305,8 @@ describe("detectLegacyTool", () => {
   });
 
   it("blocks substitutions inside arithmetic and parameter expansions", () => {
-    const RM = "rm is blocked — use `trash` instead (recoverable beats gone)";
+    const RM =
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.";
     // bash: x=$(( $(touch m) + 1 )) runs touch; $(( 1 + 2 )) does not.
     blocked("x=$(( $(rm x) + 1 ))", RM);
     allowed("x=$(( 1 + 2 ))");
@@ -313,7 +329,7 @@ describe("detectLegacyTool", () => {
     // assignment value must not end command position.
     blocked(
       "FOO=$HOME rm x",
-      "rm is blocked — use `trash` instead (recoverable beats gone)",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     allowed("FOO=$HOME echo x");
   });
