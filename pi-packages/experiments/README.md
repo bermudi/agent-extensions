@@ -35,6 +35,7 @@ work on those features.
 | [roundtable](./roundtable/roundtable.ts) | `roundtable.ts` | `/roundtable`, `roundtable` tool | Round-robin discussion across project-rooted agents |
 | [session-reference](./session-reference/session-reference.ts) | `session-reference.ts` | `/sessions`, 3 tools | Search, list, and read other Pi sessions |
 | [subagent-landscape](./subagent-landscape/) | Markdown notes | none | Comparative research on public subagent extensions |
+| [telegram-settle](./telegram-settle/index.ts) | `index.ts` | `agent_settled` hook | Send the last assistant message to the local telegram-bridge |
 | [supervise](./supervise/supervise.ts) | `supervise.ts` | `supervise` tool | Turn-by-turn control of a persistent subagent |
 | [thinking-compaction](./thinking-compaction/thinking-compaction.ts) | `thinking-compaction.ts` | compaction hook | LLM-generated summaries during automatic compaction |
 | [trim-context](./trim-context/index.ts) | `index.ts` | `/trim`, `/untrim`, `selective_trim` | Non-destructive, selective turn compaction |

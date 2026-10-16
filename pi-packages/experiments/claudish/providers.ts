@@ -26,7 +26,8 @@ export type FetchLike = (
 ) => Promise<Response>;
 
 export type RewriteOutcome =
-  { ok: true; text: string } | { ok: false; reason: string };
+  | { ok: true; text: string }
+  | { ok: false; reason: string };
 
 export interface RewriteOptions {
   config: ClConfig;

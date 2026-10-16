@@ -397,7 +397,8 @@ describe("providers", () => {
 
   test("anthropic: builds messages request with key and max_tokens", async () => {
     let captured:
-      { url: string; headers: Record<string, string>; body: any } | undefined;
+      | { url: string; headers: Record<string, string>; body: any }
+      | undefined;
     const fetchImpl = (async (url: any, init: any) => {
       captured = {
         url: String(url),

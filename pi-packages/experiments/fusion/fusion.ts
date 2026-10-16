@@ -14,7 +14,11 @@ import {
   type AgentMessage,
   type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { type Api, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
+import {
+  type Api,
+  type Model,
+  streamSimple,
+} from "@earendil-works/pi-ai/compat";
 import {
   buildSessionContext,
   convertToLlm,

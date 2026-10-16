@@ -159,7 +159,8 @@ function initSchema(db: DatabaseSync): void {
     transactionStarted = true;
 
     const row = db.prepare("PRAGMA user_version").get() as
-      { user_version?: number } | undefined;
+      | { user_version?: number }
+      | undefined;
     const currentVersion = row?.user_version ?? 0;
     if (currentVersion > USAGE_SCHEMA_VERSION) {
       throw new Error(

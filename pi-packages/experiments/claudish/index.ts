@@ -30,7 +30,12 @@ import {
   isEditToolResult,
   isWriteToolResult,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Text, type AutocompleteItem, type AutocompleteProvider } from "@earendil-works/pi-tui";
+import {
+  Box,
+  Text,
+  type AutocompleteItem,
+  type AutocompleteProvider,
+} from "@earendil-works/pi-tui";
 import {
   appendFileSync,
   existsSync,
@@ -563,11 +568,8 @@ function wrapClaudishAutocomplete(
         return true;
       }
       return (
-        current.shouldTriggerFileCompletion?.(
-          lines,
-          cursorLine,
-          cursorCol,
-        ) ?? true
+        current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ??
+        true
       );
     },
   };
@@ -590,9 +592,7 @@ export default function (pi: ExtensionAPI, options: ClaudishOptions = {}) {
       ctx as {
         ui?: {
           addAutocompleteProvider?: (
-            factory: (
-              current: AutocompleteProvider,
-            ) => AutocompleteProvider,
+            factory: (current: AutocompleteProvider) => AutocompleteProvider,
           ) => void;
         };
       }
