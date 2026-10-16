@@ -12,11 +12,13 @@
  *   agent_settled itself carries no abort flag, so the outcome is read
  *   from agent_before_settle (outcome === "aborted") and consumed at
  *   settle time.
- * - Text message by default (tg.py msg), split into sequential chunks
- *   under Telegram's 4096-char sendMessage cap (splitting prefers
- *   newline boundaries; the split newline itself is dropped).
- *   TELEGRAM_SETTLE_MODE=voice opts into the voice-note path (tgsay).
- *   Bridge directory can be overridden with TELEGRAM_BRIDGE_DIR.
+ * - Text message by default (tg.py msg), split into sequential pieces
+ *   of ≤32k chars (headroom under sendRichMessage's 32768 cap — the
+ *   bridge escalates any piece over 4096 chars to one rich bubble;
+ *   pieces also stay far under the kernel's ~128KB per-arg limit).
+ *   Splitting prefers newline boundaries; the split newline itself is
+ *   dropped. TELEGRAM_SETTLE_MODE=voice opts into the voice-note path
+ *   (tgsay). Bridge directory can be overridden with TELEGRAM_BRIDGE_DIR.
  * - lastSentText is only recorded after a successful send, so a failed
  *   delivery is retried on the next settle instead of being skipped.
  * - Silent in the TUI on success: stderr from an extension is rendered
@@ -42,9 +44,11 @@ interface AssistantEntry {
   };
 }
 
-// Telegram's sendMessage hard cap. JS string length is UTF-16 code
-// units — the same unit Telegram counts — so .length is the right measure.
-export const TELEGRAM_TEXT_LIMIT = 4096;
+// Piece size for bridge handoff: headroom under sendRichMessage's 32768
+// cap (the bridge sends any piece over 4096 chars as ONE rich bubble),
+// and each piece stays far below the kernel's ~128KB per-arg argv limit.
+// JS string length is UTF-16 code units — the unit Telegram counts.
+export const BRIDGE_PIECE_LIMIT = 32_000;
 
 /**
  * Split text into pieces Telegram will accept. Splits at the last newline
@@ -54,9 +58,9 @@ export const TELEGRAM_TEXT_LIMIT = 4096;
  * pieces joined with "\n" reassemble the original (when every split chose
  * a newline).
  */
-export function chunkForTelegram(
+export function chunkForBridge(
   text: string,
-  limit: number = TELEGRAM_TEXT_LIMIT,
+  limit: number = BRIDGE_PIECE_LIMIT,
 ): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -162,10 +166,11 @@ async function runBridge(
 
   const isText = mode === "text";
   const script = join(bridgeDir, isText ? "tg.py" : "tgsay");
-  // Text mode: chunk under Telegram's cap (also keeps each argv string
-  // far below the kernel's ~128KB per-arg limit). Voice mode: one stdin
-  // write — its constraint is audio size, not message length.
-  const pieces = isText ? chunkForTelegram(text) : [text];
+  // Text mode: 32k pieces the bridge can each send as ONE rich bubble
+  // (>4096 chars escalates to sendRichMessage there; ≤4096 stays plain).
+  // Voice mode: one stdin write — its constraint is audio size, not
+  // message length.
+  const pieces = isText ? chunkForBridge(text) : [text];
 
   let ok = true;
   for (let i = 0; i < pieces.length; i++) {
