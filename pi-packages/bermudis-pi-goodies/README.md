@@ -293,9 +293,9 @@ override the Codex base URL.
 
 All providers share one renderer: every balance is projected to a list of
 segments and formatted the same way. Credits render as `$1.5k`; each usage
-window renders as `[label ]<window> <remaining>%[ ↻<countdown>]`, e.g.
-`7d 72% ↻4d4h` (`↻` = resets in). Multiple windows are joined with `·`, and
-named extra limits like Codex Spark get a label: `7d 72% ↻4d4h · Spark 7d 74% ↻5d4h`.
+window renders as `[label ]<window>: <remaining>%[ ↻<countdown>]`, e.g.
+`7d: 72% ↻4d4h` (`↻` = resets in). Multiple windows are joined with `·`, and
+named extra limits like Codex Spark get a label: `7d: 72% ↻4d4h · Spark 7d: 74% ↻5d4h`.
 The footer refreshes on session start, model
 switch, and after each completed run (`agent_settled`), so it tracks both
 consumption and external tier changes for whatever provider is active —

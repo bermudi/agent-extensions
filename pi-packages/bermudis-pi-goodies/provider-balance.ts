@@ -278,7 +278,7 @@ function compactCodexQuotaName(name: string): string {
 // the same Balance model and one formatter renders it all. The footer reads
 // like a status bar: glyphs carry the meaning, words are dropped.
 //   credits      -> "$1.5k"
-//   quota window -> "[label ]7d 72%[ ↻4d4h]"   (↻ = resets in)
+//   quota window -> "[label ]7d: 72%[ ↻4d4h]"   (↻ = resets in)
 
 export interface QuotaWindow {
   /** Remaining quota, 0–100. */
@@ -337,7 +337,7 @@ function formatSegment(segment: BalanceSegment, nowMs: number): string {
   if (!quota) return "";
 
   const window = quota.windowSeconds
-    ? `${formatWindowDuration(quota.windowSeconds)} `
+    ? `${formatWindowDuration(quota.windowSeconds)}: `
     : "";
   const percent = `${clampPercent(quota.remainingPercent)}%`;
   const core = `${window}${percent}${formatResetSuffix(quota.resetAt, nowMs)}`;

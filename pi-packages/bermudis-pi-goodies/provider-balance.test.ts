@@ -1081,7 +1081,7 @@ describe("formatZaiQuota", () => {
           { usedPercent: 25, windowSeconds: 18_000 },
         ],
       }),
-    ).toBe("5h 75% · 7d 60%");
+    ).toBe("5h: 75% · 7d: 60%");
   });
 
   test("shows a reset countdown when Z.ai supplies nextResetTime", () => {
@@ -1100,7 +1100,7 @@ describe("formatZaiQuota", () => {
         },
         nowMs,
       ),
-    ).toBe("7d 20% ↻3d16h");
+    ).toBe("7d: 20% ↻3d16h");
   });
 });
 
@@ -1308,7 +1308,7 @@ describe("formatCodexQuota", () => {
         secondary: { usedPercent: 40, windowSeconds: 604_800 },
         additional: [],
       }),
-    ).toBe("5h 75% · 7d 60%");
+    ).toBe("5h: 75% · 7d: 60%");
   });
 
   test("distinguishes a window's length from its reset countdown", () => {
@@ -1330,7 +1330,7 @@ describe("formatCodexQuota", () => {
         },
         nowMs,
       ),
-    ).toBe("5h 75% ↻2h · 7d 20% ↻3d16h");
+    ).toBe("5h: 75% ↻2h · 7d: 20% ↻3d16h");
   });
 
   test("includes the named Spark quota", () => {
@@ -1346,7 +1346,7 @@ describe("formatCodexQuota", () => {
           },
         ],
       }),
-    ).toBe("7d 89% · Spark 7d 100%");
+    ).toBe("7d: 89% · Spark 7d: 100%");
   });
 
   test("clamps impossible percentages", () => {
@@ -1356,7 +1356,7 @@ describe("formatCodexQuota", () => {
         secondary: { usedPercent: 110, windowSeconds: 90 },
         additional: [],
       }),
-    ).toBe("1m 100% · 2m 0%");
+    ).toBe("1m: 100% · 2m: 0%");
   });
 });
 
@@ -1472,7 +1472,7 @@ describe("formatCommandcodeBalance", () => {
         fiveHour: { usedPercent: 25, windowSeconds: 18_000 },
         weekly: { usedPercent: 20, windowSeconds: 604_800 },
       }),
-    ).toBe("$12.50 · 5h 75% · 7d 80%");
+    ).toBe("$12.50 · 5h: 75% · 7d: 80%");
   });
 
   test("shows a reset countdown from a millisecond resetAt", () => {
@@ -1490,7 +1490,7 @@ describe("formatCommandcodeBalance", () => {
         },
         nowMs,
       ),
-    ).toBe("5h 75% ↻2h");
+    ).toBe("5h: 75% ↻2h");
   });
 });
 
@@ -1515,7 +1515,7 @@ describe("formatBalance", () => {
         ],
         nowMs,
       ),
-    ).toBe("7d 72% ↻4d4h");
+    ).toBe("7d: 72% ↻4d4h");
   });
 
   test("joins labelled windows with a middot", () => {
@@ -1541,7 +1541,7 @@ describe("formatBalance", () => {
         ],
         nowMs,
       ),
-    ).toBe("7d 72% ↻4d4h · Spark 7d 74% ↻5d4h");
+    ).toBe("7d: 72% ↻4d4h · Spark 7d: 74% ↻5d4h");
   });
 
   test("clamps out-of-range remaining percent", () => {
@@ -1550,13 +1550,13 @@ describe("formatBalance", () => {
         { quota: { remainingPercent: 150, windowSeconds: 60 } },
         { quota: { remainingPercent: -20, windowSeconds: 90 } },
       ]),
-    ).toBe("1m 100% · 2m 0%");
+    ).toBe("1m: 100% · 2m: 0%");
   });
 
   test("omits the reset glyph when no timestamp is known", () => {
     expect(
       formatBalance([{ quota: { remainingPercent: 50, windowSeconds: 3600 } }]),
-    ).toBe("1h 50%");
+    ).toBe("1h: 50%");
   });
 });
 
