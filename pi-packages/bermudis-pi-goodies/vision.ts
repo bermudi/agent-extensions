@@ -319,6 +319,12 @@ export default function (pi: ExtensionAPI): void {
   pi.on("model_select", (event) => {
     syncVisionToolVisibility(event.model);
   });
+  // model_select only fires on identity change (provider/id) — a registry
+  // refresh can swap the model object with a different input list silently.
+  // Re-check at the last checkpoint before each turn's loadout is built.
+  pi.on("before_agent_start", (_event, ctx) => {
+    syncVisionToolVisibility(ctx.model);
+  });
 
   // Burst-style rows while clean-tui is active — a load-time decision: the
   // flag is settled before this module registers (index.ts loads clean-tui
