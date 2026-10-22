@@ -279,15 +279,23 @@ catalog no more than every four hours. Balance and quota requests run in the bac
 never delay session startup, model selection, or post-run input readiness.
 The footer also reads OpenRouter remaining credits for `openrouter`, z.ai GLM
 Coding Plan token quota for `zai` (Global) and `zai-coding-cn` (BigModel China),
-OpenAI Codex's ChatGPT subscription quota when using `openai-codex` OAuth,
-and CommandCode credit balance plus 5-hour/weekly usage windows for
+OpenAI Codex's ChatGPT subscription quota when using `openai-codex` OAuth, and
+CommandCode credit balance plus 5-hour/weekly usage windows for
 `commandcode` and `commandcode-anthropic` (same account, same key);
 it skips platform API-key auth because that has no ChatGPT subscription quota.
+For `openai` OAuth (Sign in with ChatGPT), OpenAI rejects the new token on its
+usage endpoints (`401 rejected_by_access_enforcement`), so the footer reads the
+plan windows through a companion `openai-codex` login on the same ChatGPT
+account. The active app's `client_id` must appear exactly once in
+`GET /wham/usage/chatpass/apps` queried with the Codex token; otherwise no
+balance is shown rather than another account's quota. Run `/login openai-codex`
+once with the same account and keep `openai` as the active model.
 OpenRouter uses `GET /api/v1/credits`; z.ai uses
-`GET /api/monitor/usage/quota/limit`; Codex uses `GET /wham/usage`;
-CommandCode uses `GET /alpha/billing/credits` (a private endpoint its CLI
+`GET /api/monitor/usage/quota/limit`; Codex and OpenAI use `GET /wham/usage`
+(plus `/chatpass/apps` for OpenAI); CommandCode uses
+`GET /alpha/billing/credits` (a private endpoint its CLI
 also uses; `COMMANDCODE_API_URL` can override the base URL). z.ai, Codex, and
-Codex show both each quota's window length and its `nextResetTime`/`reset_at`
+CommandCode show both each quota's window length and its `nextResetTime`/`reset_at`
 countdown (when supplied), and `CODEX_API_URL` or `CHATGPT_BASE_URL` can
 override the Codex base URL.
 

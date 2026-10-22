@@ -51,6 +51,14 @@ const CODEX_API_BASE = (
   "https://chatgpt.com/backend-api"
 ).replace(/\/+$/, "");
 const CODEX_USAGE_ENDPOINT = `${CODEX_API_BASE}/wham/usage`;
+/**
+ * App registrations for the ChatGPT account behind a Codex credential. The
+ * new `openai` (Sign in with ChatGPT) token cannot read usage itself — the
+ * backend rejects it with 401 rejected_by_access_enforcement — so usage is
+ * read with a companion `openai-codex` login. Matching the new login's
+ * client_id here proves both logins belong to the same ChatGPT account.
+ */
+const CODEX_CHATPASS_APPS_ENDPOINT = `${CODEX_USAGE_ENDPOINT}/chatpass/apps`;
 const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
 const COMMANDCODE_API_BASE = (
   process.env.COMMANDCODE_API_URL || "https://api.commandcode.ai"
@@ -110,9 +118,27 @@ const BALANCE_CACHE_MAX_ENTRIES = 256;
 const BALANCE_CACHE_MAX_BYTES = 1_000_000;
 const BALANCE_CACHE_ACCOUNT_DIR_PATTERN = /^[a-f0-9]{64}$/;
 
+export interface BalanceFetchOptions {
+  /**
+   * Credential for `companionProvider`, resolved by refreshBalance from the
+   * same model registry. Never persisted; used only for this request.
+   */
+  companionToken?: string;
+}
+
 export interface BalanceAdapter {
-  fetch(token: string, signal: AbortSignal): Promise<Balance>;
+  fetch(
+    token: string,
+    signal: AbortSignal,
+    options?: BalanceFetchOptions,
+  ): Promise<Balance>;
   requiresOAuth?: boolean;
+  /**
+   * Provider whose login is required to read this balance. `openai` needs an
+   * `openai-codex` companion on the same ChatGPT account because OpenAI
+   * rejects Sign in with ChatGPT tokens on the usage endpoints.
+   */
+  companionProvider?: string;
 }
 
 interface CodexQuotaWindow {
@@ -175,20 +201,51 @@ function decodeBase64Url(value: string): string {
   return new TextDecoder().decode(bytes);
 }
 
-export function parseCodexAccountId(token: string): string | null {
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
   if (parts.length !== 3 || !parts[1]) return null;
 
   try {
-    const payload = asRecord(JSON.parse(decodeBase64Url(parts[1])));
-    const auth = payload ? asRecord(payload[CODEX_AUTH_CLAIM]) : null;
-    const accountId = auth?.chatgpt_account_id;
-    return typeof accountId === "string" && accountId.trim()
-      ? accountId.trim()
-      : null;
+    return asRecord(JSON.parse(decodeBase64Url(parts[1])));
   } catch {
     return null;
   }
+}
+
+export function parseCodexAccountId(token: string): string | null {
+  const payload = decodeJwtPayload(token);
+  const auth = payload ? asRecord(payload[CODEX_AUTH_CLAIM]) : null;
+  const accountId = auth?.chatgpt_account_id;
+  return typeof accountId === "string" && accountId.trim()
+    ? accountId.trim()
+    : null;
+}
+
+/**
+ * Identity of the application registration behind an `openai` OAuth login.
+ * The legacy Codex account lists this ID under /wham/usage/chatpass/apps,
+ * which is how the companion credential is proven to be the same account.
+ */
+export function parseOpenAIClientId(token: string): string | null {
+  const payload = decodeJwtPayload(token);
+  const clientId = payload?.client_id;
+  return typeof clientId === "string" && clientId.trim()
+    ? clientId.trim()
+    : null;
+}
+
+/** Exactly one registration must match: never fall back to another app. */
+export function openAIAppIsRegistered(
+  value: unknown,
+  clientId: string,
+): boolean {
+  const payload = asRecord(value);
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  let matches = 0;
+  for (const candidate of items) {
+    if (stringProperty(candidate, "id") === clientId) matches++;
+  }
+  return matches === 1;
 }
 
 function parseCodexQuotaWindow(value: unknown): CodexQuotaWindow | null {
@@ -586,23 +643,26 @@ async function fetchZaiCodingCnQuota(
   return fetchZaiQuotaAt(ZAI_CODING_CN_QUOTA_ENDPOINT, token, signal);
 }
 
-async function fetchCodexQuota(
+function codexUsageHeaders(
   token: string,
+  accountId: string,
+): Record<string, string> {
+  return {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+    "User-Agent": "pi",
+    originator: "pi",
+    "chatgpt-account-id": accountId,
+  };
+}
+
+async function fetchCodexQuotaAt(
+  token: string,
+  accountId: string,
   signal: AbortSignal,
 ): Promise<Balance> {
-  const accountId = parseCodexAccountId(token);
-  if (!accountId) {
-    throw new Error("Codex access token did not contain an account ID");
-  }
-
   const response = await fetch(CODEX_USAGE_ENDPOINT, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-      "User-Agent": "pi",
-      originator: "pi",
-      "chatgpt-account-id": accountId,
-    },
+    headers: codexUsageHeaders(token, accountId),
     signal: timeoutSignal(BALANCE_FETCH_TIMEOUT_MS, signal),
   });
   if (!response.ok) {
@@ -614,6 +674,61 @@ async function fetchCodexQuota(
     throw new Error("Codex quota response was invalid");
   }
   return codexQuotaToBalance(quota);
+}
+
+async function fetchCodexQuota(
+  token: string,
+  signal: AbortSignal,
+): Promise<Balance> {
+  const accountId = parseCodexAccountId(token);
+  if (!accountId) {
+    throw new Error("Codex access token did not contain an account ID");
+  }
+  return fetchCodexQuotaAt(token, accountId, signal);
+}
+
+/**
+ * `openai` (Sign in with ChatGPT) tokens are rejected by ChatGPT's usage
+ * backend. Read the plan windows with the companion `openai-codex` login
+ * instead, but only after /chatpass/apps confirms that the active app
+ * registration belongs to that Codex account — otherwise the footer would
+ * show a different account's quota.
+ */
+export async function fetchOpenAIQuota(
+  token: string,
+  signal: AbortSignal,
+  options?: BalanceFetchOptions,
+): Promise<Balance> {
+  const companionToken = options?.companionToken;
+  if (!companionToken) {
+    throw new Error("OpenAI quota requires an openai-codex companion login");
+  }
+
+  const clientId = parseOpenAIClientId(token);
+  if (!clientId) {
+    throw new Error("OpenAI access token did not contain an application ID");
+  }
+  const accountId = parseCodexAccountId(companionToken);
+  if (!accountId) {
+    throw new Error("OpenAI Codex access token did not contain an account ID");
+  }
+
+  const registrationResponse = await fetch(CODEX_CHATPASS_APPS_ENDPOINT, {
+    headers: codexUsageHeaders(companionToken, accountId),
+    signal: timeoutSignal(BALANCE_FETCH_TIMEOUT_MS, signal),
+  });
+  if (!registrationResponse.ok) {
+    throw new Error(
+      `OpenAI app registration request failed: ${registrationResponse.status}`,
+    );
+  }
+  if (!openAIAppIsRegistered(await registrationResponse.json(), clientId)) {
+    throw new Error(
+      "OpenAI app registration was not found in the companion Codex account; sign in to openai and openai-codex with the same ChatGPT account",
+    );
+  }
+
+  return fetchCodexQuotaAt(companionToken, accountId, signal);
 }
 
 // --- CommandCode -----------------------------------------------------------
@@ -742,6 +857,11 @@ const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
   zai: { fetch: fetchZaiQuota },
   "zai-coding-cn": { fetch: fetchZaiCodingCnQuota },
   "openai-codex": { fetch: fetchCodexQuota, requiresOAuth: true },
+  openai: {
+    fetch: fetchOpenAIQuota,
+    requiresOAuth: true,
+    companionProvider: "openai-codex",
+  },
   // Both CommandCode transports share one account and one key.
   commandcode: { fetch: fetchCommandcodeBalance },
   "commandcode-anthropic": { fetch: fetchCommandcodeBalance },
@@ -758,17 +878,29 @@ interface BalanceCacheEntry {
  * Keep accounts isolated without persisting the credential itself. Sessions
  * using the same credential get the same cache key and can share a reading.
  */
-export function balanceCacheKey(provider: string, token: string): string {
+export function balanceCacheKey(
+  provider: string,
+  token: string,
+  companionToken?: string,
+): string {
   // Codex access tokens rotate, but their account ID is stable. Other
   // providers expose no account identifier here, so the token is the best
   // available identity. Include the endpoint because custom backends can use
   // overlapping account IDs while reporting unrelated balances.
+  //
+  // `openai` balances belong to the companion Codex account but are scoped to
+  // the active app registration, so key on both identities: a different Codex
+  // account or a different `openai` login must not share a reading.
   const identity =
-    provider === "openai-codex" ? (parseCodexAccountId(token) ?? token) : token;
+    provider === "openai-codex"
+      ? (parseCodexAccountId(token) ?? token)
+      : provider === "openai" && companionToken
+        ? `${parseCodexAccountId(companionToken) ?? companionToken}:${parseOpenAIClientId(token) ?? token}`
+        : token;
   const endpoint =
     provider === "kilo"
       ? KILO_BALANCE_ENDPOINT
-      : provider === "openai-codex"
+      : provider === "openai-codex" || provider === "openai"
         ? CODEX_USAGE_ENDPOINT
         : provider === "openrouter"
           ? OPENROUTER_CREDITS_ENDPOINT
@@ -1408,6 +1540,14 @@ export default function providerBalance(
   /** Provider and account the currently displayed balance belongs to. */
   let displayedProvider: string | undefined;
   let displayedCacheKey: string | undefined;
+  /**
+   * Cache key of the companion credential backing the displayed balance
+   * (`openai` -> `openai-codex`). Lets `/login openai-codex` wait for the new
+   * companion before refreshing the active `openai` row.
+   */
+  let displayedCompanionCacheKey: string | undefined;
+  /** Providers already told (once per session) that a companion login is missing. */
+  const companionWarningsLogged = new Set<string>();
   let refreshGeneration = 0;
   let refreshInFlight = false;
   let refreshController: AbortController | undefined;
@@ -1430,6 +1570,25 @@ export default function providerBalance(
     requestRender?.();
   }
 
+  /**
+   * Missing companion is an expected state, not a fetch failure: no balance is
+   * shown and no failure marker is written. Record it once per session so the
+   * reason survives outside the footer (which simply stays blank).
+   */
+  function noteCompanionUnavailable(
+    providerId: string,
+    companionProvider: string,
+  ): void {
+    if (companionWarningsLogged.has(providerId)) return;
+    companionWarningsLogged.add(providerId);
+    logGoodiesEvent({
+      type: "provider_balance_unavailable",
+      provider: providerId,
+      companion: companionProvider,
+      message: `${providerId} ChatGPT usage needs a companion ${companionProvider} login on the same account; run /login ${companionProvider} with that account.`,
+    });
+  }
+
   /** Login/logout is delivered as input before the command changes auth. */
   function invalidateAuthTransition(provider: string): void {
     if (provider !== displayedProvider) return;
@@ -1445,6 +1604,8 @@ export default function providerBalance(
     ctx: ExtensionContext,
     provider: string,
     previousCacheKey: string | undefined,
+    /** Set when `provider` is the companion login backing this provider. */
+    companionOf?: string,
   ): void {
     if (authTransitionTimer !== undefined) clearTimer(authTransitionTimer);
     let attempts = 0;
@@ -1457,8 +1618,24 @@ export default function providerBalance(
       attempts++;
       if (activeContext !== ctx) return;
       let token: string | undefined;
+      let currentCacheKey: string | undefined;
       try {
         token = await ctx.modelRegistry.getApiKeyForProvider(provider);
+        if (token) {
+          if (companionOf) {
+            currentCacheKey = balanceCacheKey(provider, token);
+          } else {
+            const adapter = adapters[provider];
+            const companionToken = adapter?.companionProvider
+              ? (
+                  await ctx.modelRegistry.getProviderAuth(
+                    adapter.companionProvider,
+                  )
+                )?.auth.apiKey
+              : undefined;
+            currentCacheKey = balanceCacheKey(provider, token, companionToken);
+          }
+        }
       } catch (error) {
         // pi's getApiKeyForProvider swallows keychain errors and resolves to
         // undefined, so this catch only fires if that contract changes (the
@@ -1477,9 +1654,6 @@ export default function providerBalance(
         return;
       }
       if (activeContext !== ctx) return;
-      const currentCacheKey = token
-        ? balanceCacheKey(provider, token)
-        : undefined;
       if (currentCacheKey === previousCacheKey) {
         if (attempts < AUTH_TRANSITION_MAX_ATTEMPTS) {
           authTransitionTimer = setTimer(() => void check(), 1_000);
@@ -1529,6 +1703,7 @@ export default function providerBalance(
     if (provider !== displayedProvider) {
       displayedProvider = provider;
       displayedCacheKey = undefined;
+      displayedCompanionCacheKey = undefined;
       clearBalance();
     }
 
@@ -1547,6 +1722,7 @@ export default function providerBalance(
           !ctx.modelRegistry.isUsingOAuth(model))
       ) {
         displayedCacheKey = undefined;
+        displayedCompanionCacheKey = undefined;
         clearBalance();
         return;
       }
@@ -1564,6 +1740,7 @@ export default function providerBalance(
       } catch (error) {
         if (generation === refreshGeneration) {
           displayedCacheKey = undefined;
+          displayedCompanionCacheKey = undefined;
           clearBalance();
         }
         throw error;
@@ -1571,11 +1748,43 @@ export default function providerBalance(
       if (generation !== refreshGeneration) return;
       if (!token) {
         displayedCacheKey = undefined;
+        displayedCompanionCacheKey = undefined;
         identityPending = false;
         clearBalance();
         return;
       }
-      const tokenCacheKey = balanceCacheKey(providerId, token);
+      // `openai` usage is read with the legacy `openai-codex` login. Resolve
+      // it through the model registry (not auth.json) so its token is
+      // refreshed and scoped exactly like a normal request.
+      let companionToken: string | undefined;
+      if (adapter.companionProvider) {
+        try {
+          companionToken = (
+            await ctx.modelRegistry.getProviderAuth(adapter.companionProvider)
+          )?.auth.apiKey;
+        } catch (error) {
+          if (generation === refreshGeneration) {
+            displayedCacheKey = undefined;
+            displayedCompanionCacheKey = undefined;
+            clearBalance();
+          }
+          throw error;
+        }
+        if (generation !== refreshGeneration) return;
+        if (!companionToken) {
+          displayedCacheKey = undefined;
+          displayedCompanionCacheKey = undefined;
+          identityPending = false;
+          clearBalance();
+          noteCompanionUnavailable(providerId, adapter.companionProvider);
+          return;
+        }
+        displayedCompanionCacheKey = balanceCacheKey(
+          adapter.companionProvider,
+          companionToken,
+        );
+      }
+      const tokenCacheKey = balanceCacheKey(providerId, token, companionToken);
       cacheKey = tokenCacheKey;
       if (displayedCacheKey !== tokenCacheKey) clearBalance();
       displayedCacheKey = tokenCacheKey;
@@ -1609,7 +1818,11 @@ export default function providerBalance(
         }
       }
 
-      const nextBalance = await adapter.fetch(token, controller.signal);
+      const nextBalance = await adapter.fetch(
+        token,
+        controller.signal,
+        companionToken ? { companionToken } : undefined,
+      );
       const observedAtMs = now();
       if (generation !== refreshGeneration) return;
 
@@ -1621,6 +1834,7 @@ export default function providerBalance(
         (!model || !ctx.modelRegistry.isUsingOAuth(model))
       ) {
         displayedCacheKey = undefined;
+        displayedCompanionCacheKey = undefined;
         clearBalance();
         return;
       }
@@ -1632,15 +1846,22 @@ export default function providerBalance(
       // commits the fresh balance on top of the old one.
       let currentToken: string | undefined;
       let confirmedToken: string | undefined;
+      let companionTokenAfter: string | undefined;
       try {
         currentToken = await ctx.modelRegistry.getApiKeyForProvider(providerId);
         // A credential can change while the first final lookup is pending.
         // Resolve it once more before accepting the provider response.
         confirmedToken =
           await ctx.modelRegistry.getApiKeyForProvider(providerId);
+        if (adapter.companionProvider) {
+          companionTokenAfter = (
+            await ctx.modelRegistry.getProviderAuth(adapter.companionProvider)
+          )?.auth.apiKey;
+        }
       } catch (error) {
         if (generation === refreshGeneration) {
           displayedCacheKey = undefined;
+          displayedCompanionCacheKey = undefined;
           clearBalance();
         }
         throw error;
@@ -1653,11 +1874,14 @@ export default function providerBalance(
           (!currentModel || !ctx.modelRegistry.isUsingOAuth(currentModel))) ||
         !currentToken ||
         !confirmedToken ||
-        balanceCacheKey(providerId, currentToken) !== cacheKey ||
-        balanceCacheKey(providerId, confirmedToken) !== cacheKey
+        balanceCacheKey(providerId, currentToken, companionTokenAfter) !==
+          cacheKey ||
+        balanceCacheKey(providerId, confirmedToken, companionTokenAfter) !==
+          cacheKey
       ) {
         if (generation === refreshGeneration) {
           displayedCacheKey = undefined;
+          displayedCompanionCacheKey = undefined;
           clearBalance();
           if (currentToken || confirmedToken) {
             void refreshForModel(ctx, currentModel);
@@ -1667,6 +1891,12 @@ export default function providerBalance(
       }
 
       identityPending = false;
+      if (adapter.companionProvider && companionTokenAfter) {
+        displayedCompanionCacheKey = balanceCacheKey(
+          adapter.companionProvider,
+          companionTokenAfter,
+        );
+      }
       // Recovery detected: clear the marker so sibling idle polls resume.
       clearBalanceFailureMarker(cacheKey, cacheDir);
       const persisted = writeCachedBalance(
@@ -1827,6 +2057,7 @@ export default function providerBalance(
   pi.on("session_start", (_event, ctx) => {
     activeContext = ctx;
     activeThinkingLevel = restoredThinkingLevel(ctx);
+    companionWarningsLogged.clear();
     installFooter(ctx);
     cleanupBalanceCache(cacheDir, now());
     if (ctx.mode === "tui") scheduleIdleRefresh();
@@ -1843,10 +2074,23 @@ export default function providerBalance(
     const match = /^\/(login|logout)(?:\s+(\S+))?$/.exec(event.text.trim());
     if (!match) return;
     const provider = match[2] ?? ctx.model?.provider;
-    if (!provider || provider !== ctx.model?.provider) return;
-    const previousCacheKey = displayedCacheKey;
-    invalidateAuthTransition(provider);
-    scheduleAuthTransitionCheck(ctx, provider, previousCacheKey);
+    const activeProvider = ctx.model?.provider;
+    if (!provider || !activeProvider) return;
+    // `openai` usage is read through the companion `openai-codex` login, so a
+    // companion login/logout changes the active row too.
+    const isCompanionLogin =
+      adapters[activeProvider]?.companionProvider === provider;
+    if (provider !== activeProvider && !isCompanionLogin) return;
+    const previousCacheKey = isCompanionLogin
+      ? displayedCompanionCacheKey
+      : displayedCacheKey;
+    invalidateAuthTransition(activeProvider);
+    scheduleAuthTransitionCheck(
+      ctx,
+      provider,
+      previousCacheKey,
+      isCompanionLogin ? activeProvider : undefined,
+    );
   });
 
   pi.on("model_select", (event, ctx) => {
@@ -1947,5 +2191,6 @@ export default function providerBalance(
     balanceFetchedAt = undefined;
     displayedProvider = undefined;
     displayedCacheKey = undefined;
+    displayedCompanionCacheKey = undefined;
   });
 }

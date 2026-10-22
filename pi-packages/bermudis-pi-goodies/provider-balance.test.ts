@@ -24,15 +24,18 @@ import providerBalance, {
   balanceCacheKey,
   codexQuotaToBalance,
   commandcodeBalanceToBalance,
+  fetchOpenAIQuota,
   formatBalance,
   formatCodexQuota,
   formatCommandcodeBalance,
   formatCredits,
   formatZaiQuota,
+  openAIAppIsRegistered,
   parseCodexAccountId,
   parseCodexQuota,
   parseCommandcodeBalance,
   parseKiloBalance,
+  parseOpenAIClientId,
   parseOpenRouterCredits,
   parseZaiQuota,
   readBalanceFailureAt,
@@ -706,6 +709,197 @@ describe("auth transition", () => {
   });
 });
 
+describe("companion credentials", () => {
+  interface Harness {
+    handlers: Map<string, (event: unknown, ctx: unknown) => unknown>;
+    ctx: ExtensionContext;
+    directory: string;
+    fetches: Array<{ token: string; companionToken?: string }>;
+    scheduled: Array<{ callback: () => void; delay: number }>;
+    setCompanion: (token: string | undefined) => void;
+    cleanup: () => Promise<void>;
+  }
+
+  function harness(adapter: BalanceAdapter): Harness {
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: unknown) => unknown
+    >();
+    // These tests drive events directly; record timers so the auth-transition
+    // poller can be fired on demand.
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    const fetches: Array<{ token: string; companionToken?: string }> = [];
+    let companionToken: string | undefined = "companion-token";
+    providerBalance(
+      {
+        on(event, handler) {
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: unknown) => unknown,
+          );
+        },
+        events: {
+          emit() {},
+          on() {
+            return () => {};
+          },
+        },
+      } as unknown as ExtensionAPI,
+      {
+        adapters: { openai: adapter },
+        cacheDir: directory,
+        random: () => 0.5,
+        setTimeout,
+        clearTimeout,
+      },
+    );
+    const ctx = {
+      mode: "tui",
+      model: { provider: "openai" },
+      isIdle: () => false,
+      ui: { setFooter() {} },
+      sessionManager: { getBranch: () => [] },
+      modelRegistry: {
+        isUsingOAuth: () => true,
+        getApiKeyForProvider: async (provider: string) =>
+          provider === "openai" ? "active-token" : companionToken,
+        getProviderAuth: async (provider: string) =>
+          provider === "openai-codex" && companionToken
+            ? { auth: { apiKey: companionToken } }
+            : undefined,
+      },
+    } as unknown as ExtensionContext;
+    return {
+      handlers,
+      ctx,
+      directory,
+      fetches,
+      scheduled,
+      setCompanion: (token) => {
+        companionToken = token;
+      },
+      cleanup: async () => {
+        await rm(directory, { recursive: true, force: true });
+      },
+    };
+  }
+
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  test("resolves the companion login and passes its token to the adapter", async () => {
+    const { handlers, ctx, directory, fetches, cleanup } = harness({
+      requiresOAuth: true,
+      companionProvider: "openai-codex",
+      fetch: async (token, _signal, options) => {
+        fetches.push({ token, companionToken: options?.companionToken });
+        return [{ credits: 3 }];
+      },
+    });
+    try {
+      const start = handlers.get("session_start");
+      if (!start) throw new Error("missing session_start");
+      start({}, ctx);
+      await flush();
+      expect(fetches).toEqual([
+        { token: "active-token", companionToken: "companion-token" },
+      ]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("waits for a companion /login before refreshing the active OpenAI row", async () => {
+    const {
+      handlers,
+      ctx,
+      directory,
+      fetches,
+      scheduled,
+      setCompanion,
+      cleanup,
+    } = harness({
+      requiresOAuth: true,
+      companionProvider: "openai-codex",
+      fetch: async (token, _signal, options) => {
+        fetches.push({ token, companionToken: options?.companionToken });
+        return [{ credits: 3 }];
+      },
+    });
+    try {
+      const start = handlers.get("session_start");
+      const input = handlers.get("input");
+      if (!start || !input) throw new Error("missing lifecycle handlers");
+
+      // Start without the companion: no balance and no fetch.
+      setCompanion(undefined);
+      start({}, ctx);
+      await flush();
+      expect(fetches).toEqual([]);
+
+      // The user submits `/login openai-codex`; the credential appears only
+      // after the browser flow completes, so the poller must wait for it.
+      input({ text: "/login openai-codex" }, ctx);
+      setCompanion("companion-new");
+      const poller = scheduled[scheduled.length - 1];
+      if (!poller) throw new Error("missing auth transition poller");
+      expect(poller.delay).toBe(250);
+      poller.callback();
+      await flush();
+      expect(fetches).toEqual([
+        { token: "active-token", companionToken: "companion-new" },
+      ]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("does not read another account's quota without a companion login", async () => {
+    const scratchDir = mkdtempSync(join(tmpdir(), "provider-balance-log-"));
+    const scratchLog = join(scratchDir, "goodies.log");
+    setGoodiesLogPathForTesting(scratchLog);
+    const { handlers, ctx, directory, fetches, setCompanion, cleanup } =
+      harness({
+        requiresOAuth: true,
+        companionProvider: "openai-codex",
+        fetch: async () => {
+          fetches.push({ token: "unexpected" });
+          return [{ credits: 1 }];
+        },
+      });
+    try {
+      setCompanion(undefined);
+      const start = handlers.get("session_start");
+      const modelSelect = handlers.get("model_select");
+      if (!start || !modelSelect) throw new Error("missing handlers");
+      start({}, ctx);
+      await flush();
+      modelSelect({ model: { provider: "openai" } }, ctx);
+      await flush();
+
+      expect(fetches).toEqual([]);
+      const events = readFileSync(scratchLog, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((event) => event.type === "provider_balance_unavailable");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.companion).toBe("openai-codex");
+    } finally {
+      setGoodiesLogPathForTesting(undefined);
+      await cleanup();
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("footer lifecycle", () => {
   /** Stand-in for pi's footer container: it holds whatever the extension last
    *  installed, and `undefined` restores the built-in footer. */
@@ -1212,6 +1406,166 @@ describe("parseCodexAccountId", () => {
         }),
       ),
     ).toBeNull();
+  });
+});
+
+describe("parseOpenAIClientId", () => {
+  function tokenWithPayload(payload: Record<string, unknown>): string {
+    const encoded = btoa(JSON.stringify(payload))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    return `header.${encoded}.signature`;
+  }
+
+  test("reads the issued client ID from the JWT payload", () => {
+    expect(
+      parseOpenAIClientId(tokenWithPayload({ client_id: "oaiapp_abc123" })),
+    ).toBe("oaiapp_abc123");
+  });
+
+  test("rejects tokens without a usable client ID", () => {
+    expect(parseOpenAIClientId("api-key")).toBeNull();
+    expect(parseOpenAIClientId("header.not-json.signature")).toBeNull();
+    expect(parseOpenAIClientId(tokenWithPayload({}))).toBeNull();
+    expect(
+      parseOpenAIClientId(tokenWithPayload({ client_id: "  " })),
+    ).toBeNull();
+  });
+});
+
+describe("openAIAppIsRegistered", () => {
+  test("requires exactly one app registration with the active client ID", () => {
+    expect(
+      openAIAppIsRegistered(
+        { items: [{ id: "oaiapp_a" }, { id: "oaiapp_b" }] },
+        "oaiapp_a",
+      ),
+    ).toBe(true);
+    expect(
+      openAIAppIsRegistered(
+        { items: [{ id: "oaiapp_a" }, { id: "oaiapp_a" }] },
+        "oaiapp_a",
+      ),
+    ).toBe(false);
+    expect(
+      openAIAppIsRegistered({ items: [{ id: "oaiapp_b" }] }, "oaiapp_a"),
+    ).toBe(false);
+    expect(openAIAppIsRegistered({}, "oaiapp_a")).toBe(false);
+    expect(openAIAppIsRegistered(null, "oaiapp_a")).toBe(false);
+  });
+});
+
+describe("fetchOpenAIQuota", () => {
+  function tokenWithPayload(payload: Record<string, unknown>): string {
+    const encoded = btoa(JSON.stringify(payload))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    return `header.${encoded}.signature`;
+  }
+
+  function jsonResponse(value: unknown): Response {
+    return new Response(JSON.stringify(value), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  test("verifies the app with the Codex token, then reads plan windows", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    const activeToken = tokenWithPayload({ client_id: "oaiapp_active" });
+    const codexToken = tokenWithPayload({
+      "https://api.openai.com/auth": { chatgpt_account_id: "account-1" },
+    });
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push({ url, headers: new Headers(init?.headers) });
+      if (url.endsWith("/wham/usage/chatpass/apps")) {
+        return jsonResponse({
+          items: [{ id: "oaiapp_other" }, { id: "oaiapp_active" }],
+        });
+      }
+      if (url.endsWith("/wham/usage")) {
+        return jsonResponse({
+          rate_limit: {
+            primary_window: {
+              used_percent: 25,
+              limit_window_seconds: 18_000,
+              reset_at: 1_800_000_000,
+            },
+            secondary_window: {
+              used_percent: 40,
+              limit_window_seconds: 604_800,
+            },
+          },
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      const balance = await fetchOpenAIQuota(
+        activeToken,
+        new AbortController().signal,
+        { companionToken: codexToken },
+      );
+      expect(balance).toEqual([
+        {
+          quota: {
+            remainingPercent: 75,
+            windowSeconds: 18_000,
+            resetAt: 1_800_000_000,
+          },
+        },
+        { quota: { remainingPercent: 60, windowSeconds: 604_800 } },
+      ]);
+      expect(calls.map((call) => call.url)).toEqual([
+        "https://chatgpt.com/backend-api/wham/usage/chatpass/apps",
+        "https://chatgpt.com/backend-api/wham/usage",
+      ]);
+      for (const call of calls) {
+        expect(call.headers.get("authorization")).toBe(`Bearer ${codexToken}`);
+        expect(call.headers.get("chatgpt-account-id")).toBe("account-1");
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("refuses to read usage when the app is not registered on that account", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push(url);
+      return jsonResponse({ items: [{ id: "oaiapp_other" }] });
+    }) as typeof fetch;
+
+    try {
+      await expect(
+        fetchOpenAIQuota(
+          tokenWithPayload({ client_id: "oaiapp_active" }),
+          new AbortController().signal,
+          {
+            companionToken: tokenWithPayload({
+              "https://api.openai.com/auth": {
+                chatgpt_account_id: "account-1",
+              },
+            }),
+          },
+        ),
+      ).rejects.toThrow("not found in the companion Codex account");
+      expect(calls).toEqual([
+        "https://chatgpt.com/backend-api/wham/usage/chatpass/apps",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 
@@ -1750,6 +2104,26 @@ describe("shared balance cache", () => {
     expect(balanceCacheKey("openai-codex", token("a", "one"))).not.toBe(
       balanceCacheKey("openai-codex", token("b", "one")),
     );
+  });
+
+  test("keys OpenAI balances on both the app and its companion Codex account", () => {
+    const jwt = (payload: Record<string, unknown>): string =>
+      `header.${btoa(JSON.stringify(payload))}.signature`;
+    const openai = (clientId: string): string => jwt({ client_id: clientId });
+    const codex = (account: string): string =>
+      jwt({
+        "https://api.openai.com/auth": { chatgpt_account_id: account },
+      });
+
+    expect(balanceCacheKey("openai", openai("app-a"), codex("acct-1"))).toBe(
+      balanceCacheKey("openai", openai("app-a"), codex("acct-1")),
+    );
+    expect(
+      balanceCacheKey("openai", openai("app-a"), codex("acct-1")),
+    ).not.toBe(balanceCacheKey("openai", openai("app-b"), codex("acct-1")));
+    expect(
+      balanceCacheKey("openai", openai("app-a"), codex("acct-1")),
+    ).not.toBe(balanceCacheKey("openai", openai("app-a"), codex("acct-2")));
   });
 });
 
