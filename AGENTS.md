@@ -35,6 +35,16 @@ pi-packages/
                          # kilo drift detection: footer badge (`kilo: stale …`) + kilo_warning
                          # lines in goodies.log + `bun run kilo-smoke` (live catalog check; run
                          # before releasing — DRIFT lines = kilo.ts hardcoded knowledge needs review)
+                         # provider-balance auth facts (verified in pi 0.99.0 dist): pi's TUI dispatches
+                         # built-in /login & /logout in setupEditorSubmitHandler and RETURNS before
+                         # extension input events run, and login completion fires NO extension-visible
+                         # event when a model is already selected — extensions cannot observe logins
+                         # via `input` or `model_select`; the only supported signal is re-reading the
+                         # model registry (getApiKeyForProvider/getProviderAuth — local reads, network
+                         # only for a due OAuth refresh). provider-balance therefore runs a 5s identity
+                         # watchdog comparing live credentials vs the displayed cache keys, and its
+                         # post-fetch recheck reads the ACTIVE token LAST (commit after that is sync —
+                         # never move an await between the final read and the cache commit).
   critique/               # ACTIVE (opt-in): launch the Bun-only Critique TUI from Pi
   council/                # DEVELOPMENT (not linked in .pi/extensions or ~/.pi/agent/extensions as of
                          # 2026-09-29): read-only multi-model design council — /council snapshots the
