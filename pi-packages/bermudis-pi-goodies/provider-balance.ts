@@ -74,16 +74,20 @@ const IDLE_REFRESH_INTERVAL_MS = 60_000;
 const IDLE_REFRESH_JITTER_MS = 15_000;
 /** Minimum time between turn_end/delegate:usage-triggered balance refreshes. See throttledRefresh. */
 const TURN_REFRESH_MIN_INTERVAL_MS = 30_000;
+/** How often the identity watchdog compares the live credentials against the
+ *  balance shown in the footer. Pi's built-in /login and /logout commands are
+ *  dispatched by the TUI before extension input events run and fire no
+ *  extension-visible event when a model is already selected, so the only
+ *  supported way to notice a credential swap is re-reading the model registry.
+ *  Each tick costs one or two local credential-store reads (network only when
+ *  an OAuth token is inside its refresh window, which is shared and locked).
+ *  5s keeps the post-login footer lag well under the old 60–75s worst case
+ *  (the next idle poll) without meaningful cost. */
+export const IDENTITY_WATCHDOG_INTERVAL_MS = 5_000;
 /** On session start, adopt a sibling/previous session's cache entry younger
  *  than this instead of refetching — rapid session switches then cost nothing. */
 const SESSION_START_CACHE_ADOPT_MS = 15_000;
-/** How long the post-/login poller waits for the new credential to appear,
- *  at 1s per attempt. Kilo device logins take 30–60s of human time (browser
- *  round-trip), so a ~9s window (the old 10-attempt cap) usually expired
- *  before the user finished and the footer kept the old account's balance
- *  until the next idle poll. 90s covers the human with margin; the poll is a
- *  local keychain/auth-store read, not a network request. */
-export const AUTH_TRANSITION_MAX_ATTEMPTS = 90;
+
 /** After a failed provider fetch, idle polls machine-wide back off for this
  *  long via a shared marker in the balance cache. */
 export const FAILURE_BACKOFF_MS = 60_000;
@@ -1554,7 +1558,7 @@ export default function providerBalance(
   /** Stamp shared by every throttled refresh trigger (turn_end, delegate:usage). */
   let lastThrottledRefreshAt: number | undefined;
   let idleRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-  let authTransitionTimer: ReturnType<typeof setTimeout> | undefined;
+  let identityWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
   let requestRender: (() => void) | undefined;
   /** True while our footer component is the one mounted in the TUI. */
   let footerInstalled = false;
@@ -1589,83 +1593,85 @@ export default function providerBalance(
     });
   }
 
-  /** Login/logout is delivered as input before the command changes auth. */
-  function invalidateAuthTransition(provider: string): void {
-    if (provider !== displayedProvider) return;
-    refreshGeneration++;
-    refreshInFlight = false;
-    refreshController?.abort();
-    refreshController = undefined;
-    displayedCacheKey = undefined;
-    clearBalance();
+  /**
+   * Periodically compare the LIVE credentials against the account the shown
+   * balance was fetched for, and refresh on any mismatch.
+   *
+   * This replaced an `input`-event hook for /login|/logout: pi's built-in
+   * command dispatcher (interactive-mode setupEditorSubmitHandler) handles
+   * both and returns before extension input handlers run, and the login
+   * completion path emits no extension-visible event when a model is already
+   * selected. The hook could therefore never fire from the TUI. Re-reading
+   * the model registry is a supported API, catches every credential-change
+   * path (TUI /login, /logout, another session's login on the same machine,
+   * a rotated token), and needs no assumptions about command routing.
+   */
+  function scheduleIdentityWatchdog(): void {
+    if (identityWatchdogTimer !== undefined) clearTimer(identityWatchdogTimer);
+    identityWatchdogTimer = setTimer(async () => {
+      identityWatchdogTimer = undefined;
+      await checkDisplayedIdentity();
+      if (activeContext !== undefined) scheduleIdentityWatchdog();
+    }, IDENTITY_WATCHDOG_INTERVAL_MS);
   }
 
-  function scheduleAuthTransitionCheck(
-    ctx: ExtensionContext,
-    provider: string,
-    previousCacheKey: string | undefined,
-    /** Set when `provider` is the companion login backing this provider. */
-    companionOf?: string,
-  ): void {
-    if (authTransitionTimer !== undefined) clearTimer(authTransitionTimer);
-    let attempts = 0;
-    // Deliberately not gated on refreshGeneration: any unrelated refresh
-    // (turn_end, agent_settled, an idle poll) landing while the user is still
-    // completing /login would otherwise kill the poller, and that refresh
-    // resolved the OLD credential before it started, so nothing would pick up
-    // the new one. Only a session switch (activeContext) ends the poll early.
-    const check = async (): Promise<void> => {
-      attempts++;
-      if (activeContext !== ctx) return;
-      let token: string | undefined;
-      let currentCacheKey: string | undefined;
-      try {
-        token = await ctx.modelRegistry.getApiKeyForProvider(provider);
-        if (token) {
-          if (companionOf) {
-            currentCacheKey = balanceCacheKey(provider, token);
-          } else {
-            const adapter = adapters[provider];
-            const companionToken = adapter?.companionProvider
-              ? (
-                  await ctx.modelRegistry.getProviderAuth(
-                    adapter.companionProvider,
-                  )
-                )?.auth.apiKey
-              : undefined;
-            currentCacheKey = balanceCacheKey(provider, token, companionToken);
-          }
-        }
-      } catch (error) {
-        // pi's getApiKeyForProvider swallows keychain errors and resolves to
-        // undefined, so this catch only fires if that contract changes (the
-        // test double rejects to exercise it). Log the failure — a silent
-        // catch here would hide exactly the breakage that stalls the
-        // post-/login footer — while keeping the retry-until-cap flow.
-        reportFailure(
-          "provider_balance_warning",
-          `[provider-balance] keychain read for "${provider}" failed while waiting for the /login credential swap (attempt ${attempts}/${AUTH_TRANSITION_MAX_ATTEMPTS}): ${describeError(error)}`,
+  async function checkDisplayedIdentity(): Promise<void> {
+    const ctx = activeContext;
+    if (ctx === undefined || ctx.mode !== "tui") return;
+    const provider = displayedProvider;
+    if (provider === undefined) return;
+    const adapter = adapters[provider];
+    if (!adapter) return;
+    // An in-flight refresh re-resolves identity after its fetch (and its
+    // mismatch branch triggers a follow-up refresh), so it already covers any
+    // swap this tick could have seen.
+    if (refreshInFlight) return;
+    let token: string | undefined;
+    let companionToken: string | undefined;
+    try {
+      token = await ctx.modelRegistry.getApiKeyForProvider(provider);
+      if (token && adapter.companionProvider) {
+        companionToken = (
+          await ctx.modelRegistry.getProviderAuth(adapter.companionProvider)
+        )?.auth.apiKey;
+      }
+    } catch (error) {
+      // Boundary: pi's getApiKeyForProvider swallows keychain errors and
+      // resolves to undefined, so a rejection here means that contract broke
+      // (the test double rejects to exercise it). This runs in a timer
+      // callback — rethrowing would escape as an unhandled rejection — so the
+      // failure is reported to the structured log and the watchdog keeps
+      // ticking; a silent catch would strand the footer on a stale account.
+      reportFailure(
+        "provider_balance_warning",
+        `[provider-balance] identity watchdog read for "${provider}" failed: ${describeError(error)}`,
+      );
+      return;
+    }
+    const model = ctx.model;
+    const oauthUsable =
+      !adapter.requiresOAuth ||
+      (model !== undefined &&
+        model.provider === provider &&
+        ctx.modelRegistry.isUsingOAuth(model));
+    let expectedCacheKey: string | undefined;
+    let expectedCompanionCacheKey: string | undefined;
+    if (token !== undefined && oauthUsable) {
+      expectedCacheKey = balanceCacheKey(provider, token, companionToken);
+      if (adapter.companionProvider && companionToken !== undefined) {
+        expectedCompanionCacheKey = balanceCacheKey(
+          adapter.companionProvider,
+          companionToken,
         );
-        if (attempts < AUTH_TRANSITION_MAX_ATTEMPTS) {
-          authTransitionTimer = setTimer(() => void check(), 1_000);
-        } else {
-          authTransitionTimer = undefined;
-        }
-        return;
       }
-      if (activeContext !== ctx) return;
-      if (currentCacheKey === previousCacheKey) {
-        if (attempts < AUTH_TRANSITION_MAX_ATTEMPTS) {
-          authTransitionTimer = setTimer(() => void check(), 1_000);
-        } else {
-          authTransitionTimer = undefined;
-        }
-        return;
-      }
-      authTransitionTimer = undefined;
-      void refreshForModel(ctx, ctx.model);
-    };
-    authTransitionTimer = setTimer(() => void check(), 250);
+    }
+    if (
+      expectedCacheKey === displayedCacheKey &&
+      expectedCompanionCacheKey === displayedCompanionCacheKey
+    ) {
+      return;
+    }
+    void refreshForModel(ctx, model);
   }
 
   /** Refresh the balance for whatever model is active. Provider-agnostic: the
@@ -1844,20 +1850,27 @@ export default function providerBalance(
       // flicker proportional to keychain latency. The re-check only needs to
       // clear the display if it FAILS (handled below); a passing check just
       // commits the fresh balance on top of the old one.
+      // Re-read every credential the cache key covers before accepting the
+      // fetch, and read the ACTIVE token LAST — twice. Any credential change
+      // must land in one of the awaits below to go undetected: before the
+      // companion read (mismatched composite key), or between the two active
+      // reads (double read disagrees). After the second active read resolves,
+      // the remaining checks and the commit are synchronous, so there is no
+      // window left in which a swap could slip through and paint the previous
+      // account's quota. Reading the companion after the active token (as this
+      // block once did) reopened exactly such a window after the double read.
       let currentToken: string | undefined;
       let confirmedToken: string | undefined;
       let companionTokenAfter: string | undefined;
       try {
-        currentToken = await ctx.modelRegistry.getApiKeyForProvider(providerId);
-        // A credential can change while the first final lookup is pending.
-        // Resolve it once more before accepting the provider response.
-        confirmedToken =
-          await ctx.modelRegistry.getApiKeyForProvider(providerId);
         if (adapter.companionProvider) {
           companionTokenAfter = (
             await ctx.modelRegistry.getProviderAuth(adapter.companionProvider)
           )?.auth.apiKey;
         }
+        currentToken = await ctx.modelRegistry.getApiKeyForProvider(providerId);
+        confirmedToken =
+          await ctx.modelRegistry.getApiKeyForProvider(providerId);
       } catch (error) {
         if (generation === refreshGeneration) {
           displayedCacheKey = undefined;
@@ -2060,7 +2073,10 @@ export default function providerBalance(
     companionWarningsLogged.clear();
     installFooter(ctx);
     cleanupBalanceCache(cacheDir, now());
-    if (ctx.mode === "tui") scheduleIdleRefresh();
+    if (ctx.mode === "tui") {
+      scheduleIdleRefresh();
+      scheduleIdentityWatchdog();
+    }
     // Footer data is supplemental. Never hold up session readiness on network.
     // Adopt a seconds-old sibling/previous reading instead of refetching, so
     // rapid session switches and staggered process starts don't stack
@@ -2070,28 +2086,12 @@ export default function providerBalance(
     });
   });
 
-  pi.on("input", (event, ctx) => {
-    const match = /^\/(login|logout)(?:\s+(\S+))?$/.exec(event.text.trim());
-    if (!match) return;
-    const provider = match[2] ?? ctx.model?.provider;
-    const activeProvider = ctx.model?.provider;
-    if (!provider || !activeProvider) return;
-    // `openai` usage is read through the companion `openai-codex` login, so a
-    // companion login/logout changes the active row too.
-    const isCompanionLogin =
-      adapters[activeProvider]?.companionProvider === provider;
-    if (provider !== activeProvider && !isCompanionLogin) return;
-    const previousCacheKey = isCompanionLogin
-      ? displayedCompanionCacheKey
-      : displayedCacheKey;
-    invalidateAuthTransition(activeProvider);
-    scheduleAuthTransitionCheck(
-      ctx,
-      provider,
-      previousCacheKey,
-      isCompanionLogin ? activeProvider : undefined,
-    );
-  });
+  // NOTE: there is deliberately no `input` handler here for /login or
+  // /logout. Pi's TUI dispatches those built-in commands directly in the
+  // editor submit handler and returns before extension input events are
+  // emitted, so such a hook can never fire. Credential changes (either login
+  // of the active provider or of the openai-codex companion) are picked up by
+  // the identity watchdog instead.
 
   pi.on("model_select", (event, ctx) => {
     activeContext = ctx;
@@ -2180,8 +2180,8 @@ export default function providerBalance(
     lastThrottledRefreshAt = undefined;
     if (idleRefreshTimer !== undefined) clearTimer(idleRefreshTimer);
     idleRefreshTimer = undefined;
-    if (authTransitionTimer !== undefined) clearTimer(authTransitionTimer);
-    authTransitionTimer = undefined;
+    if (identityWatchdogTimer !== undefined) clearTimer(identityWatchdogTimer);
+    identityWatchdogTimer = undefined;
     activeContext = undefined;
     activeThinkingLevel = "off";
     requestRender = undefined;

@@ -44,7 +44,7 @@ import providerBalance, {
   writeCachedBalance,
   clearBalanceFailureMarker,
   FAILURE_BACKOFF_MS,
-  AUTH_TRANSITION_MAX_ATTEMPTS,
+  IDENTITY_WATCHDOG_INTERVAL_MS,
   formatKiloCatalogStatus,
   mergeSideBadgeIntoStatsLine,
   zaiQuotaToBalance,
@@ -312,295 +312,51 @@ describe("idle refresh lifecycle", () => {
 
     start({}, ctx);
     expect(scheduled[0]?.delay).toBe(67_500);
+    // The identity watchdog is armed alongside the idle refresh.
+    expect(scheduled[1]?.delay).toBe(IDENTITY_WATCHDOG_INTERVAL_MS);
     expect(apiKeyCalls).toBe(1);
     await Promise.resolve();
 
     scheduled[0]?.callback();
     expect(apiKeyCalls).toBe(1);
-    expect(scheduled).toHaveLength(2);
-
-    idle = true;
-    scheduled[1]?.callback();
-    expect(apiKeyCalls).toBe(2);
-    await Promise.resolve();
     expect(scheduled).toHaveLength(3);
 
+    idle = true;
+    scheduled[2]?.callback();
+    expect(apiKeyCalls).toBe(2);
+    await Promise.resolve();
+    expect(scheduled).toHaveLength(4);
+
     shutdown({}, ctx);
-    expect(cleared).toContain(3);
+    expect(cleared).toContain(4);
+    expect(cleared).toContain(2);
   });
 });
 
-describe("auth transition", () => {
-  test("stops polling after the attempt cap instead of running forever", async () => {
+describe("identity watchdog", () => {
+  // Pi's TUI dispatches built-in /login and /logout before extension input
+  // events run and login completion fires no extension-visible event when a
+  // model is already selected, so these tests never simulate a typed command.
+  // They simulate what a login actually looks like to this extension: the
+  // model registry starts answering with a different credential. The watchdog
+  // must notice on its own tick.
+  interface WatchdogHarness {
+    handlers: Map<string, (event: unknown, ctx: unknown) => unknown>;
+    ctx: ExtensionContext;
+    directory: string;
+    fetches: Array<{ token: string; companionToken?: string }>;
+    scheduled: Array<{ callback: () => void; delay: number }>;
+    setActiveToken: (token: string | undefined) => void;
+    cleanup: () => Promise<void>;
+  }
+
+  function watchdogHarness(
+    adapter: BalanceAdapter,
+    registryOverrides?: Record<string, unknown>,
+  ): WatchdogHarness {
     const handlers = new Map<
       string,
-      (event: unknown, ctx: ExtensionContext) => unknown
-    >();
-    const scheduled: Array<{ callback: () => void; delay: number }> = [];
-    const cleared: unknown[] = [];
-    const setTimeout = ((callback: () => void, delay: number) => {
-      scheduled.push({ callback, delay });
-      return scheduled.length as unknown as ReturnType<
-        typeof globalThis.setTimeout
-      >;
-    }) as typeof globalThis.setTimeout;
-    const clearTimeout = ((timer: unknown) => {
-      cleared.push(timer);
-    }) as typeof globalThis.clearTimeout;
-
-    providerBalance(
-      {
-        on(event, handler) {
-          handlers.set(
-            event,
-            handler as (event: unknown, ctx: ExtensionContext) => unknown,
-          );
-        },
-        events: {
-          emit() {},
-          on() {
-            return () => {};
-          },
-        },
-      } as unknown as ExtensionAPI,
-      { setTimeout, clearTimeout, random: () => 0.5 },
-    );
-
-    let apiKeyCalls = 0;
-    const ctx = {
-      mode: "tui",
-      model: { provider: "kilo" },
-      isIdle: () => false,
-      ui: { setFooter() {} },
-      sessionManager: { getBranch: () => [] },
-      modelRegistry: {
-        isUsingOAuth: () => false,
-        getApiKeyForProvider: async () => {
-          apiKeyCalls++;
-          throw new Error("keychain unavailable");
-        },
-      },
-    } as unknown as ExtensionContext;
-
-    const start = handlers.get("session_start");
-    const input = handlers.get("input");
-    if (!start || !input) throw new Error("missing lifecycle handlers");
-
-    // session_start schedules the idle timer (index 0) and kicks a refresh
-    // that calls getApiKeyForProvider once.
-    start({}, ctx);
-    const refreshCallsAtStart = apiKeyCalls;
-    await Promise.resolve();
-
-    // /login for the active provider arms the auth-transition poller.
-    input({ text: "/login kilo" }, ctx);
-
-    // The poller is the most recently scheduled timer.
-    let pollerIndex = scheduled.length - 1;
-    for (let attempt = 1; attempt <= AUTH_TRANSITION_MAX_ATTEMPTS; attempt++) {
-      scheduled[pollerIndex]?.callback();
-      await Promise.resolve();
-      // Each failed lookup reschedules (below the cap) or stops (at the cap).
-      if (attempt < AUTH_TRANSITION_MAX_ATTEMPTS) {
-        expect(scheduled.length).toBe(pollerIndex + 2);
-        pollerIndex = scheduled.length - 1;
-      } else {
-        // At the cap the timer must not reschedule.
-        expect(scheduled.length).toBe(pollerIndex + 1);
-      }
-    }
-
-    // Exactly AUTH_TRANSITION_MAX_ATTEMPTS polling lookups, plus the initial
-    // session_start refresh.
-    expect(apiKeyCalls - refreshCallsAtStart).toBe(
-      AUTH_TRANSITION_MAX_ATTEMPTS,
-    );
-  });
-
-  test("logs a warning when the keychain read rejects, but keeps the retry flow", async () => {
-    // pi's getApiKeyForProvider swallows keychain errors and resolves to
-    // undefined, so in production this catch is nearly unreachable — the
-    // rejecting test double exercises the defensive path. Regression: the
-    // failure must land in the goodies log (provider + error context, no
-    // credential values) while the poller still retries to its cap.
-    const handlers = new Map<
-      string,
-      (event: unknown, ctx: ExtensionContext) => unknown
-    >();
-    const scheduled: Array<{ callback: () => void; delay: number }> = [];
-    const cleared: unknown[] = [];
-    const setTimeout = ((callback: () => void, delay: number) => {
-      scheduled.push({ callback, delay });
-      return scheduled.length as unknown as ReturnType<
-        typeof globalThis.setTimeout
-      >;
-    }) as typeof globalThis.setTimeout;
-    const clearTimeout = ((timer: unknown) => {
-      cleared.push(timer);
-    }) as typeof globalThis.clearTimeout;
-
-    const scratchDir = mkdtempSync(
-      join(tmpdir(), "provider-balance-log-test-"),
-    );
-    const scratchLog = join(scratchDir, "goodies.log");
-    setGoodiesLogPathForTesting(scratchLog);
-
-    try {
-      providerBalance(
-        {
-          on(event, handler) {
-            handlers.set(
-              event,
-              handler as (event: unknown, ctx: ExtensionContext) => unknown,
-            );
-          },
-          events: {
-            emit() {},
-            on() {
-              return () => {};
-            },
-          },
-        } as unknown as ExtensionAPI,
-        { setTimeout, clearTimeout, random: () => 0.5 },
-      );
-
-      const ctx = {
-        mode: "tui",
-        model: { provider: "kilo" },
-        isIdle: () => false,
-        ui: { setFooter() {} },
-        sessionManager: { getBranch: () => [] },
-        modelRegistry: {
-          isUsingOAuth: () => false,
-          getApiKeyForProvider: async () => {
-            throw new Error("keychain unavailable");
-          },
-        },
-      } as unknown as ExtensionContext;
-
-      const start = handlers.get("session_start");
-      const input = handlers.get("input");
-      if (!start || !input) throw new Error("missing lifecycle handlers");
-
-      start({}, ctx);
-      await Promise.resolve();
-
-      input({ text: "/login kilo" }, ctx);
-
-      // Drive three poll attempts: each failed lookup must land a warning
-      // in the log AND still reschedule (the retry-until-cap flow).
-      let pollerIndex = scheduled.length - 1;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        scheduled[pollerIndex]?.callback();
-        await Promise.resolve();
-        expect(scheduled.length).toBe(pollerIndex + 2);
-        pollerIndex = scheduled.length - 1;
-      }
-
-      const warnings = readFileSync(scratchLog, "utf-8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as Record<string, unknown>)
-        .filter((entry) => entry.type === "provider_balance_warning");
-      expect(warnings.length).toBe(3);
-      const first = warnings[0];
-      if (!first) throw new Error("no keychain warning logged");
-      const message = first.message;
-      expect(message).toContain('for "kilo"');
-      expect(message).toContain("keychain unavailable");
-      expect(message).toContain("attempt 1/90");
-    } finally {
-      setGoodiesLogPathForTesting(undefined);
-      await rm(scratchDir, { recursive: true, force: true });
-    }
-  });
-
-  test("anchored /login regex does not match '/logins are bad' (prefix-match bug)", async () => {
-    // Regression: the old regex /^\/(login|logout)(?:\s+(\S+))?/ matched the
-    // prefix of "/logins are bad", arming a spurious auth-transition poller
-    // that triggered keychain polls for a command that isn't /login.
-    const handlers = new Map<
-      string,
-      (event: unknown, ctx: ExtensionContext) => unknown
-    >();
-    const scheduled: Array<{ callback: () => void; delay: number }> = [];
-    const cleared: unknown[] = [];
-    const setTimeout = ((callback: () => void, delay: number) => {
-      scheduled.push({ callback, delay });
-      return scheduled.length as unknown as ReturnType<
-        typeof globalThis.setTimeout
-      >;
-    }) as typeof globalThis.setTimeout;
-    const clearTimeout = ((timer: unknown) => {
-      cleared.push(timer);
-    }) as typeof globalThis.clearTimeout;
-
-    providerBalance(
-      {
-        on(event, handler) {
-          handlers.set(
-            event,
-            handler as (event: unknown, ctx: ExtensionContext) => unknown,
-          );
-        },
-        events: {
-          emit() {},
-          on() {
-            return () => {};
-          },
-        },
-      } as unknown as ExtensionAPI,
-      { setTimeout, clearTimeout, random: () => 0.5 },
-    );
-
-    let apiKeyCalls = 0;
-    const ctx = {
-      mode: "tui",
-      model: { provider: "kilo" },
-      isIdle: () => false,
-      ui: { setFooter() {} },
-      sessionManager: { getBranch: () => [] },
-      modelRegistry: {
-        isUsingOAuth: () => false,
-        getApiKeyForProvider: async () => {
-          apiKeyCalls++;
-          throw new Error("keychain unavailable");
-        },
-      },
-    } as unknown as ExtensionContext;
-
-    const start = handlers.get("session_start");
-    const input = handlers.get("input");
-    if (!start || !input) throw new Error("missing lifecycle handlers");
-
-    start({}, ctx);
-    await Promise.resolve();
-    const timersBeforeInput = scheduled.length;
-    const keyCallsBeforeInput = apiKeyCalls;
-
-    // "/logins are bad" must NOT match — it's not a /login command.
-    input({ text: "/logins are bad" }, ctx);
-    await Promise.resolve();
-
-    // No new timer was scheduled (no auth-transition poller armed).
-    expect(scheduled.length).toBe(timersBeforeInput);
-    // No additional keychain lookups were triggered.
-    expect(apiKeyCalls).toBe(keyCallsBeforeInput);
-
-    // Sanity: a real "/login kilo" DOES arm the poller.
-    input({ text: "/login kilo" }, ctx);
-    await Promise.resolve();
-    expect(scheduled.length).toBeGreaterThan(timersBeforeInput);
-  });
-
-  test("survives an unrelated refresh landing inside the poll window", async () => {
-    // Regression: the poller used to capture refreshGeneration and bail out
-    // when any other refresh (turn_end, agent_settled, idle poll) bumped it.
-    // That refresh resolved the OLD credential before it started, so the
-    // credential swap went unnoticed until some later, unrelated trigger.
-    const handlers = new Map<
-      string,
-      (event: unknown, ctx: ExtensionContext) => unknown
+      (event: unknown, ctx: unknown) => unknown
     >();
     const scheduled: Array<{ callback: () => void; delay: number }> = [];
     const setTimeout = ((callback: () => void, delay: number) => {
@@ -611,101 +367,302 @@ describe("auth transition", () => {
     }) as typeof globalThis.setTimeout;
     const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
     const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
-    const flush = () =>
-      new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+    const fetches: Array<{ token: string; companionToken?: string }> = [];
+    let activeToken: string | undefined = "token-1";
+    providerBalance(
+      {
+        on(event, handler) {
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: unknown) => unknown,
+          );
+        },
+        events: {
+          emit() {},
+          on() {
+            return () => {};
+          },
+        },
+      } as unknown as ExtensionAPI,
+      {
+        adapters: { openai: adapter },
+        cacheDir: directory,
+        random: () => 0.5,
+        setTimeout,
+        clearTimeout,
+      },
+    );
+    const ctx = {
+      mode: "tui",
+      model: { provider: "openai" },
+      isIdle: () => false,
+      ui: { setFooter() {} },
+      sessionManager: { getBranch: () => [] },
+      modelRegistry: {
+        isUsingOAuth: () => true,
+        getApiKeyForProvider: async () => activeToken,
+        getProviderAuth: async (provider: string) =>
+          provider === "openai-codex"
+            ? { auth: { apiKey: "companion-token" } }
+            : undefined,
+        ...registryOverrides,
+      },
+    } as unknown as ExtensionContext;
+    return {
+      handlers,
+      ctx,
+      directory,
+      fetches,
+      scheduled,
+      setActiveToken: (token) => {
+        activeToken = token;
+      },
+      cleanup: async () => {
+        await rm(directory, { recursive: true, force: true });
+      },
+    };
+  }
 
-    let token = "token-old";
-    const fetched: string[] = [];
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  test("picks up an active-provider login swap within one tick", async () => {
+    const { handlers, ctx, fetches, scheduled, setActiveToken, cleanup } =
+      watchdogHarness({
+        requiresOAuth: true,
+        fetch: async (token) => {
+          fetches.push({ token });
+          return [{ credits: 1 }];
+        },
+      });
     try {
-      providerBalance(
-        {
-          on(event, handler) {
-            handlers.set(
-              event,
-              handler as (event: unknown, ctx: ExtensionContext) => unknown,
-            );
-          },
-          events: {
-            emit() {},
-            on() {
-              return () => {};
-            },
-          },
-        } as unknown as ExtensionAPI,
-        {
-          adapters: {
-            kilo: {
-              fetch: async (fetchedToken: string) => {
-                fetched.push(fetchedToken);
-                return [{ credits: 1 }];
-              },
-            },
-          },
-          cacheDir: directory,
-          random: () => 0.5,
-          setTimeout,
-          clearTimeout,
-        },
-      );
-
-      const ctx = {
-        mode: "tui",
-        model: { provider: "kilo" },
-        isIdle: () => false,
-        ui: { setFooter() {} },
-        sessionManager: { getBranch: () => [] },
-        modelRegistry: {
-          isUsingOAuth: () => false,
-          getApiKeyForProvider: async () => token,
-        },
-      } as unknown as ExtensionContext;
-
       const start = handlers.get("session_start");
-      const input = handlers.get("input");
-      const turnEnd = handlers.get("turn_end");
-      if (!start || !input || !turnEnd) {
-        throw new Error("missing lifecycle handlers");
-      }
+      if (!start) throw new Error("missing session_start");
 
+      // session_start arms the idle refresh (index 0) and the watchdog
+      // (index 1), then kicks one refresh itself.
       start({}, ctx);
       await flush();
-      expect(fetched).toEqual(["token-old"]);
+      expect(fetches).toEqual([{ token: "token-1" }]);
+      expect(scheduled[1]?.delay).toBe(IDENTITY_WATCHDOG_INTERVAL_MS);
 
-      // "/login kilo" arms the transition poller.
-      input({ text: "/login kilo" }, ctx);
-      const poller = scheduled[scheduled.length - 1]!;
-      expect(poller.delay).toBe(250);
-
-      // An authoritative refresh lands while the browser login is still open.
-      turnEnd({ turnIndex: 0 }, ctx);
+      // Login completes out-of-band: only the registry answer changes.
+      setActiveToken("token-2");
+      scheduled[1]?.callback();
       await flush();
 
-      // The credential has not changed yet: the poller must keep polling.
-      poller.callback();
-      await flush();
-      const repolls = scheduled.filter((entry) => entry.delay === 1_000);
-      expect(repolls.length).toBe(1);
-
-      // A Kilo device login takes 30–60s of human time; the old 10-attempt
-      // cap gave up at ~9s and the footer kept the old balance. Poll past
-      // the old window with the token unchanged — the poller must survive.
-      let last = repolls[repolls.length - 1]!;
-      for (let i = 0; i < 45; i++) {
-        last.callback();
-        await flush();
-        const next = scheduled.filter((entry) => entry.delay === 1_000);
-        expect(next.length).toBe(i + 2); // rescheduled despite no new token
-        last = next[next.length - 1]!;
-      }
-
-      // The login completes; the surviving poll notices the new credential.
-      token = "token-new";
-      last.callback();
-      await flush();
-      expect(fetched).toEqual(["token-old", "token-old", "token-new"]);
+      // The swap was detected and refreshed without any input event.
+      expect(fetches).toEqual([{ token: "token-1" }, { token: "token-2" }]);
+      // The watchdog re-armed itself for the next swap.
+      const rearm = scheduled[scheduled.length - 1];
+      expect(rearm?.delay).toBe(IDENTITY_WATCHDOG_INTERVAL_MS);
     } finally {
-      await rm(directory, { recursive: true, force: true });
+      await cleanup();
     }
+  });
+
+  test("detects a logout and does not repeatedly refetch afterwards", async () => {
+    const { handlers, ctx, fetches, scheduled, setActiveToken, cleanup } =
+      watchdogHarness({
+        requiresOAuth: true,
+        fetch: async (token) => {
+          fetches.push({ token });
+          return [{ credits: 1 }];
+        },
+      });
+    let apiKeyReads = 0;
+    const registry = ctx.modelRegistry as unknown as {
+      getApiKeyForProvider: (provider: string) => Promise<string | undefined>;
+    };
+    const baseRead = registry.getApiKeyForProvider;
+    registry.getApiKeyForProvider = async (provider) => {
+      apiKeyReads++;
+      return baseRead(provider);
+    };
+    try {
+      const start = handlers.get("session_start");
+      if (!start) throw new Error("missing session_start");
+
+      // Logged in at start: one fetch.
+      start({}, ctx);
+      await flush();
+      expect(fetches).toEqual([{ token: "token-1" }]);
+
+      // Logout: the registry now answers undefined. One tick must clear the
+      // displayed balance (refresh runs, fetch does not). The tick costs two
+      // reads: the watchdog's own check plus the pre-fetch read of the
+      // refresh it triggers (which then takes the no-token early exit).
+      const readsAtLogout = apiKeyReads;
+      setActiveToken(undefined);
+      scheduled[1]?.callback();
+      await flush();
+      expect(fetches).toEqual([{ token: "token-1" }]);
+      expect(apiKeyReads).toBe(readsAtLogout + 2);
+
+      // Steady logged-out state: further ticks stay quiet (no refresh storm)
+      // and each costs exactly one registry read.
+      const readsAfterClear = apiKeyReads;
+      scheduled[scheduled.length - 1]?.callback();
+      await flush();
+      scheduled[scheduled.length - 1]?.callback();
+      await flush();
+      expect(fetches).toEqual([{ token: "token-1" }]);
+      expect(apiKeyReads).toBe(readsAfterClear + 2);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("stays quiet while credentials are unchanged, and keeps ticking", async () => {
+    const { handlers, ctx, fetches, scheduled, cleanup } = watchdogHarness({
+      requiresOAuth: true,
+      fetch: async (token) => {
+        fetches.push({ token });
+        return [{ credits: 1 }];
+      },
+    });
+    try {
+      const start = handlers.get("session_start");
+      if (!start) throw new Error("missing session_start");
+      start({}, ctx);
+      await flush();
+      expect(fetches).toEqual([{ token: "token-1" }]);
+
+      for (let tick = 0; tick < 3; tick++) {
+        scheduled[scheduled.length - 1]?.callback();
+        await flush();
+      }
+      expect(fetches).toEqual([{ token: "token-1" }]);
+      expect(scheduled.length).toBeGreaterThanOrEqual(5);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("does not read credentials while a refresh is in flight", async () => {
+    let apiKeyReads = 0;
+    let finishFetch: (() => void) | undefined;
+    const { handlers, ctx, fetches, scheduled, cleanup } = watchdogHarness(
+      {
+        requiresOAuth: true,
+        fetch: async (token) => {
+          fetches.push({ token });
+          await new Promise<void>((resolve) => {
+            finishFetch = resolve;
+          });
+          return [{ credits: 1 }];
+        },
+      },
+      {
+        getApiKeyForProvider: async () => {
+          apiKeyReads++;
+          return "token-1";
+        },
+      },
+    );
+    try {
+      const start = handlers.get("session_start");
+      if (!start) throw new Error("missing session_start");
+      start({}, ctx);
+      await flush();
+      // The session-start fetch is parked inside the adapter.
+      expect(fetches).toEqual([{ token: "token-1" }]);
+      const readsWhileInFlight = apiKeyReads;
+
+      // A watchdog tick during the in-flight refresh must bail out before
+      // touching the registry — the refresh re-checks identity after its
+      // fetch and would double-fetch on a mismatch.
+      scheduled[1]?.callback();
+      await flush();
+      expect(apiKeyReads).toBe(readsWhileInFlight);
+
+      finishFetch?.();
+      await flush();
+      scheduled[scheduled.length - 1]?.callback();
+      await flush();
+      expect(apiKeyReads).toBeGreaterThan(readsWhileInFlight);
+      expect(fetches).toEqual([{ token: "token-1" }]);
+    } finally {
+      finishFetch?.();
+      await cleanup();
+    }
+  });
+
+  test("logs a warning when the credential read rejects, but keeps ticking", async () => {
+    // pi's getApiKeyForProvider swallows keychain errors and resolves to
+    // undefined, so in production this catch is nearly unreachable — the
+    // rejecting test double exercises the defensive boundary. The failure
+    // must land in the goodies log (provider + error context, no credential
+    // values) and the watchdog must survive it.
+    const scratchDir = mkdtempSync(join(tmpdir(), "provider-balance-log-"));
+    const scratchLog = join(scratchDir, "goodies.log");
+    setGoodiesLogPathForTesting(scratchLog);
+    const { handlers, ctx, scheduled, cleanup } = watchdogHarness(
+      {
+        requiresOAuth: true,
+        fetch: async () => [{ credits: 1 }],
+      },
+      {
+        getApiKeyForProvider: async () => {
+          throw new Error("keychain unavailable");
+        },
+      },
+    );
+    try {
+      const start = handlers.get("session_start");
+      if (!start) throw new Error("missing session_start");
+      start({}, ctx);
+      await flush();
+
+      scheduled[1]?.callback();
+      await flush();
+      scheduled[scheduled.length - 1]?.callback();
+      await flush();
+
+      const warnings = readFileSync(scratchLog, "utf-8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((entry) => entry.type === "provider_balance_warning");
+      expect(warnings.length).toBe(2);
+      const message = warnings[0]?.message;
+      expect(message).toContain('identity watchdog read for "openai" failed');
+      expect(message).toContain("keychain unavailable");
+      // The watchdog re-armed after both failures.
+      expect(scheduled[scheduled.length - 1]?.delay).toBe(
+        IDENTITY_WATCHDOG_INTERVAL_MS,
+      );
+    } finally {
+      setGoodiesLogPathForTesting(undefined);
+      await cleanup();
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not observe /login through the input event", async () => {
+    // Regression (review of 9fde466): pi's TUI handles built-in /login and
+    // /logout in the editor submit handler and returns before extension
+    // input events are emitted, so an `input` hook for those commands is
+    // unreachable and only made tests pass by invoking the callback
+    // directly. Credential changes must flow through the watchdog instead.
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: ExtensionContext) => unknown
+    >();
+    providerBalance({
+      on(event, handler) {
+        handlers.set(
+          event,
+          handler as (event: unknown, ctx: ExtensionContext) => unknown,
+        );
+      },
+      events: {
+        emit() {},
+        on() {
+          return () => {};
+        },
+      },
+    } as unknown as ExtensionAPI);
+    expect(handlers.has("input")).toBe(false);
   });
 });
 
@@ -816,27 +773,24 @@ describe("companion credentials", () => {
     }
   });
 
-  test("waits for a companion /login before refreshing the active OpenAI row", async () => {
-    const {
-      handlers,
-      ctx,
-      directory,
-      fetches,
-      scheduled,
-      setCompanion,
-      cleanup,
-    } = harness({
-      requiresOAuth: true,
-      companionProvider: "openai-codex",
-      fetch: async (token, _signal, options) => {
-        fetches.push({ token, companionToken: options?.companionToken });
-        return [{ credits: 3 }];
-      },
-    });
+  test("picks up a companion login appearing within one tick", async () => {
+    // Regression (review of 9fde466): the old test armed a poller by invoking
+    // the extension's `input` handler with "/login openai-codex" — but pi's
+    // TUI dispatches built-in /login before input events run, so that path
+    // can never fire. The watchdog must notice the new companion credential
+    // from the registry alone.
+    const { handlers, ctx, fetches, scheduled, setCompanion, cleanup } =
+      harness({
+        requiresOAuth: true,
+        companionProvider: "openai-codex",
+        fetch: async (token, _signal, options) => {
+          fetches.push({ token, companionToken: options?.companionToken });
+          return [{ credits: 3 }];
+        },
+      });
     try {
       const start = handlers.get("session_start");
-      const input = handlers.get("input");
-      if (!start || !input) throw new Error("missing lifecycle handlers");
+      if (!start) throw new Error("missing session_start");
 
       // Start without the companion: no balance and no fetch.
       setCompanion(undefined);
@@ -844,20 +798,144 @@ describe("companion credentials", () => {
       await flush();
       expect(fetches).toEqual([]);
 
-      // The user submits `/login openai-codex`; the credential appears only
-      // after the browser flow completes, so the poller must wait for it.
-      input({ text: "/login openai-codex" }, ctx);
+      // The user completes `/login openai-codex` in the browser; the
+      // credential simply starts appearing from the registry.
       setCompanion("companion-new");
-      const poller = scheduled[scheduled.length - 1];
-      if (!poller) throw new Error("missing auth transition poller");
-      expect(poller.delay).toBe(250);
-      poller.callback();
+      scheduled[1]?.callback();
       await flush();
       expect(fetches).toEqual([
         { token: "active-token", companionToken: "companion-new" },
       ]);
     } finally {
       await cleanup();
+    }
+  });
+
+  test("does not commit the previous account's quota when the active login swaps during the post-fetch companion lookup", async () => {
+    // Regression (review of 9fde466): the post-fetch verification used to
+    // re-read the companion AFTER the double active-token read. An active
+    // login swap (old app -> new app) during that pending companion lookup
+    // left currentToken/confirmedToken identifying the old app, every
+    // comparison passed, and the old account's quota was committed. The
+    // active token must be read last; after it resolves, the commit is
+    // synchronous, leaving no window for a swap.
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: unknown) => unknown
+    >();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    const fetches: Array<{ token: string; companionToken?: string }> = [];
+    let activeToken = "token-a";
+    let companionReads = 0;
+    let releasePostFetchRead!: () => void;
+    const postFetchRead = new Promise<void>((resolve) => {
+      releasePostFetchRead = resolve;
+    });
+    providerBalance(
+      {
+        on(event, handler) {
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: unknown) => unknown,
+          );
+        },
+        events: {
+          emit() {},
+          on() {
+            return () => {};
+          },
+        },
+      } as unknown as ExtensionAPI,
+      {
+        adapters: {
+          openai: {
+            requiresOAuth: true,
+            companionProvider: "openai-codex",
+            fetch: async (token, _signal, options) => {
+              fetches.push({ token, companionToken: options?.companionToken });
+              return [{ credits: 42 }];
+            },
+          },
+        },
+        cacheDir: directory,
+        random: () => 0.5,
+        setTimeout,
+        clearTimeout,
+      },
+    );
+    const ctx = {
+      mode: "tui",
+      model: { provider: "openai" },
+      isIdle: () => false,
+      ui: { setFooter() {} },
+      sessionManager: { getBranch: () => [] },
+      modelRegistry: {
+        isUsingOAuth: () => true,
+        getApiKeyForProvider: async () => activeToken,
+        getProviderAuth: async (provider: string) => {
+          if (provider !== "openai-codex") return undefined;
+          companionReads++;
+          // Call #2 is the post-fetch verification read; park it so the
+          // active login can swap while it is pending.
+          if (companionReads === 2) await postFetchRead;
+          return { auth: { apiKey: "companion-token" } };
+        },
+      },
+    } as unknown as ExtensionContext;
+    try {
+      const start = handlers.get("session_start");
+      if (!start) throw new Error("missing session_start");
+
+      start({}, ctx);
+      await flush();
+      // The first fetch landed but its commit is parked in the gated read.
+      expect(fetches).toEqual([
+        { token: "token-a", companionToken: "companion-token" },
+      ]);
+      expect(
+        readCachedBalance(
+          balanceCacheKey("openai", "token-a", "companion-token"),
+          Date.now(),
+          directory,
+        ),
+      ).toBeNull();
+
+      // The active login swaps while the post-fetch companion lookup pends.
+      activeToken = "token-b";
+      releasePostFetchRead();
+      await flush();
+
+      // Nothing may be committed under the old app's cache key…
+      expect(
+        readCachedBalance(
+          balanceCacheKey("openai", "token-a", "companion-token"),
+          Date.now(),
+          directory,
+        ),
+      ).toBeNull();
+      // …and the detected mismatch must trigger an authoritative refresh for
+      // the new login.
+      expect(fetches).toEqual([
+        { token: "token-a", companionToken: "companion-token" },
+        { token: "token-b", companionToken: "companion-token" },
+      ]);
+      expect(
+        readCachedBalance(
+          balanceCacheKey("openai", "token-b", "companion-token"),
+          Date.now(),
+          directory,
+        ),
+      ).not.toBeNull();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
@@ -2233,6 +2311,11 @@ describe("shared failure backoff and session-start adoption", () => {
       const start = handlers.get("session_start");
       const turnEnd = handlers.get("turn_end");
       if (!start || !turnEnd) throw new Error("missing handlers");
+      // The idle refresh re-arms with delay 67_500 (random() = 0.5); the
+      // identity watchdog (5s) is also armed, so "last scheduled" is not
+      // necessarily the idle poll.
+      const lastIdle = () =>
+        scheduled.filter((entry) => entry.delay === 67_500).pop();
 
       // Session start fetches and fails; the failure marker is written.
       start({}, ctx);
@@ -2243,7 +2326,7 @@ describe("shared failure backoff and session-start adoption", () => {
       );
 
       // An idle poll inside the backoff window skips the fetch entirely.
-      scheduled[scheduled.length - 1]?.callback();
+      lastIdle()?.callback();
       await flush();
       expect(fetchCalls).toBe(1);
 
@@ -2256,7 +2339,7 @@ describe("shared failure backoff and session-start adoption", () => {
       // writing the balance and clearing the marker.
       fail = false;
       advanceTime(FAILURE_BACKOFF_MS + 1);
-      scheduled[scheduled.length - 1]?.callback();
+      lastIdle()?.callback();
       await flush();
       expect(fetchCalls).toBe(3);
       expect(readCachedBalance(cacheKey, currentTime(), directory)).toEqual([
@@ -2268,7 +2351,7 @@ describe("shared failure backoff and session-start adoption", () => {
 
       // With a fresh cache entry the idle poll adopts it instead of fetching.
       advanceTime(1_000);
-      scheduled[scheduled.length - 1]?.callback();
+      lastIdle()?.callback();
       await flush();
       expect(fetchCalls).toBe(3);
     } finally {
