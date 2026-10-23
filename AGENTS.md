@@ -62,6 +62,10 @@ pi-packages/
                          #   plain-English rewrite of assistant messages). Standalone package, never
                          #   published, not installed anywhere; own tests (58, run green).
 herdr-plugins/           # Herdr plugins (python3, stdlib-only), linked via `herdr plugin link`
+  pane-context/           # ACTIVE: leader+alt+i copies HERDR_PANE_ID/HERDR_SOCKET_PATH/HERDR_TAB_ID/HERDR_WORKSPACE_ID
+                         #   (KEY=value lines) to the clipboard + toast. Clipboard tools fork a daemon to serve the
+                         #   selection (wl-copy, xclip): pipe stdin but DEVNULL their stdout/stderr — captured pipes
+                         #   stay open in the fork and subprocess.run blocks until timeout despite a successful copy.
   pane-layouts/           # ACTIVE: apply pane layouts (columns/rows/quad/main+stack) from a popup picker
   pi-reload/              # ACTIVE: send /reload to every pi instance in the session (skips busy/blocked/draft panes)
 ```

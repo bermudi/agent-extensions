@@ -1,0 +1,13 @@
+id = "pane.context"
+name = "Pane Context"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Copy the focused pane's Herdr context variables to the clipboard"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "copy"
+title = "Copy pane context"
+description = "Copy HERDR_PANE_ID, HERDR_SOCKET_PATH, HERDR_TAB_ID, and HERDR_WORKSPACE_ID to the clipboard"
+contexts = ["pane", "tab", "workspace", "global"]
+command = ["python3", "copy_pane_context.py"]
