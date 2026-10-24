@@ -6,7 +6,7 @@
  *   - copy-with-model  /copy-with-model  copy last reply tagged with the model
  *   - copy-trajectory  /copy-trajectory  copy the whole conversation (text only) to the clipboard
  *   - name-with-ai     /name-with-ai     generate a session name via the model
- *   - prefer-tools     hook              block legacy tools (trash/uv; blocks rg's -r replace flag)
+ *   - prefer-tools     hook              block legacy tools (trash; blocks rg's -r replace flag)
  *   - keep-model       hook              preserve the active model across /new
  *   - model-thinking   /model-thinking   per-model default thinking levels, applied on switch
  *   - clean-tui        tool overrides    collapse built-in tool output; keep a one-line call header, hide results/diffs until expanded

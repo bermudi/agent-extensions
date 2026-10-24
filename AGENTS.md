@@ -32,6 +32,9 @@ pi-packages/
                          # quoted or not) beats exhaustive bash semantics. (bermudi, 2026-09-29,
                          # after I scope-crept a quote-handling fix into a 17-case bash-semantics
                          # matrix framed as 'closing verified bypasses')
+                         # python/pip/pytest/mypy blocking removed 2026-10-24 (bermudi): uv
+                         # steering is AGENTS.md's job now — "block python except inline
+                         # scripts" would be another semantics matrix; don't re-add it.
                          # kilo drift detection: footer badge (`kilo: stale …`) + kilo_warning
                          # lines in goodies.log + `bun run kilo-smoke` (live catalog check; run
                          # before releasing — DRIFT lines = kilo.ts hardcoded knowledge needs review)

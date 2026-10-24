@@ -13,8 +13,11 @@
  *   rm                  -> trash <path>   (moves to the trash can; recoverable)
  *   trash-rm            -> blocked       (permanently deletes from the trash can)
  *   trash-empty         -> blocked       (permanently empties the trash can)
- *   python/pip/pytest/  -> uv
- *     mypy
+ *
+ * python/pip/pytest/mypy are deliberately NOT blocked (removed 2026-10-24):
+ * steering those is AGENTS.md's job ("uv always"), not the hook's — telling
+ * "inline" python apart from script-file python would need a bash-semantics
+ * matrix, and the uv block fired mostly as friction after the fact.
  *
  * `rg` is allowed, but its replace flag is not: `-r` is ripgrep's
  * `--replace`, so `rg -rn` silently replaces matches with "n" instead of
@@ -42,11 +45,6 @@ const RULES: Rule[] = [
     names: ["trash-rm", "trash-empty"],
     reason:
       "trash-rm and trash-empty are blocked — they delete permanently from the trash can. Use `trash <path>` to move files to the trash (recoverable).",
-  },
-  {
-    names: ["python", "python3", "pip", "pip3", "pytest", "mypy"],
-    reason:
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
   },
 ];
 
@@ -77,8 +75,8 @@ const WORD_STOP = " \t\n\r|&;<>()\"'`$";
  * `NAME=value` (or `NAME+=value`) in command position is an env-var
  * assignment, never the command itself — bash runs the word *after* it.
  * Without this check the lexer treated `FOO=bar` as the command, found no
- * rule match, demoted command position, and `rm`/`python` sailed through as
- * a mere argument (`FOO=bar rm x`, `PYTHONDONTWRITEBYTECODE=1 python x.py`).
+ * rule match, demoted command position, and `rm` sailed through as
+ * a mere argument (`FOO=bar rm x`).
  * The name must be a portable shell identifier, matching bash's own rule —
  * `1=2 x` is not an assignment in bash either (it is a command name, so the
  * real command never runs). readWord stops at `$`/quotes, so `FOO="a b"` and
@@ -869,7 +867,7 @@ export function detectLegacyTool(command: string): string | undefined {
         continue;
       }
       // Env-var assignment prefix: skip it and stay in command position so
-      // the word after it (`rm`, `python`, …) is the one checked. Under
+      // the word after it (`rm`, …) is the one checked. Under
       // sudo it likewise keeps sudoNext armed (`sudo FOO=bar rm x`).
       if (isAssignmentWord(word) && !skipNextWord) {
         assignmentPrefix = true;

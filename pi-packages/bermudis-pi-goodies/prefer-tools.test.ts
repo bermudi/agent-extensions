@@ -14,30 +14,19 @@ describe("detectLegacyTool", () => {
       "rm -rf /",
       "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
-    blocked(
-      "python script.py",
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
-    );
-    blocked(
-      "python3 script.py",
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
-    );
-    blocked(
-      "pip install x",
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
-    );
-    blocked(
-      "pip3 install x",
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
-    );
-    blocked(
-      "pytest",
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
-    );
-    blocked(
-      "mypy",
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
-    );
+  });
+
+  it("allows python/pip/pytest/mypy (block removed 2026-10-24; AGENTS.md instructs uv)", () => {
+    // Deliberate removal: hook enforcement of the uv rule — and any
+    // "inline-only" python policing — was friction without teeth. The
+    // AGENTS.md "Python: uv always" instruction is the mechanism now.
+    allowed("python script.py");
+    allowed("python3 -c 'print(1)'");
+    allowed("./python script.py");
+    allowed("pip install x");
+    allowed("pip3 install x");
+    allowed("pytest");
+    allowed("mypy");
   });
 
   it("blocks sudo and absolute/relative paths", () => {
@@ -50,8 +39,8 @@ describe("detectLegacyTool", () => {
       "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
     blocked(
-      "./python script.py",
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
+      "./rm file",
+      "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
     );
   });
 
@@ -101,10 +90,6 @@ describe("detectLegacyTool", () => {
     blocked(
       "FOO=bar rm x",
       "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
-    );
-    blocked(
-      "PYTHONDONTWRITEBYTECODE=1 python x.py",
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
     );
     blocked(
       "A=1 B=2 rm file",
@@ -159,6 +144,7 @@ describe("detectLegacyTool", () => {
     allowed("FOO=bar echo rm");
     allowed("echo FOO=bar");
     allowed("FOO=bar uv run python script.py");
+    allowed("PYTHONDONTWRITEBYTECODE=1 python x.py");
   });
 
   it("allows command arguments and redirect targets", () => {
@@ -188,10 +174,6 @@ describe("detectLegacyTool", () => {
     blocked(
       "\\rm -rf /",
       "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
-    );
-    blocked(
-      "\\python script.py",
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
     );
   });
 
@@ -225,10 +207,6 @@ describe("detectLegacyTool", () => {
     blocked(
       "cat <<EOF\n$(rm -rf /)\nEOF",
       "rm is blocked — use `trash <path>` instead (moves to the trash can; recoverable beats gone). Do NOT use `trash-rm`: it deletes permanently from the trash can.",
-    );
-    blocked(
-      "cat <<EOF\n$(python evil.py)\nEOF",
-      "bare python/pip/pytest/mypy are blocked — use `uv` (e.g. `uv run python`, `uv add`, `uv pip install <pkg>`, `uv run pytest`/`mypy`)",
     );
     blocked(
       "cat <<EOF\n`rm file`\nEOF",
