@@ -345,6 +345,7 @@ describe("identity watchdog", () => {
     handlers: Map<string, (event: unknown, ctx: unknown) => unknown>;
     ctx: ExtensionContext;
     directory: string;
+    scratchLog: string;
     fetches: Array<{ token: string; companionToken?: string }>;
     scheduled: Array<{ callback: () => void; delay: number }>;
     setActiveToken: (token: string | undefined) => void;
@@ -368,6 +369,10 @@ describe("identity watchdog", () => {
     }) as typeof globalThis.setTimeout;
     const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
     const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    // Missing-companion and failure paths log; keep tests out of the real
+    // ~/.pi/agent/goodies.log.
+    const scratchLog = join(directory, "goodies.log");
+    setGoodiesLogPathForTesting(scratchLog);
     const fetches: Array<{ token: string; companionToken?: string }> = [];
     let activeToken: string | undefined = "token-1";
     providerBalance(
@@ -413,12 +418,14 @@ describe("identity watchdog", () => {
       handlers,
       ctx,
       directory,
+      scratchLog,
       fetches,
       scheduled,
       setActiveToken: (token) => {
         activeToken = token;
       },
       cleanup: async () => {
+        setGoodiesLogPathForTesting(undefined);
         await rm(directory, { recursive: true, force: true });
       },
     };
@@ -594,10 +601,7 @@ describe("identity watchdog", () => {
     // rejecting test double exercises the defensive boundary. The failure
     // must land in the goodies log (provider + error context, no credential
     // values) and the watchdog must survive it.
-    const scratchDir = mkdtempSync(join(tmpdir(), "provider-balance-log-"));
-    const scratchLog = join(scratchDir, "goodies.log");
-    setGoodiesLogPathForTesting(scratchLog);
-    const { handlers, ctx, scheduled, cleanup } = watchdogHarness(
+    const { handlers, ctx, scheduled, scratchLog, cleanup } = watchdogHarness(
       {
         requiresOAuth: true,
         fetch: async () => [{ credits: 1 }],
@@ -633,9 +637,7 @@ describe("identity watchdog", () => {
         IDENTITY_WATCHDOG_INTERVAL_MS,
       );
     } finally {
-      setGoodiesLogPathForTesting(undefined);
       await cleanup();
-      await rm(scratchDir, { recursive: true, force: true });
     }
   });
 
@@ -672,6 +674,7 @@ describe("companion credentials", () => {
     handlers: Map<string, (event: unknown, ctx: unknown) => unknown>;
     ctx: ExtensionContext;
     directory: string;
+    scratchLog: string;
     fetches: Array<{ token: string; companionToken?: string }>;
     scheduled: Array<{ callback: () => void; delay: number }>;
     setCompanion: (token: string | undefined) => void;
@@ -694,6 +697,10 @@ describe("companion credentials", () => {
     }) as typeof globalThis.setTimeout;
     const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
     const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    // Missing-companion and failure paths log; keep tests out of the real
+    // ~/.pi/agent/goodies.log.
+    const scratchLog = join(directory, "goodies.log");
+    setGoodiesLogPathForTesting(scratchLog);
     const fetches: Array<{ token: string; companionToken?: string }> = [];
     let companionToken: string | undefined = "companion-token";
     providerBalance(
@@ -739,12 +746,14 @@ describe("companion credentials", () => {
       handlers,
       ctx,
       directory,
+      scratchLog,
       fetches,
       scheduled,
       setCompanion: (token) => {
         companionToken = token;
       },
       cleanup: async () => {
+        setGoodiesLogPathForTesting(undefined);
         await rm(directory, { recursive: true, force: true });
       },
     };
@@ -833,6 +842,9 @@ describe("companion credentials", () => {
     }) as typeof globalThis.setTimeout;
     const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
     const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    // Failure paths log; keep tests out of the real ~/.pi/agent/goodies.log.
+    const scratchLog = join(directory, "goodies.log");
+    setGoodiesLogPathForTesting(scratchLog);
     const fetches: Array<{ token: string; companionToken?: string }> = [];
     let activeToken = "token-a";
     let companionReads = 0;
@@ -936,15 +948,13 @@ describe("companion credentials", () => {
         ),
       ).not.toBeNull();
     } finally {
+      setGoodiesLogPathForTesting(undefined);
       await rm(directory, { recursive: true, force: true });
     }
   });
 
   test("does not read another account's quota without a companion login", async () => {
-    const scratchDir = mkdtempSync(join(tmpdir(), "provider-balance-log-"));
-    const scratchLog = join(scratchDir, "goodies.log");
-    setGoodiesLogPathForTesting(scratchLog);
-    const { handlers, ctx, directory, fetches, setCompanion, cleanup } =
+    const { handlers, ctx, scratchLog, fetches, setCompanion, cleanup } =
       harness({
         requiresOAuth: true,
         companionProvider: "openai-codex",
@@ -972,9 +982,7 @@ describe("companion credentials", () => {
       expect(events).toHaveLength(1);
       expect(events[0]?.companion).toBe("openai-codex");
     } finally {
-      setGoodiesLogPathForTesting(undefined);
       await cleanup();
-      await rm(scratchDir, { recursive: true, force: true });
     }
   });
 });
