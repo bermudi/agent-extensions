@@ -385,6 +385,25 @@ describe("detectLegacyTool rg replace guard", () => {
     allowed("rg --glob=-r -n foo .");
   });
 
+  it("skips separator option values that look like the replace flag", () => {
+    // ripgrep 15 takes `-r` here as literal output text, not --replace.
+    allowed("rg --field-match-separator '-r' -n foo -");
+    allowed("rg --field-context-separator '-r' -n foo -");
+    allowed("rg --field-match-separator=-r -n foo -");
+    allowed("rg --field-context-separator=-r -n foo -");
+  });
+
+  it("stops at a shell comment", () => {
+    // Bash never passes the comment to rg, so it must not trip the guard.
+    allowed("rg -n foo . # avoid -rn here");
+    allowed("rg -n foo . #glued");
+    allowed("rg foo#bar");
+    allowed("# rg -rn foo");
+    // A comment must not blind the scanner to the next line's real command.
+    blocked("rg -n foo . # avoid -rn here\nrg -rn bar");
+    blocked("rg -rn foo . # comment");
+  });
+
   it("allows non-command occurrences of rg", () => {
     allowed("echo rg");
     allowed("echo rg -rn foo");

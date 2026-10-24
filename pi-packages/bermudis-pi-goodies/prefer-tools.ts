@@ -551,12 +551,18 @@ const RG_SHORT_VALUE_OPTS = new Set([
   "T",
 ]);
 
-/** Long rg options that consume the next word as a value. */
+/**
+ * Long rg options that consume the next word as a value. Values are skipped
+ * before flag inspection, so `--field-match-separator -r` (ripgrep accepts
+ * `-r` there as literal output text) is not mistaken for the replace flag.
+ */
 const RG_LONG_VALUE_OPTS = new Set([
   "--after-context",
   "--before-context",
   "--context",
   "--encoding",
+  "--field-context-separator",
+  "--field-match-separator",
   "--file",
   "--glob",
   "--iglob",
@@ -630,6 +636,11 @@ function rgUsesReplaceFlag(s: string, start: number): boolean {
       continue;
     }
     if (c === "\n") break;
+    // Unquoted `#` at the start of a word begins a shell comment: bash never
+    // passes it (or anything after it) to rg, so `rg -n foo . # avoid -rn`
+    // must not be blocked for what its comment merely mentions. Mid-word `#`
+    // (`rg foo#bar`) stays inside the word read below, matching bash.
+    if (c === "#") break;
     const op = readOperator(s, i);
     if (op) {
       if (op.type !== "redirect") break;
