@@ -1733,10 +1733,18 @@ export default function providerBalance(
         return;
       }
 
-      // Do not render a cached value while credentials are being resolved. The
-      // same provider can represent a different account after login/logout.
-      identityPending = true;
-      requestRender?.();
+      // Hide the balance while credentials are being resolved — but only when
+      // nothing is displayed yet (cold start, provider switch, post-logout).
+      // A same-account refresh keeps its last value on screen: blanking on
+      // every refresh would flicker the footer for the full duration of
+      // keychain reads and OAuth token refreshes (seconds under lock
+      // contention). If resolution reveals a different account, the
+      // displayedCacheKey mismatch below still clears it, so a foreign
+      // reading is never painted. Mirrors the post-fetch re-check below.
+      if (!balance) {
+        identityPending = true;
+        requestRender?.();
+      }
 
       // Preserve a known same-account value during routine credential refresh,
       // but clear it if identity resolution fails or reveals another account.
@@ -1831,6 +1839,14 @@ export default function providerBalance(
       );
       const observedAtMs = now();
       if (generation !== refreshGeneration) return;
+      if (nextBalance.length === 0) {
+        // An empty reading would render as an empty string — visually
+        // identical to the balance vanishing — and parseCachedBalance already
+        // refuses to serve empty entries from the cache. Treat it as a failed
+        // observation: the catch below keeps the previous display and records
+        // the failure.
+        throw new Error("provider returned no balance segments");
+      }
 
       // Login/logout does not emit model_select. Re-resolve identity before
       // committing so an account switch during the request cannot paint the
@@ -1910,7 +1926,14 @@ export default function providerBalance(
           companionTokenAfter,
         );
       }
-      // Recovery detected: clear the marker so sibling idle polls resume.
+      // Recovery detected: tell the log once, then clear the marker so
+      // sibling idle polls resume.
+      if (readBalanceFailureAt(cacheKey, now(), cacheDir) !== null) {
+        logGoodiesEvent({
+          type: "provider_balance_refresh_recovered",
+          provider: providerId,
+        });
+      }
       clearBalanceFailureMarker(cacheKey, cacheDir);
       const persisted = writeCachedBalance(
         cacheKey,
@@ -1929,11 +1952,27 @@ export default function providerBalance(
         return;
       }
       identityPending = false;
-      clearBalance();
+      // A failed fetch does not make the displayed value wrong — it stays
+      // TTL-gated at render time. Keep a same-account reading on screen
+      // instead of blanking the footer for the whole backoff window; clear
+      // only when the failure landed before any account was identified.
+      if (cacheKey === undefined || cacheKey !== displayedCacheKey) {
+        clearBalance();
+      }
       // Record the failure machine-wide so sibling sessions' idle polls back
       // off instead of stacking their own timeouts onto the same outage.
+      const firstFailureOfStreak =
+        cacheKey === undefined ||
+        readBalanceFailureAt(cacheKey, now(), cacheDir) === null;
       if (cacheKey !== undefined) {
         writeBalanceFailureMarker(cacheKey, now(), cacheDir);
+      }
+      if (firstFailureOfStreak) {
+        logGoodiesEvent({
+          type: "provider_balance_refresh_failed",
+          provider: providerId,
+          message: describeError(error),
+        });
       }
       // This is a best-effort background refresh. Writing to stdout/stderr while
       // Pi owns the terminal corrupts the TUI (the text appears in the editor),

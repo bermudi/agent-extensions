@@ -49,6 +49,7 @@ import providerBalance, {
   mergeSideBadgeIntoStatsLine,
   zaiQuotaToBalance,
   type BalanceAdapter,
+  type BalanceSegment,
 } from "./provider-balance.ts";
 import {
   resetSideBadgeState,
@@ -2211,6 +2212,7 @@ describe("shared failure backoff and session-start adoption", () => {
     scheduled: Array<{ callback: () => void; delay: number }>;
     ctx: ExtensionContext;
     directory: string;
+    scratchLog: string;
     cacheKey: string;
     advanceTime: (ms: number) => void;
     currentTime: () => number;
@@ -2233,6 +2235,10 @@ describe("shared failure backoff and session-start adoption", () => {
 
     let currentTimeMs = 1_000_000;
     const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    // Failure/recovery streaks now land in the goodies log; keep tests from
+    // appending to the real ~/.pi/agent/goodies.log.
+    const scratchLog = join(directory, "goodies.log");
+    setGoodiesLogPathForTesting(scratchLog);
     providerBalance(
       {
         on(event, handler) {
@@ -2275,12 +2281,14 @@ describe("shared failure backoff and session-start adoption", () => {
       scheduled,
       ctx,
       directory,
+      scratchLog,
       cacheKey: balanceCacheKey("zai", "token"),
       advanceTime: (ms: number) => {
         currentTimeMs += ms;
       },
       currentTime: () => currentTimeMs,
       cleanup: async () => {
+        setGoodiesLogPathForTesting(undefined);
         await rm(directory, { recursive: true, force: true });
       },
     };
@@ -2392,6 +2400,375 @@ describe("shared failure backoff and session-start adoption", () => {
       await cleanup();
     }
   });
+});
+
+describe("footer display persistence", () => {
+  /** TURN_REFRESH_MIN_INTERVAL_MS is module-private; the value is part of the
+   *  documented cadence (turn_end refreshes at most every 30s). */
+  const TURN_REFRESH_MIN_INTERVAL_MS = 30_000;
+
+  interface Harness {
+    handlers: Map<string, (event: unknown, ctx: unknown) => unknown>;
+    scheduled: Array<{ callback: () => void; delay: number }>;
+    ctx: ExtensionContext;
+    /** Currently mounted footer renderer; undefined once pi's builtin is back. */
+    renderFooter: () => string[] | undefined;
+    /** Resolves the pending getApiKeyForProvider call, if one is parked. */
+    resolveToken: (token: string) => void;
+    /** Makes the next getApiKeyForProvider call park until resolveToken. */
+    parkNextResolution: () => void;
+    /** Switches the credential returned by all future reads. */
+    setCredential: (token: string) => void;
+    failFetch: (fail: boolean) => void;
+    /** Queues the next adapter payload; defaults to [{ credits: 12.5 }]. */
+    nextBalance: (balance: BalanceSegment[] | Error) => void;
+    cacheKey: string;
+    directory: string;
+    scratchLog: string;
+    fetchCalls: () => number;
+    advanceTime: (ms: number) => void;
+    currentTime: () => number;
+    flush: () => Promise<void>;
+    cleanup: () => Promise<void>;
+  }
+
+  function harness(): Harness {
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: unknown) => unknown
+    >();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
+
+    let currentTimeMs = 1_000_000;
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    const scratchLog = join(directory, "goodies.log");
+    setGoodiesLogPathForTesting(scratchLog);
+
+    let fail = false;
+    let fetchCount = 0;
+    const balanceQueue: Array<BalanceSegment[] | Error> = [];
+    const adapter: BalanceAdapter = {
+      fetch: async () => {
+        fetchCount++;
+        if (fail) throw new Error("upstream down");
+        const next = balanceQueue.shift();
+        if (next instanceof Error) throw next;
+        return next ?? [{ credits: 12.5 }];
+      },
+    };
+
+    // Credential reads: normally instant, but a test can park the next read
+    // (simulating an OAuth refresh contending on the shared auth store) and
+    // later release it — or switch the credential outright to simulate an
+    // account change. The credential is sticky: the post-fetch double-read
+    // must observe the same identity as the parked resolution.
+    let credential = "token";
+    let parkNext = false;
+    let releaseToken: ((token: string) => void) | undefined;
+    const getApiKeyForProvider = (): Promise<string> => {
+      if (!parkNext) return Promise.resolve(credential);
+      parkNext = false;
+      return new Promise<string>((resolve) => {
+        releaseToken = resolve;
+      });
+    };
+
+    // Footer host: captures whatever the extension installs, like pi's TUI.
+    let mounted: { render(width: number): string[] } | undefined;
+    const tui = { requestRender() {} };
+    const theme = {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    const footerData = {
+      getGitBranch: () => undefined,
+      getExtensionStatuses: () => new Map<string, string>(),
+      getAvailableProviderCount: () => 1,
+      onBranchChange: () => () => {},
+    };
+
+    providerBalance(
+      {
+        on(event, handler) {
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: unknown) => unknown,
+          );
+        },
+        events: {
+          emit() {},
+          on() {
+            return () => {};
+          },
+        },
+      } as unknown as ExtensionAPI,
+      {
+        adapters: { zai: adapter },
+        cacheDir: directory,
+        now: () => currentTimeMs,
+        random: () => 0.5,
+        setTimeout,
+        clearTimeout,
+      },
+    );
+
+    const ctx = {
+      mode: "tui",
+      model: {
+        provider: "zai",
+        id: "zai-model",
+        reasoning: false,
+        contextWindow: 128_000,
+      },
+      isIdle: () => true,
+      ui: {
+        setFooter(factory?: unknown) {
+          mounted = factory
+            ? (
+                factory as (
+                  tui: unknown,
+                  theme: unknown,
+                  data: unknown,
+                ) => { render(width: number): string[] }
+              )(tui, theme, footerData)
+            : undefined;
+        },
+      },
+      sessionManager: {
+        getBranch: () => [],
+        getEntries: () => [],
+        getCwd: () => "/work",
+        getSessionName: () => undefined,
+        getEntryCount: () => 0,
+        getSessionId: () => "test-session",
+        getLeafId: () => "test-leaf",
+      },
+      getContextUsage: () => null,
+      modelRegistry: {
+        isUsingOAuth: () => false,
+        getApiKeyForProvider,
+      },
+    } as unknown as ExtensionContext;
+
+    const flush = () =>
+      new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+
+    return {
+      handlers,
+      scheduled,
+      ctx,
+      renderFooter: () =>
+        mounted === undefined ? undefined : mounted.render(100),
+      resolveToken: (token) => {
+        const release = releaseToken;
+        releaseToken = undefined;
+        if (!release) throw new Error("no pending credential resolution");
+        release(token);
+      },
+      parkNextResolution: () => {
+        parkNext = true;
+      },
+      setCredential: (token) => {
+        credential = token;
+      },
+      failFetch: (value) => {
+        fail = value;
+      },
+      nextBalance: (balance) => {
+        balanceQueue.push(balance);
+      },
+      cacheKey: balanceCacheKey("zai", "token"),
+      directory,
+      scratchLog,
+      fetchCalls: () => fetchCount,
+      advanceTime: (ms: number) => {
+        currentTimeMs += ms;
+      },
+      currentTime: () => currentTimeMs,
+      flush,
+      cleanup: async () => {
+        setGoodiesLogPathForTesting(undefined);
+        await rm(directory, { recursive: true, force: true });
+      },
+    };
+  }
+
+  test("a failed refresh keeps the displayed balance on screen", async () => {
+    initTheme("dark");
+    const h = harness();
+    try {
+      const start = h.handlers.get("session_start");
+      const turnEnd = h.handlers.get("turn_end");
+      if (!start || !turnEnd) throw new Error("missing handlers");
+
+      start({}, h.ctx);
+      await h.flush();
+      expect(h.renderFooter()?.join("\n")).toContain("$12.50");
+
+      // The next authoritative refresh fails; the previously displayed value
+      // is still fresh, so it stays on screen instead of blanking for the
+      // length of the machine-wide backoff window.
+      h.failFetch(true);
+      h.advanceTime(TURN_REFRESH_MIN_INTERVAL_MS + 1);
+      turnEnd({ turnIndex: 0 }, h.ctx);
+      await h.flush();
+      expect(h.renderFooter()?.join("\n")).toContain("$12.50");
+      expect(
+        readBalanceFailureAt(h.cacheKey, h.currentTime(), h.directory),
+      ).toBe(h.currentTime());
+
+      // The backoff window elapses; the idle poll succeeds and repaints.
+      h.failFetch(false);
+      h.advanceTime(FAILURE_BACKOFF_MS + 1);
+      scheduledIdle(h.scheduled)?.callback();
+      await h.flush();
+      expect(h.renderFooter()?.join("\n")).toContain("$12.50");
+      expect(
+        readBalanceFailureAt(h.cacheKey, h.currentTime(), h.directory),
+      ).toBeNull();
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  test("slow credential resolution no longer blanks a displayed balance", async () => {
+    initTheme("dark");
+    const h = harness();
+    try {
+      const start = h.handlers.get("session_start");
+      const turnEnd = h.handlers.get("turn_end");
+      if (!start || !turnEnd) throw new Error("missing handlers");
+
+      start({}, h.ctx);
+      await h.flush();
+      expect(h.renderFooter()?.join("\n")).toContain("$12.50");
+
+      // Park the next identity resolution mid-flight, as happens when the
+      // token is inside its OAuth refresh window and the shared auth store
+      // is contended.
+      h.advanceTime(TURN_REFRESH_MIN_INTERVAL_MS + 1);
+      h.parkNextResolution();
+      turnEnd({ turnIndex: 1 }, h.ctx);
+      // No await: the refresh is parked inside getApiKeyForProvider. The
+      // display must survive the wait (identityPending only blanks when
+      // nothing is displayed).
+      expect(h.renderFooter()?.join("\n")).toContain("$12.50");
+
+      h.resolveToken("token");
+      await h.flush();
+      expect(h.renderFooter()?.join("\n")).toContain("$12.50");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  test("a different account during resolution still clears the display", async () => {
+    initTheme("dark");
+    const h = harness();
+    try {
+      const start = h.handlers.get("session_start");
+      const turnEnd = h.handlers.get("turn_end");
+      if (!start || !turnEnd) throw new Error("missing handlers");
+
+      start({}, h.ctx);
+      await h.flush();
+      expect(h.renderFooter()?.join("\n")).toContain("$12.50");
+
+      // Resolution comes back for another account: the displayed reading no
+      // longer belongs to the active credential and must go.
+      h.advanceTime(TURN_REFRESH_MIN_INTERVAL_MS + 1);
+      h.parkNextResolution();
+      turnEnd({ turnIndex: 2 }, h.ctx);
+      h.nextBalance([{ credits: 5 }]);
+      h.setCredential("token-b");
+      h.resolveToken("token-b");
+      await h.flush();
+      expect(h.renderFooter()?.join("\n")).not.toContain("$12.50");
+      expect(h.renderFooter()?.join("\n")).toContain("$5.00");
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  test("an empty provider reading counts as a failure and keeps the display", async () => {
+    initTheme("dark");
+    const h = harness();
+    try {
+      const start = h.handlers.get("session_start");
+      const turnEnd = h.handlers.get("turn_end");
+      if (!start || !turnEnd) throw new Error("missing handlers");
+
+      start({}, h.ctx);
+      await h.flush();
+      expect(h.renderFooter()?.join("\n")).toContain("$12.50");
+
+      h.nextBalance([]);
+      h.advanceTime(TURN_REFRESH_MIN_INTERVAL_MS + 1);
+      turnEnd({ turnIndex: 3 }, h.ctx);
+      await h.flush();
+      // An empty Balance would render as "" — indistinguishable from the
+      // indicator vanishing. It is treated as a failed observation instead.
+      expect(h.renderFooter()?.join("\n")).toContain("$12.50");
+      expect(
+        readBalanceFailureAt(h.cacheKey, h.currentTime(), h.directory),
+      ).toBe(h.currentTime());
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  test("failure and recovery land in the goodies log once per streak", async () => {
+    initTheme("dark");
+    const h = harness();
+    try {
+      const start = h.handlers.get("session_start");
+      const turnEnd = h.handlers.get("turn_end");
+      if (!start || !turnEnd) throw new Error("missing handlers");
+
+      const streakEvents = () =>
+        readFileSync(h.scratchLog, "utf8")
+          .split("\n")
+          .filter((line) => line.includes("provider_balance_refresh_"))
+          .map((line) => JSON.parse(line).type as string);
+
+      h.failFetch(true);
+      start({}, h.ctx);
+      await h.flush();
+      expect(streakEvents()).toEqual(["provider_balance_refresh_failed"]);
+
+      // A second failure inside the same streak stays quiet.
+      h.advanceTime(TURN_REFRESH_MIN_INTERVAL_MS + 1);
+      turnEnd({ turnIndex: 4 }, h.ctx);
+      await h.flush();
+      expect(streakEvents()).toEqual(["provider_balance_refresh_failed"]);
+
+      h.failFetch(false);
+      h.advanceTime(FAILURE_BACKOFF_MS + 1);
+      scheduledIdle(h.scheduled)?.callback();
+      await h.flush();
+      expect(streakEvents()).toEqual([
+        "provider_balance_refresh_failed",
+        "provider_balance_refresh_recovered",
+      ]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  /** The idle refresh re-arms with delay 67_500 under random() = 0.5; the
+   *  identity watchdog (5s) is also armed, so filter by delay. */
+  function scheduledIdle(
+    scheduled: Array<{ callback: () => void; delay: number }>,
+  ): { callback: () => void } | undefined {
+    return scheduled.filter((entry) => entry.delay === 67_500).pop();
+  }
 });
 
 describe("mergeSideBadgeIntoStatsLine", () => {
