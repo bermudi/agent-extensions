@@ -16,9 +16,11 @@
  *   python/pip/pytest/  -> uv
  *     mypy
  *
- * Model-conditional: on glm-5.* models, `rg` is also blocked — they invent
- * ripgrep flags. The built-in grep tool (structured args, no raw flags) and
- * bash `grep -rn` still work.
+ * `rg` is allowed, but its replace flag is not: `-r` is ripgrep's
+ * `--replace`, so `rg -rn` silently replaces matches with "n" instead of
+ * showing line numbers. Any short-option cluster containing `r` is blocked;
+ * spell out `--replace` if you actually mean it. The built-in grep tool
+ * (structured args, no raw flags) and bash `grep -rn` still work.
  */
 import {
   isToolCallEventType,
@@ -49,24 +51,13 @@ const RULES: Rule[] = [
 ];
 
 /**
- * glm-5.* model ids hallucinate ripgrep flags; bash `rg` is blocked for them.
- * Matches "glm-5" as a family token: not preceded by an alphanumeric (so
- * Meta's xglm-564M doesn't match) and not followed by a digit (so glm-50,
- * glm-500 don't match). glm-5, glm-5.5, glm-5-turbo, glm-5:free,
- * provider-prefixed "kilo/glm-5" all match. glm-4.x is unaffected.
+ * `rg -r` is ripgrep's `--replace`, not "recursive": it replaces matched text
+ * in the output, so `rg -rn` replaces with "n" and shows no line numbers
+ * (machine lore: it once spawned a phantom `[ln]` log tag). Block the short
+ * flag in any cluster, but allow the explicit long form as the escape hatch.
  */
-export function isRipgrepBlockedModel(modelId: string | undefined): boolean {
-  return (
-    typeof modelId === "string" && /(^|[^a-z0-9])glm-5(?![0-9])/i.test(modelId)
-  );
-}
-
-/** Extra rule appended when the active model is glm-5.*. */
-export const RG_RULE: Rule = {
-  names: ["rg"],
-  reason:
-    'rg is blocked for this model — it invents ripgrep flags. Use `grep -rn "pattern" path` instead (or pi\'s built-in grep tool).',
-};
+export const RG_REPLACE_REASON =
+  '`rg -r` is `--replace` — it silently replaces matched text in the output (`rg -rn` replaces with "n" instead of showing line numbers). If you really mean it, use `--replace` explicitly.';
 
 const COMMAND_PREFIX_KEYWORDS = new Set([
   "if",
@@ -97,17 +88,32 @@ function isAssignmentWord(word: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word);
 }
 
-function matchCommand(
-  name: string,
-  rules: readonly Rule[],
-): string | undefined {
-  const base = name.includes("/")
-    ? name.slice(name.lastIndexOf("/") + 1)
-    : name;
-  for (const rule of rules) {
+function commandBase(name: string): string {
+  return name.includes("/") ? name.slice(name.lastIndexOf("/") + 1) : name;
+}
+
+function matchCommand(name: string): string | undefined {
+  const base = commandBase(name);
+  for (const rule of RULES) {
     if (rule.names.includes(base)) return rule.reason;
   }
   return undefined;
+}
+
+/**
+ * Match a command word, plus the one argument-sensitive rule: an `rg`
+ * invocation that uses the replace flag. `argStart` is the offset just past
+ * the command word, where its arguments begin.
+ */
+function matchCommandAt(
+  command: string,
+  word: string,
+  argStart: number,
+): string | undefined {
+  if (commandBase(word) === "rg" && rgUsesReplaceFlag(command, argStart)) {
+    return RG_REPLACE_REASON;
+  }
+  return matchCommand(word);
 }
 
 function readWord(s: string, i: number): { word: string; next: number } {
@@ -253,7 +259,6 @@ function scanExecutedSubs(
   s: string,
   start: number,
   end: number,
-  rules: readonly Rule[],
   mode: "plain" | "double",
 ): string | undefined {
   let i = start;
@@ -273,7 +278,7 @@ function scanExecutedSubs(
       if (c === '"') {
         const stop = readQuote(s, i, '"', true);
         const innerEnd = s[stop - 1] === '"' ? stop - 1 : stop;
-        const reason = scanExecutedSubs(s, i + 1, innerEnd, rules, "double");
+        const reason = scanExecutedSubs(s, i + 1, innerEnd, "double");
         if (reason) return reason;
         i = stop;
         continue;
@@ -293,7 +298,7 @@ function scanExecutedSubs(
     if (c === "`") {
       const stop = readQuote(s, i, "`", true);
       const innerEnd = s[stop - 1] === "`" ? stop - 1 : stop;
-      const reason = detectLegacyTool(s.slice(i + 1, innerEnd), rules);
+      const reason = detectLegacyTool(s.slice(i + 1, innerEnd));
       if (reason) return reason;
       i = stop;
       continue;
@@ -306,7 +311,7 @@ function scanExecutedSubs(
       const stop = skipBalancedParens(s, i, 3);
       const innerEnd =
         s[stop - 1] === ")" && s[stop - 2] === ")" ? stop - 2 : stop;
-      const reason = scanExecutedSubs(s, i + 3, innerEnd, rules, mode);
+      const reason = scanExecutedSubs(s, i + 3, innerEnd, mode);
       if (reason) return reason;
       i = stop;
       continue;
@@ -314,7 +319,7 @@ function scanExecutedSubs(
     if (c === "$" && s.startsWith("$(", i)) {
       const stop = skipBalancedParens(s, i, 2);
       const innerEnd = s[stop - 1] === ")" ? stop - 1 : stop;
-      const reason = detectLegacyTool(s.slice(i + 2, innerEnd), rules);
+      const reason = detectLegacyTool(s.slice(i + 2, innerEnd));
       if (reason) return reason;
       i = stop;
       continue;
@@ -327,7 +332,7 @@ function scanExecutedSubs(
       // substitution runs (`"${X:-'$(rm)'}"` executes).
       const stop = skipBalancedBraces(s, i);
       const innerEnd = s[stop - 1] === "}" ? stop - 1 : stop;
-      const reason = scanExecutedSubs(s, i + 2, innerEnd, rules, mode);
+      const reason = scanExecutedSubs(s, i + 2, innerEnd, mode);
       if (reason) return reason;
       i = stop;
       continue;
@@ -340,7 +345,6 @@ function scanExecutedSubs(
 function readDollar(
   s: string,
   i: number,
-  rules: readonly Rule[],
 ): { next: number; reason?: string } | null {
   if (i >= s.length || s[i] !== "$") return null;
 
@@ -354,14 +358,14 @@ function readDollar(
     const innerEnd = s[end - 1] === ")" && s[end - 2] === ")" ? end - 2 : end;
     return {
       next: end,
-      reason: scanExecutedSubs(s, i + 3, innerEnd, rules, "plain"),
+      reason: scanExecutedSubs(s, i + 3, innerEnd, "plain"),
     };
   }
   if (s.startsWith("(", i + 1)) {
     const end = skipBalancedParens(s, i, 2);
     const closeParen = end > 0 && s[end - 1] === ")" ? 1 : 0;
     const inner = s.slice(i + 2, end - closeParen);
-    const reason = detectLegacyTool(inner, rules);
+    const reason = detectLegacyTool(inner);
     return { next: end, reason };
   }
   if (s.startsWith("{", i + 1)) {
@@ -370,7 +374,7 @@ function readDollar(
     const innerEnd = s[end - 1] === "}" ? end - 1 : end;
     return {
       next: end,
-      reason: scanExecutedSubs(s, i + 2, innerEnd, rules, "plain"),
+      reason: scanExecutedSubs(s, i + 2, innerEnd, "plain"),
     };
   }
   if (i + 1 < s.length && /[0-9?@*#\-!$]/.test(s[i + 1])) {
@@ -447,10 +451,7 @@ function readHeredocDelimiter(
  * backslash suppresses expansion (`\$(rm)` is literal). Returns the matched
  * rule's reason if a blocked tool is found, undefined otherwise.
  */
-function scanHeredocLineForCommandSubs(
-  line: string,
-  rules: readonly Rule[],
-): string | undefined {
+function scanHeredocLineForCommandSubs(line: string): string | undefined {
   let i = 0;
   while (i < line.length) {
     const c = line[i];
@@ -461,7 +462,7 @@ function scanHeredocLineForCommandSubs(
     if (line.startsWith("$(", i)) {
       const end = skipBalancedParens(line, i, 2);
       const inner = line.slice(i + 2, end - 1);
-      const reason = detectLegacyTool(inner, rules);
+      const reason = detectLegacyTool(inner);
       if (reason) return reason;
       i = end;
       continue;
@@ -469,7 +470,7 @@ function scanHeredocLineForCommandSubs(
     if (c === "`") {
       const end = readQuote(line, i, "`", true);
       const inner = line.slice(i + 1, end - 1);
-      const reason = detectLegacyTool(inner, rules);
+      const reason = detectLegacyTool(inner);
       if (reason) return reason;
       i = end;
       continue;
@@ -485,7 +486,6 @@ function skipHeredocBody(
   delimiter: string,
   indented: boolean,
   quoted: boolean,
-  rules: readonly Rule[],
 ): { next: number; reason?: string } {
   let pos = i;
   while (pos <= s.length) {
@@ -499,7 +499,7 @@ function skipHeredocBody(
     // In unquoted heredocs, command substitutions execute — scan for
     // blocked tools inside $(...) and backticks.
     if (!quoted) {
-      const reason = scanHeredocLineForCommandSubs(line, rules);
+      const reason = scanHeredocLineForCommandSubs(line);
       if (reason) return { next: end, reason };
     }
     if (nl === -1) break;
@@ -530,11 +530,146 @@ const SUDO_OPTS_WITH_ARG = new Set([
   "--user",
 ]);
 
-export function detectLegacyTool(
-  command: string,
-  extraRules: readonly Rule[] = [],
-): string | undefined {
-  const rules = extraRules.length > 0 ? [...RULES, ...extraRules] : RULES;
+/**
+ * Short rg options that consume a value: the rest of the cluster is their
+ * value, or — at cluster end — the next word is. `r` is handled separately
+ * (and blocked) before this set is consulted.
+ */
+const RG_SHORT_VALUE_OPTS = new Set([
+  "A",
+  "B",
+  "C",
+  "d",
+  "E",
+  "e",
+  "f",
+  "g",
+  "j",
+  "M",
+  "m",
+  "t",
+  "T",
+]);
+
+/** Long rg options that consume the next word as a value. */
+const RG_LONG_VALUE_OPTS = new Set([
+  "--after-context",
+  "--before-context",
+  "--context",
+  "--encoding",
+  "--file",
+  "--glob",
+  "--iglob",
+  "--max-columns",
+  "--max-count",
+  "--max-depth",
+  "--max-filesize",
+  "--path-separator",
+  "--pre",
+  "--regexp",
+  "--replace",
+  "--sort",
+  "--sortr",
+  "--threads",
+  "--type",
+  "--type-add",
+  "--type-clear",
+  "--type-not",
+]);
+
+/**
+ * Read one shell word after an `rg` command, keeping quoted content as part
+ * of the token so `rg "-r"` and `rg '-rn'` are caught like their unquoted
+ * twins. Stops at whitespace or an unquoted operator.
+ */
+function readArgWord(s: string, i: number): { word: string; next: number } {
+  let word = "";
+  while (i < s.length) {
+    const c = s[i];
+    if (c === " " || c === "\t" || c === "\r" || c === "\n") break;
+    if (readOperator(s, i)) break;
+    if (c === "'" || c === '"') {
+      const end = readQuote(s, i, c, c === '"');
+      const innerEnd = s[end - 1] === c ? end - 1 : end;
+      word += s.slice(i + 1, innerEnd);
+      i = end;
+      continue;
+    }
+    if (c === "\\" && i + 1 < s.length) {
+      word += s[i + 1];
+      i += 2;
+      continue;
+    }
+    if (c === "$") {
+      const d = readDollar(s, i);
+      if (d) {
+        word += s.slice(i, d.next);
+        i = d.next;
+        continue;
+      }
+    }
+    word += c;
+    i++;
+  }
+  return { word, next: i };
+}
+
+/**
+ * True when the `rg` invocation starting at `start` uses the replace flag in
+ * short form, including clusters (`-rn`, `-rln`, `-nr`). The explicit
+ * `--replace` long form stays allowed. Value-taking options are skipped so a
+ * pattern/replacement that merely looks like `-r` is not a false hit.
+ */
+function rgUsesReplaceFlag(s: string, start: number): boolean {
+  let i = start;
+  let skipValue = false;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === " " || c === "\t" || c === "\r") {
+      i++;
+      continue;
+    }
+    if (c === "\n") break;
+    const op = readOperator(s, i);
+    if (op) {
+      if (op.type !== "redirect") break;
+      // Redirections may appear among a command's arguments; consume the
+      // target (`>out`) and keep looking at the real rg options after it.
+      i = op.next;
+      while (i < s.length && (s[i] === " " || s[i] === "\t")) i++;
+      if (i < s.length) i = readArgWord(s, i).next;
+      continue;
+    }
+    const { word, next } = readArgWord(s, i);
+    if (next === i) {
+      i++;
+      continue;
+    }
+    i = next;
+    if (skipValue) {
+      skipValue = false;
+      continue;
+    }
+    if (word === "--") break;
+    if (word.startsWith("--")) {
+      if (!word.includes("=") && RG_LONG_VALUE_OPTS.has(word)) skipValue = true;
+      continue;
+    }
+    if (!word.startsWith("-") || word === "-") continue;
+    for (let k = 1; k < word.length; k++) {
+      const flag = word[k];
+      if (flag === "r") return true;
+      if (RG_SHORT_VALUE_OPTS.has(flag)) {
+        // The rest of the cluster (or the next word) is this option's value.
+        if (k === word.length - 1) skipValue = true;
+        break;
+      }
+    }
+  }
+  return false;
+}
+
+export function detectLegacyTool(command: string): string | undefined {
   let i = 0;
   let commandPos = true;
   // Set once an env-var assignment word is seen in the current simple
@@ -560,7 +695,6 @@ export function detectLegacyTool(
         heredoc.delimiter,
         heredoc.indented,
         heredoc.quoted,
-        rules,
       );
       if (result.reason) return result.reason;
       i = result.next;
@@ -671,17 +805,11 @@ export function detectLegacyTool(
       // their unquoted twin.
       if (quote === '"') {
         const innerEnd = command[end - 1] === '"' ? end - 1 : end;
-        const reason = scanExecutedSubs(
-          command,
-          i + 1,
-          innerEnd,
-          rules,
-          "double",
-        );
+        const reason = scanExecutedSubs(command, i + 1, innerEnd, "double");
         if (reason) return reason;
       } else if (quote === "`") {
         const innerEnd = command[end - 1] === "`" ? end - 1 : end;
-        const reason = detectLegacyTool(command.slice(i + 1, innerEnd), rules);
+        const reason = detectLegacyTool(command.slice(i + 1, innerEnd));
         if (reason) return reason;
       }
       i = end;
@@ -694,7 +822,7 @@ export function detectLegacyTool(
     }
 
     if (c === "$") {
-      const d = readDollar(command, i, rules);
+      const d = readDollar(command, i);
       if (d) {
         if (d.reason) return d.reason;
         i = d.next;
@@ -746,7 +874,7 @@ export function detectLegacyTool(
           skipNextWord = false;
           continue;
         }
-        const reason = matchCommand(word, rules);
+        const reason = matchCommandAt(command, word, i);
         if (reason) return reason;
         sudoNext = false;
       } else {
@@ -754,7 +882,7 @@ export function detectLegacyTool(
           skipNextWord = false;
           continue;
         }
-        const reason = matchCommand(word, rules);
+        const reason = matchCommandAt(command, word, i);
         if (reason) return reason;
       }
       if (!COMMAND_PREFIX_KEYWORDS.has(word)) {
@@ -769,13 +897,10 @@ export function detectLegacyTool(
 }
 
 export default function preferTools(pi: ExtensionAPI) {
-  pi.on("tool_call", async (event, ctx) => {
+  pi.on("tool_call", async (event) => {
     if (!isToolCallEventType("bash", event)) return;
 
-    // Model-conditional rule: glm-5.* gets bash `rg` blocked (live model,
-    // read per call — model switches mid-session take effect immediately).
-    const extraRules = isRipgrepBlockedModel(ctx.model?.id) ? [RG_RULE] : [];
-    const reason = detectLegacyTool(event.input.command ?? "", extraRules);
+    const reason = detectLegacyTool(event.input.command ?? "");
     if (reason) {
       return { block: true, reason };
     }
