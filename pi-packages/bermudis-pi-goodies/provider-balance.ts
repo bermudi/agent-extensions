@@ -1740,7 +1740,8 @@ export default function providerBalance(
       // keychain reads and OAuth token refreshes (seconds under lock
       // contention). If resolution reveals a different account, the
       // displayedCacheKey mismatch below still clears it, so a foreign
-      // reading is never painted. Mirrors the post-fetch re-check below.
+      // reading is never painted. Same principle as the post-fetch re-check
+      // below: never blank a displayed same-account value.
       if (!balance) {
         identityPending = true;
         requestRender?.();
