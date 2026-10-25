@@ -224,7 +224,13 @@ export function getFinalReviewMessage(
   ctx: Pick<ExtensionCommandContext, "sessionManager">,
   originId: string,
 ): string | undefined {
-  const leafPath = ctx.sessionManager.getBranch(); // leaf → root
+  // getBranch() returns the path in CHRONOLOGICAL (root → leaf) order —
+  // pi's SessionManager walks leaf → root internally, then reverses.
+  // Walk newest-first here, so mirror that reversal (assuming index 0 is
+  // the leaf made boundaryIndex always 0 — the shared root — and the
+  // scan below never ran; "Return and fix findings" then always failed
+  // with "No completed review response found").
+  const leafPath = [...ctx.sessionManager.getBranch()].reverse(); // leaf → root
   const originPathIds = new Set(
     ctx.sessionManager.getBranch(originId).map((entry) => entry.id),
   );

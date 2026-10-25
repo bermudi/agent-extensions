@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   initTheme,
+  SessionManager,
   type ExtensionAPI,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
@@ -410,7 +411,8 @@ const settleMacrotask = () =>
   new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 type HarnessOptions = {
-  /** Leaf→root entries for the current branch (getBranch()). */
+  /** Root→leaf (chronological) entries for the current branch — the order
+   * pi's SessionManager.getBranch() actually returns (the leaf is LAST). */
   branchEntries?: unknown[];
   /** Entries returned for getBranch(originId) when the origin sits on a
    * different chain than the leaf (the normal fresh-review shape). */
@@ -471,15 +473,16 @@ function setupEndReviewHarness(options: HarnessOptions = {}) {
   );
 
   // getBranch(fromId?) mirrors the real semantics closely enough for these
-  // paths: no arg → current leaf chain; an id slices the chain from that
-  // entry (origin→root); an id from another chain comes from
-  // originBranchEntries; an unknown id yields [] like a real session with
-  // no such entry.
+  // paths: no arg → the current branch in root→leaf (chronological) order,
+  // exactly like pi's SessionManager.getBranch(); an id resolves that
+  // entry's chain back to the root (a prefix ending at that entry); an id
+  // from another chain comes from originBranchEntries; an unknown id
+  // yields [] like a real session with no such entry.
   const getBranch = (fromId?: string): unknown[] => {
     if (fromId === undefined) return branchEntries;
     if (options.originBranchEntries) return options.originBranchEntries;
     const index = branchEntries.findIndex((entry) => entry.id === fromId);
-    return index === -1 ? [] : branchEntries.slice(index);
+    return index === -1 ? [] : branchEntries.slice(0, index + 1);
   };
 
   const ctx = {
@@ -654,105 +657,190 @@ describe("/end-review summarization loader abort (stale review-state fix)", () =
 });
 
 describe("getFinalReviewMessage (review-branch capture)", () => {
-  const root = {
-    id: "root",
+  // Fixtures run through pi's REAL SessionManager (inMemory) so
+  // getBranch()'s ordering is pinned verbatim instead of re-imagined by a
+  // stub. The original stub returned leaf-first arrays while pi returns
+  // root-first (chronological), so this suite stayed green while
+  // "Return and fix findings" always failed live ("No completed review
+  // response found"): boundaryIndex landed on the shared root at index 0
+  // and the scan never ran.
+  const ts = (n: number) => new Date(2026, 0, 1, 0, 0, n).toISOString();
+  const userEntry = (
+    id: string,
+    parentId: string | null,
+    text: string,
+    n: number,
+  ) => ({
     type: "message",
-    message: { role: "user", content: "hi" },
-  };
-  const originEntry = {
-    id: "origin-1",
+    id,
+    parentId,
+    timestamp: ts(n),
+    message: { role: "user", content: [{ type: "text", text }] },
+  });
+  const assistantEntry = (
+    id: string,
+    parentId: string,
+    parts: Array<{ type: string; text?: string; thinking?: string }>,
+    n: number,
+  ) => ({
     type: "message",
-    message: {
-      role: "assistant",
-      content: [{ type: "text", text: "pre-review work on the main branch" }],
-    },
-  };
-  const reviewFinal = {
-    id: "review-final",
-    type: "message",
-    message: {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "internal reasoning, not the review" },
-        { type: "text", text: "## Verdict\nneeds attention" },
-      ],
-    },
-  };
+    id,
+    parentId,
+    timestamp: ts(n),
+    message: { role: "assistant", content: parts },
+  });
 
-  const stubCtx = (leafPath: unknown[], originPath: unknown[]) =>
+  const ROOT = userEntry("root", null, "hi", 0);
+  const ORIGIN = assistantEntry(
+    "origin-1",
+    "root",
+    [{ type: "text", text: "pre-review work on the main branch" }],
+    1,
+  );
+  const REVIEW_STATE = {
+    type: "custom",
+    customType: REVIEW_STATE_CUSTOM_TYPE,
+    id: "rs-1",
+    parentId: "root",
+    timestamp: ts(2),
+    data: { active: true, originId: "origin-1" },
+  };
+  const REVIEW_PROMPT = userEntry(
+    "review-prompt",
+    "rs-1",
+    "Review the changes",
+    3,
+  );
+  const REVIEW_FINAL = assistantEntry(
+    "review-final",
+    "review-prompt",
+    [
+      { type: "thinking", thinking: "internal reasoning, not the review" },
+      { type: "text", text: "## Verdict\nneeds attention" },
+    ],
+    4,
+  );
+  const ABORTED_FINAL = assistantEntry(
+    "aborted-final",
+    "review-final",
+    [{ type: "text", text: "   " }],
+    5,
+  );
+
+  const ctxWith = (entries: unknown[]) =>
     ({
-      sessionManager: {
-        getBranch: (fromId?: string) =>
-          fromId === undefined ? leafPath : originPath,
-      },
+      sessionManager: SessionManager.inMemory("/", undefined, entries as never),
     }) as Parameters<typeof getFinalReviewMessage>[0];
 
-  test("returns the newest nonempty assistant text before the common ancestor", () => {
-    const text = getFinalReviewMessage(
-      stubCtx([reviewFinal, activeReviewEntry, root], [originEntry, root]),
-      "origin-1",
+  test("getBranch is root-first (chronological) — the ordering this capture depends on", () => {
+    const ctx = ctxWith([
+      ROOT,
+      ORIGIN,
+      REVIEW_STATE,
+      REVIEW_PROMPT,
+      REVIEW_FINAL,
+    ]);
+    const branch = ctx.sessionManager.getBranch();
+    expect(branch[0]?.id).toBe("root");
+    expect(branch[branch.length - 1]?.id).toBe("review-final"); // leaf last
+  });
+
+  test("sibling fork: returns the newest nonempty assistant text before the common ancestor", () => {
+    // Review branch forks at REVIEW_STATE (under root) while the origin
+    // chain runs root → origin-1 as a sibling leaf.
+    const ctx = ctxWith([
+      ROOT,
+      ORIGIN,
+      REVIEW_STATE,
+      REVIEW_PROMPT,
+      REVIEW_FINAL,
+    ]);
+    expect(getFinalReviewMessage(ctx, "origin-1")).toBe(
+      "## Verdict\nneeds attention",
     );
-    expect(text).toBe("## Verdict\nneeds attention");
+  });
+
+  test("origin on the leaf's own chain (fresh-session shape) is still captured", () => {
+    // The live failure shape: /review in a brand-new session records an
+    // origin that is an ANCESTOR of the review branch (the review forked
+    // straight off it), not a sibling.
+    const forkAtOrigin = {
+      ...REVIEW_STATE,
+      parentId: "origin-1",
+    };
+    const ctx = ctxWith([
+      ROOT,
+      ORIGIN,
+      forkAtOrigin,
+      REVIEW_PROMPT,
+      REVIEW_FINAL,
+    ]);
+    expect(getFinalReviewMessage(ctx, "origin-1")).toBe(
+      "## Verdict\nneeds attention",
+    );
   });
 
   test("skips empty or thinking-only assistant messages, falling back to an older one", () => {
-    const abortedFinal = {
-      id: "aborted-final",
-      type: "message",
-      message: {
-        role: "assistant",
-        content: [{ type: "text", text: "   " }],
-      },
-    };
-    const text = getFinalReviewMessage(
-      stubCtx(
-        [abortedFinal, reviewFinal, activeReviewEntry, root],
-        [originEntry, root],
-      ),
-      "origin-1",
+    const ctx = ctxWith([
+      ROOT,
+      ORIGIN,
+      REVIEW_STATE,
+      REVIEW_PROMPT,
+      REVIEW_FINAL,
+      ABORTED_FINAL, // newest (leaf), whitespace-only → skipped
+    ]);
+    expect(getFinalReviewMessage(ctx, "origin-1")).toBe(
+      "## Verdict\nneeds attention",
     );
-    expect(text).toBe("## Verdict\nneeds attention");
   });
 
   test("never reaches past the boundary into main-branch history", () => {
-    // The origin chain's assistant message must not be captured even when
-    // the review branch itself has no responses.
-    const text = getFinalReviewMessage(
-      stubCtx(
-        [
-          {
-            id: "review-prompt",
-            type: "message",
-            message: { role: "user", content: "Review the changes" },
-          },
-          root,
-        ],
-        [originEntry, root],
-      ),
-      "origin-1",
-    );
-    expect(text).toBeUndefined();
-  });
-
-  test("unknown origin (empty origin path) and disjoint paths both refuse", () => {
-    expect(
-      getFinalReviewMessage(stubCtx([reviewFinal, root], []), "origin-1"),
-    ).toBeUndefined();
+    // No review response on the branch (leaf is the prompt). The origin
+    // chain's assistant message must not be captured — whether the origin
+    // is a sibling (off the leaf path entirely) or a direct ancestor
+    // (excluded by the boundary).
+    const forkAtOrigin = { ...REVIEW_STATE, parentId: "origin-1" };
     expect(
       getFinalReviewMessage(
-        stubCtx(
-          [reviewFinal, root],
-          [
-            {
-              id: "other-root",
-              type: "message",
-              message: { role: "user", content: "x" },
-            },
-          ],
-        ),
+        ctxWith([ROOT, ORIGIN, REVIEW_STATE, REVIEW_PROMPT]),
         "origin-1",
       ),
     ).toBeUndefined();
+    expect(
+      getFinalReviewMessage(
+        ctxWith([ROOT, ORIGIN, forkAtOrigin, REVIEW_PROMPT]),
+        "origin-1",
+      ),
+    ).toBeUndefined();
+  });
+
+  test("unknown origin (empty origin path) and disjoint paths both refuse", () => {
+    const ctx = ctxWith([
+      ROOT,
+      ORIGIN,
+      REVIEW_STATE,
+      REVIEW_PROMPT,
+      REVIEW_FINAL,
+    ]);
+    // Unknown id: real sessions resolve no chain → [].
+    expect(getFinalReviewMessage(ctx, "no-such-entry")).toBeUndefined();
+    // Disjoint chains: an orphaned second root shares no ids with the
+    // leaf path (placed first so the last entry stays the review leaf).
+    const orphan = assistantEntry(
+      "orphan-origin",
+      null as unknown as string,
+      [{ type: "text", text: "orphaned chain" }],
+      9,
+    );
+    const disjoint = ctxWith([
+      orphan,
+      ROOT,
+      ORIGIN,
+      REVIEW_STATE,
+      REVIEW_PROMPT,
+      REVIEW_FINAL,
+    ]);
+    expect(getFinalReviewMessage(disjoint, "orphan-origin")).toBeUndefined();
   });
 });
 
@@ -773,7 +861,15 @@ describe("/end-review fast fix path (no summarization round trip)", () => {
   const REVIEW_TEXT =
     "## Verdict\nneeds attention\n\n- [P1] src/foo.ts:42 off-by-one";
 
+  // Root→leaf (chronological), matching getBranch()'s real order.
   const reviewLeafEntries = [
+    root,
+    activeReviewEntry,
+    {
+      id: "review-prompt",
+      type: "message",
+      message: { role: "user", content: "Review the changes" },
+    },
     {
       id: "review-final",
       type: "message",
@@ -785,13 +881,6 @@ describe("/end-review fast fix path (no summarization round trip)", () => {
         ],
       },
     },
-    {
-      id: "review-prompt",
-      type: "message",
-      message: { role: "user", content: "Review the changes" },
-    },
-    activeReviewEntry,
-    root,
   ];
 
   const NO_REVIEW_ERROR =
@@ -800,7 +889,7 @@ describe("/end-review fast fix path (no summarization round trip)", () => {
   test("returns instantly (summarize:false) and queues the review verbatim as the fix prompt", async () => {
     const harness = setupEndReviewHarness({
       branchEntries: reviewLeafEntries,
-      originBranchEntries: [originEntry, root],
+      originBranchEntries: [root, originEntry],
       selectChoice: "Return and fix findings",
       autoResolveNavigation: { cancelled: false },
     });
@@ -839,15 +928,15 @@ describe("/end-review fast fix path (no summarization round trip)", () => {
   test("no review response on the branch: reports and keeps the review state", async () => {
     const harness = setupEndReviewHarness({
       branchEntries: [
+        root,
+        activeReviewEntry,
         {
           id: "review-prompt",
           type: "message",
           message: { role: "user", content: "Review the changes" },
         },
-        activeReviewEntry,
-        root,
       ],
-      originBranchEntries: [originEntry, root],
+      originBranchEntries: [root, originEntry],
       selectChoice: "Return and fix findings",
     });
 
@@ -877,7 +966,7 @@ describe("/end-review fast fix path (no summarization round trip)", () => {
   test("cancelled return navigation keeps the review state (retry stays valid)", async () => {
     const harness = setupEndReviewHarness({
       branchEntries: reviewLeafEntries,
-      originBranchEntries: [originEntry, root],
+      originBranchEntries: [root, originEntry],
       selectChoice: "Return and fix findings",
       autoResolveNavigation: { cancelled: true },
     });
