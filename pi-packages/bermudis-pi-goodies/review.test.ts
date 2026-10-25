@@ -5,9 +5,11 @@ import {
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import reviewExtension, {
+  buildFastFixPrompt,
   buildReviewPrompt,
   buildSelectOptions,
   completeReviewArgument,
+  getFinalReviewMessage,
   parseArgs,
   parsePrReference,
   parseReviewPaths,
@@ -371,174 +373,209 @@ describe("buildReviewPrompt ($-pattern safety)", () => {
   });
 });
 
+// ---- /end-review harness -------------------------------------------------
+// Drives the real /end-review command handler with stub pi/ctx so both the
+// loader abort path (navigateWithSummary) and the fix-findings fast path are
+// exercised end to end.
+
+const REVIEW_STATE_CUSTOM_TYPE = "review-session";
+
+const activeReviewEntry = {
+  type: "custom",
+  customType: REVIEW_STATE_CUSTOM_TYPE,
+  data: { active: true, originId: "origin-1" },
+};
+
+type SummaryLoaderStub = {
+  onAbort?: () => void;
+  dispose?: () => void;
+  handleInput?: (data: string) => void;
+};
+
+// BorderedLoader.onAbort is a set-only accessor (reading it yields
+// undefined), so tests press the real cancel key instead: handleInput
+// routes to CancellableLoader, which aborts and fires onAbort.
+const pressEscape = (loader: SummaryLoaderStub) => {
+  if (!loader.handleInput) {
+    throw new Error("loader has no handleInput; cannot simulate Esc");
+  }
+  loader.handleInput("\x1b");
+};
+
+type NavigateResult = { cancelled: boolean };
+type NavigateCall = { targetId: string; options: unknown };
+type SentMessage = { text: string; options?: unknown };
+
+const settleMacrotask = () =>
+  new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+type HarnessOptions = {
+  /** Leaf→root entries for the current branch (getBranch()). */
+  branchEntries?: unknown[];
+  /** Entries returned for getBranch(originId) when the origin sits on a
+   * different chain than the leaf (the normal fresh-review shape). */
+  originBranchEntries?: unknown[];
+  /** Which option the /end-review select dialog resolves with. */
+  selectChoice?: string;
+  /** When set, navigateTree resolves immediately instead of hand-cranking. */
+  autoResolveNavigation?: NavigateResult;
+};
+
+function setupEndReviewHarness(options: HarnessOptions = {}) {
+  // BorderedLoader's constructor reads pi's global theme (keyHint), which
+  // throws "Theme not initialized" in tests unless initialized.
+  initTheme();
+  const branchEntries = options.branchEntries ?? [];
+  const appended: Array<{ customType: string; data: unknown }> = [];
+  const notifications: string[] = [];
+  const widgetCalls: unknown[] = [];
+  const editorTexts: string[] = [];
+  const sentMessages: SentMessage[] = [];
+  const navigateCalls: NavigateCall[] = [];
+  const handlers = new Map<
+    string,
+    (args: string, ctx: ExtensionCommandContext) => Promise<void>
+  >();
+
+  let resolveNavigation: (result: NavigateResult) => void = () => {};
+  let loader: SummaryLoaderStub | undefined;
+
+  const pi = {
+    on: () => {},
+    registerCommand: (
+      name: string,
+      command: {
+        handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+      },
+    ) => {
+      handlers.set(name, command.handler);
+    },
+    appendEntry: (customType: string, data?: unknown) => {
+      appended.push({ customType, data });
+    },
+    exec: async () => ({ stdout: "", code: 1, stderr: "" }),
+    sendUserMessage: (text: string, messageOptions?: unknown) => {
+      sentMessages.push({ text, options: messageOptions });
+    },
+  } as unknown as ExtensionAPI;
+
+  reviewExtension(pi);
+
+  const tui = { requestRender: () => {} };
+  const theme = new Proxy(
+    {},
+    {
+      get: () => (style: unknown, text?: unknown) =>
+        String(text ?? style ?? ""),
+    },
+  );
+
+  // getBranch(fromId?) mirrors the real semantics closely enough for these
+  // paths: no arg → current leaf chain; an id slices the chain from that
+  // entry (origin→root); an id from another chain comes from
+  // originBranchEntries; an unknown id yields [] like a real session with
+  // no such entry.
+  const getBranch = (fromId?: string): unknown[] => {
+    if (fromId === undefined) return branchEntries;
+    if (options.originBranchEntries) return options.originBranchEntries;
+    const index = branchEntries.findIndex((entry) => entry.id === fromId);
+    return index === -1 ? [] : branchEntries.slice(index);
+  };
+
+  const ctx = {
+    hasUI: true,
+    mode: "tui",
+    cwd: "/",
+    sessionManager: {
+      getBranch,
+      getEntries: () => branchEntries,
+    },
+    ui: {
+      select: async () => options.selectChoice ?? "Return and summarize",
+      notify: (message: string) => {
+        notifications.push(message);
+      },
+      setWidget: (_name: string, widget: unknown) => {
+        widgetCalls.push(widget);
+      },
+      getEditorText: () => "",
+      setEditorText: (text: string) => {
+        editorTexts.push(text);
+      },
+      // Mirrors pi's showExtensionCustom: run the factory synchronously,
+      // resolve with the first done() call, dispose the component on close.
+      custom: (
+        factory: (
+          tui: typeof tui,
+          theme: unknown,
+          keybindings: { matches: () => boolean },
+          done: (result: unknown) => void,
+        ) => SummaryLoaderStub,
+      ) =>
+        new Promise((resolve) => {
+          const done = (result: unknown) => {
+            try {
+              loader?.dispose?.();
+            } catch {
+              /* pi ignores dispose errors on close too */
+            }
+            resolve(result);
+          };
+          loader = factory(tui, theme, { matches: () => false }, done);
+        }),
+    },
+    navigateTree: async (targetId: string, navOptions?: unknown) => {
+      navigateCalls.push({ targetId, options: navOptions });
+      if (options.autoResolveNavigation) {
+        return options.autoResolveNavigation;
+      }
+      return new Promise<NavigateResult>((resolve) => {
+        resolveNavigation = resolve;
+      });
+    },
+  } as unknown as ExtensionCommandContext;
+
+  const endReviewHandler = handlers.get("end-review");
+  if (!endReviewHandler) {
+    throw new Error("end-review command was not registered");
+  }
+
+  return {
+    appended,
+    notifications,
+    widgetCalls,
+    editorTexts,
+    sentMessages: () => sentMessages,
+    navigateCallCount: () => navigateCalls.length,
+    navigationCalls: () => navigateCalls,
+    // Delegate to the current binding: navigateTree reassigns
+    // resolveNavigation when the handler actually calls it.
+    resolveNavigation: (result: NavigateResult) => resolveNavigation(result),
+    runEndReview: () => endReviewHandler("", ctx),
+    loader: () => loader,
+  };
+}
+
+async function waitForLoader(
+  harness: ReturnType<typeof setupEndReviewHarness>,
+): Promise<SummaryLoaderStub> {
+  for (let i = 0; i < 100 && !harness.loader(); i++) {
+    await Promise.resolve();
+  }
+  const loader = harness.loader();
+  if (!loader) throw new Error("summary loader never appeared");
+  return loader;
+}
+
 describe("/end-review summarization loader abort (stale review-state fix)", () => {
-  // Drives the real /end-review command handler with stub pi/ctx so the
-  // loader abort path in navigateWithSummary is exercised end to end.
   // Bug #16: Esc resolved the dialog ("cancelled") while navigateTree kept
   // running; a completed-after-abort navigation left the {active: true}
   // review-session entry stale, resurrecting the review widget on replay.
 
-  const REVIEW_STATE_CUSTOM_TYPE = "review-session";
   const CANCELLED_MESSAGE =
     "Summarization cancelled. Use /end-review to try again.";
   const BACKGROUND_FINISHED_MESSAGE =
     "Summarization finished in the background after cancel; review ended.";
-
-  const activeReviewEntry = {
-    type: "custom",
-    customType: REVIEW_STATE_CUSTOM_TYPE,
-    data: { active: true, originId: "origin-1" },
-  };
-
-  type SummaryLoaderStub = {
-    onAbort?: () => void;
-    dispose?: () => void;
-    handleInput?: (data: string) => void;
-  };
-
-  // BorderedLoader.onAbort is a set-only accessor (reading it yields
-  // undefined), so tests press the real cancel key instead: handleInput
-  // routes to CancellableLoader, which aborts and fires onAbort.
-  const pressEscape = (loader: SummaryLoaderStub) => {
-    if (!loader.handleInput) {
-      throw new Error("loader has no handleInput; cannot simulate Esc");
-    }
-    loader.handleInput("\x1b");
-  };
-
-  type NavigateResult = { cancelled: boolean };
-
-  const settleMacrotask = () =>
-    new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-  function setupEndReviewHarness(options: { branchEntries?: unknown[] } = {}) {
-    // BorderedLoader's constructor reads pi's global theme (keyHint), which
-    // throws "Theme not initialized" in tests unless initialized.
-    initTheme();
-    const branchEntries = options.branchEntries ?? [];
-    const appended: Array<{ customType: string; data: unknown }> = [];
-    const notifications: string[] = [];
-    const widgetCalls: unknown[] = [];
-    const editorTexts: string[] = [];
-    const handlers = new Map<
-      string,
-      (args: string, ctx: ExtensionCommandContext) => Promise<void>
-    >();
-
-    let navigateCalls = 0;
-    let resolveNavigation: (result: NavigateResult) => void = () => {};
-    let loader: SummaryLoaderStub | undefined;
-
-    const pi = {
-      on: () => {},
-      registerCommand: (
-        name: string,
-        command: {
-          handler: (
-            args: string,
-            ctx: ExtensionCommandContext,
-          ) => Promise<void>;
-        },
-      ) => {
-        handlers.set(name, command.handler);
-      },
-      appendEntry: (customType: string, data?: unknown) => {
-        appended.push({ customType, data });
-      },
-      exec: async () => ({ stdout: "", code: 1, stderr: "" }),
-      sendUserMessage: () => {},
-    } as unknown as ExtensionAPI;
-
-    reviewExtension(pi);
-
-    const tui = { requestRender: () => {} };
-    const theme = new Proxy(
-      {},
-      {
-        get: () => (style: unknown, text?: unknown) =>
-          String(text ?? style ?? ""),
-      },
-    );
-
-    const ctx = {
-      hasUI: true,
-      mode: "tui",
-      cwd: "/",
-      sessionManager: {
-        getBranch: () => branchEntries,
-        getEntries: () => branchEntries,
-      },
-      ui: {
-        select: async () => "Return and summarize",
-        notify: (message: string) => {
-          notifications.push(message);
-        },
-        setWidget: (_name: string, widget: unknown) => {
-          widgetCalls.push(widget);
-        },
-        getEditorText: () => "",
-        setEditorText: (text: string) => {
-          editorTexts.push(text);
-        },
-        // Mirrors pi's showExtensionCustom: run the factory synchronously,
-        // resolve with the first done() call, dispose the component on close.
-        custom: (
-          factory: (
-            tui: typeof tui,
-            theme: unknown,
-            keybindings: { matches: () => boolean },
-            done: (result: unknown) => void,
-          ) => SummaryLoaderStub,
-        ) =>
-          new Promise((resolve) => {
-            const done = (result: unknown) => {
-              try {
-                loader?.dispose?.();
-              } catch {
-                /* pi ignores dispose errors on close too */
-              }
-              resolve(result);
-            };
-            loader = factory(tui, theme, { matches: () => false }, done);
-          }),
-      },
-      navigateTree: async () => {
-        navigateCalls += 1;
-        return new Promise<NavigateResult>((resolve) => {
-          resolveNavigation = resolve;
-        });
-      },
-    } as unknown as ExtensionCommandContext;
-
-    const endReviewHandler = handlers.get("end-review");
-    if (!endReviewHandler) {
-      throw new Error("end-review command was not registered");
-    }
-
-    return {
-      appended,
-      notifications,
-      widgetCalls,
-      editorTexts,
-      navigateCalls: () => navigateCalls,
-      // Delegate to the current binding: navigateTree reassigns
-      // resolveNavigation when the handler actually calls it.
-      resolveNavigation: (result: NavigateResult) => resolveNavigation(result),
-      runEndReview: () => endReviewHandler("", ctx),
-      loader: () => loader,
-    };
-  }
-
-  async function waitForLoader(
-    harness: ReturnType<typeof setupEndReviewHarness>,
-  ): Promise<SummaryLoaderStub> {
-    for (let i = 0; i < 100 && !harness.loader(); i++) {
-      await Promise.resolve();
-    }
-    const loader = harness.loader();
-    if (!loader) throw new Error("summary loader never appeared");
-    return loader;
-  }
 
   test("abort reports cancelled, discards a completed navigation, and clears review state", async () => {
     const harness = setupEndReviewHarness({
@@ -552,7 +589,7 @@ describe("/end-review summarization loader abort (stale review-state fix)", () =
     await finished;
 
     expect(harness.notifications).toEqual([CANCELLED_MESSAGE]);
-    expect(harness.navigateCalls()).toBe(1);
+    expect(harness.navigateCallCount()).toBe(1);
     expect(harness.appended).toEqual([]); // nothing written while pending
 
     // The abandoned navigation races past the abort and completes anyway.
@@ -613,5 +650,259 @@ describe("/end-review summarization loader abort (stale review-state fix)", () =
       "Review complete! Returned and summarized.",
     ]);
     expect(harness.editorTexts).toEqual(["Act on the review findings"]);
+  });
+});
+
+describe("getFinalReviewMessage (review-branch capture)", () => {
+  const root = {
+    id: "root",
+    type: "message",
+    message: { role: "user", content: "hi" },
+  };
+  const originEntry = {
+    id: "origin-1",
+    type: "message",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "pre-review work on the main branch" }],
+    },
+  };
+  const reviewFinal = {
+    id: "review-final",
+    type: "message",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "internal reasoning, not the review" },
+        { type: "text", text: "## Verdict\nneeds attention" },
+      ],
+    },
+  };
+
+  const stubCtx = (leafPath: unknown[], originPath: unknown[]) =>
+    ({
+      sessionManager: {
+        getBranch: (fromId?: string) =>
+          fromId === undefined ? leafPath : originPath,
+      },
+    }) as Parameters<typeof getFinalReviewMessage>[0];
+
+  test("returns the newest nonempty assistant text before the common ancestor", () => {
+    const text = getFinalReviewMessage(
+      stubCtx([reviewFinal, activeReviewEntry, root], [originEntry, root]),
+      "origin-1",
+    );
+    expect(text).toBe("## Verdict\nneeds attention");
+  });
+
+  test("skips empty or thinking-only assistant messages, falling back to an older one", () => {
+    const abortedFinal = {
+      id: "aborted-final",
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "   " }],
+      },
+    };
+    const text = getFinalReviewMessage(
+      stubCtx(
+        [abortedFinal, reviewFinal, activeReviewEntry, root],
+        [originEntry, root],
+      ),
+      "origin-1",
+    );
+    expect(text).toBe("## Verdict\nneeds attention");
+  });
+
+  test("never reaches past the boundary into main-branch history", () => {
+    // The origin chain's assistant message must not be captured even when
+    // the review branch itself has no responses.
+    const text = getFinalReviewMessage(
+      stubCtx(
+        [
+          {
+            id: "review-prompt",
+            type: "message",
+            message: { role: "user", content: "Review the changes" },
+          },
+          root,
+        ],
+        [originEntry, root],
+      ),
+      "origin-1",
+    );
+    expect(text).toBeUndefined();
+  });
+
+  test("unknown origin (empty origin path) and disjoint paths both refuse", () => {
+    expect(
+      getFinalReviewMessage(stubCtx([reviewFinal, root], []), "origin-1"),
+    ).toBeUndefined();
+    expect(
+      getFinalReviewMessage(
+        stubCtx(
+          [reviewFinal, root],
+          [
+            {
+              id: "other-root",
+              type: "message",
+              message: { role: "user", content: "x" },
+            },
+          ],
+        ),
+        "origin-1",
+      ),
+    ).toBeUndefined();
+  });
+});
+
+describe("/end-review fast fix path (no summarization round trip)", () => {
+  const root = {
+    id: "root",
+    type: "message",
+    message: { role: "user", content: "hi" },
+  };
+  const originEntry = {
+    id: "origin-1",
+    type: "message",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "pre-review work on the main branch" }],
+    },
+  };
+  const REVIEW_TEXT =
+    "## Verdict\nneeds attention\n\n- [P1] src/foo.ts:42 off-by-one";
+
+  const reviewLeafEntries = [
+    {
+      id: "review-final",
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "internal reasoning" },
+          { type: "text", text: REVIEW_TEXT },
+        ],
+      },
+    },
+    {
+      id: "review-prompt",
+      type: "message",
+      message: { role: "user", content: "Review the changes" },
+    },
+    activeReviewEntry,
+    root,
+  ];
+
+  const NO_REVIEW_ERROR =
+    "No completed review response found on the review branch — nothing to fix. Use /end-review → Return and summarize if you still want a branch summary.";
+
+  test("returns instantly (summarize:false) and queues the review verbatim as the fix prompt", async () => {
+    const harness = setupEndReviewHarness({
+      branchEntries: reviewLeafEntries,
+      originBranchEntries: [originEntry, root],
+      selectChoice: "Return and fix findings",
+      autoResolveNavigation: { cancelled: false },
+    });
+
+    await harness.runEndReview();
+
+    // One navigation, no summarization LLM round trip.
+    expect(harness.navigationCalls()).toEqual([
+      { targetId: "origin-1", options: { summarize: false } },
+    ]);
+    expect(harness.loader()).toBeUndefined(); // summary loader never renders
+
+    // The fix follow-up embeds the verbatim review.
+    expect(harness.sentMessages()).toHaveLength(1);
+    const sent = harness.sentMessages()[0];
+    expect(sent.options).toEqual({ deliverAs: "followUp" });
+    expect(sent.text).toContain("<review>");
+    expect(sent.text).toContain(`</review>`);
+    expect(sent.text).toContain(REVIEW_TEXT);
+    expect(sent.text.indexOf(REVIEW_TEXT)).toBeGreaterThan(
+      sent.text.indexOf("<review>"),
+    );
+    expect(sent.text).toContain("Fix in priority order");
+
+    // State cleared, widget removed, no editor draft.
+    expect(harness.appended).toEqual([
+      { customType: REVIEW_STATE_CUSTOM_TYPE, data: { active: false } },
+    ]);
+    expect(harness.widgetCalls.at(-1)).toBeUndefined();
+    expect(harness.editorTexts).toEqual([]);
+    expect(harness.notifications).toEqual([
+      "Review complete! Returned and queued a follow-up to fix findings.",
+    ]);
+  });
+
+  test("no review response on the branch: reports and keeps the review state", async () => {
+    const harness = setupEndReviewHarness({
+      branchEntries: [
+        {
+          id: "review-prompt",
+          type: "message",
+          message: { role: "user", content: "Review the changes" },
+        },
+        activeReviewEntry,
+        root,
+      ],
+      originBranchEntries: [originEntry, root],
+      selectChoice: "Return and fix findings",
+    });
+
+    await harness.runEndReview();
+
+    expect(harness.navigateCallCount()).toBe(0);
+    expect(harness.sentMessages()).toEqual([]);
+    expect(harness.appended).toEqual([]); // review stays active for retry
+    expect(harness.notifications).toEqual([NO_REVIEW_ERROR]);
+  });
+
+  test("unknown origin id (empty origin path): reports instead of grabbing main-branch text", async () => {
+    const harness = setupEndReviewHarness({
+      branchEntries: reviewLeafEntries,
+      // No originBranchEntries and "origin-1" is not on the leaf chain,
+      // so getBranch("origin-1") resolves to [] like a real session.
+      selectChoice: "Return and fix findings",
+    });
+
+    await harness.runEndReview();
+
+    expect(harness.navigateCallCount()).toBe(0);
+    expect(harness.sentMessages()).toEqual([]);
+    expect(harness.notifications).toEqual([NO_REVIEW_ERROR]);
+  });
+
+  test("cancelled return navigation keeps the review state (retry stays valid)", async () => {
+    const harness = setupEndReviewHarness({
+      branchEntries: reviewLeafEntries,
+      originBranchEntries: [originEntry, root],
+      selectChoice: "Return and fix findings",
+      autoResolveNavigation: { cancelled: true },
+    });
+
+    await harness.runEndReview();
+
+    expect(harness.sentMessages()).toEqual([]);
+    expect(harness.appended).toEqual([]);
+    expect(harness.notifications).toEqual([
+      "Navigation cancelled. Use /end-review to try again.",
+    ]);
+  });
+});
+
+describe("buildFastFixPrompt", () => {
+  test("embeds the review verbatim inside delimiters, after the instructions", () => {
+    const review =
+      "## Verdict\nneeds attention\n\n```suggestion\n- `x: $1`\n```";
+    const prompt = buildFastFixPrompt(review);
+
+    const open = prompt.indexOf("<review>");
+    const close = prompt.indexOf("</review>");
+    expect(open).toBeGreaterThan(-1);
+    expect(close).toBeGreaterThan(open);
+    expect(prompt.slice(open + "<review>\n".length, close - 1)).toBe(review);
+    expect(prompt).toContain("Treat the review's findings as a checklist");
   });
 });

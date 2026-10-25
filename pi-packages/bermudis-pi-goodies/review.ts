@@ -54,6 +54,15 @@
  *   ctx.ui.select dialogs when ctx.mode !== "tui", the end-review loader
  *   only renders in TUI mode, and the review widget renders as string
  *   lines outside the TUI
+ * - /end-review "Return and fix findings" fast path: the review branch's
+ *   final assistant response already IS the handoff, so capture it verbatim
+ *   (getFinalReviewMessage: walk the leaf path back to the common ancestor
+ *   with the origin, the same boundary pi's summarizer would use), return
+ *   with summarize:false (no LLM call), and queue the fix follow-up with the
+ *   review embedded in the prompt (buildFastFixPrompt). Upstream f1de050
+ *   (still its tip as of 2026-10-24) pays a full branch-summary round trip
+ *   first via navigateWithSummary; "Return and summarize" keeps that flow.
+ *   If upstream grows a comparable fast path, prefer the port.
  */
 
 import type {
@@ -75,6 +84,7 @@ import {
 } from "@earendil-works/pi-tui";
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import type { TextContent } from "@earendil-works/pi-ai";
 import { describeError } from "./json-file.ts";
 
 // State to track fresh session review (where we branched from).
@@ -171,6 +181,76 @@ function getReviewSettings(ctx: ExtensionContext): ReviewSettingsState {
 function applyReviewSettings(ctx: ExtensionContext) {
   const state = getReviewSettings(ctx);
   reviewCustomInstructions = state.customInstructions?.trim() || undefined;
+}
+
+// Fix-findings follow-up instructions shared by the fast-path prompt.
+const REVIEW_FIX_INSTRUCTIONS = `Instructions:
+1. Treat the review's findings as a checklist.
+2. Fix in priority order: P0, P1, then P2 (include P3 if quick and safe).
+3. If a finding is invalid/already fixed/not possible right now, briefly explain why and continue.
+4. Treat "Human Reviewer Callouts (Non-Blocking)" as informational only; do not convert them into fix tasks unless there is a separate explicit finding.
+5. Follow fail-fast error handling: do not add local catch/fallback recovery unless this scope is an explicit boundary that can safely translate the failure.
+6. If you add or keep a \`try/catch\`, explain the expected failure mode and either rethrow with context or return a boundary-safe error response.
+7. JSON parsing/decoding should fail loudly by default; avoid silent fallback parsing.
+8. Run relevant tests/checks for touched code where practical.
+9. End with: fixed items, deferred/skipped items (with reasons), and verification results.`;
+
+/**
+ * Build the fix-findings follow-up for the fast path: the verbatim review
+ * rides in the prompt, so no branch-summary LLM round trip is needed.
+ */
+export function buildFastFixPrompt(review: string): string {
+  return `Implement the findings in the following review. The review ran on a separate branch of this session that is no longer in context — the review text below is the complete handoff.
+
+${REVIEW_FIX_INSTRUCTIONS}
+
+<review>
+${review}
+</review>`;
+}
+
+/**
+ * Capture the review branch's final assistant response (the review itself).
+ *
+ * The review branch diverged from the main branch, so the origin entry is
+ * NOT on the leaf's path — the boundary is the common ancestor of the two
+ * paths (the same boundary pi's branch summarizer collects entries for).
+ * Returns the newest non-empty assistant text between the leaf and that
+ * boundary, or undefined when the review branch holds no completed review
+ * response (or provenance cannot be established — stale origin, disjoint
+ * paths), in which case the caller must not pretend there is a review.
+ */
+export function getFinalReviewMessage(
+  ctx: Pick<ExtensionCommandContext, "sessionManager">,
+  originId: string,
+): string | undefined {
+  const leafPath = ctx.sessionManager.getBranch(); // leaf → root
+  const originPathIds = new Set(
+    ctx.sessionManager.getBranch(originId).map((entry) => entry.id),
+  );
+  if (originPathIds.size === 0) {
+    return undefined; // unknown origin: refuse instead of grabbing main-branch text
+  }
+  // Both paths end at the root, so the first shared entry on the leaf path
+  // is the common ancestor. Review-branch entries strictly precede it.
+  const boundaryIndex = leafPath.findIndex((entry) =>
+    originPathIds.has(entry.id),
+  );
+  if (boundaryIndex === -1) {
+    return undefined; // disjoint paths (orphaned entries): provenance unprovable
+  }
+  for (let i = 0; i < boundaryIndex; i++) {
+    const entry = leafPath[i];
+    if (entry.type !== "message") continue;
+    const message = entry.message;
+    if (message.role !== "assistant") continue;
+    const text = message.content
+      .filter((part): part is TextContent => part.type === "text")
+      .map((part) => part.text)
+      .join("\n\n");
+    if (text.trim()) return text;
+  }
+  return undefined;
 }
 
 // Review target types (matching Codex's approach)
@@ -1984,19 +2064,6 @@ These are informational callouts for humans and are not fix items by themselves.
 
 Preserve exact file paths, function names, and error messages where available.`;
 
-  const REVIEW_FIX_FINDINGS_PROMPT = `Use the latest review summary in this session and implement the review findings now.
-
-Instructions:
-1. Treat the summary's Findings/Fix Queue as a checklist.
-2. Fix in priority order: P0, P1, then P2 (include P3 if quick and safe).
-3. If a finding is invalid/already fixed/not possible right now, briefly explain why and continue.
-4. Treat "Human Reviewer Callouts (Non-Blocking)" as informational only; do not convert them into fix tasks unless there is a separate explicit finding.
-5. Follow fail-fast error handling: do not add local catch/fallback recovery unless this scope is an explicit boundary that can safely translate the failure.
-6. If you add or keep a \`try/catch\`, explain the expected failure mode and either rethrow with context or return a boundary-safe error response.
-7. JSON parsing/decoding should fail loudly by default; avoid silent fallback parsing.
-8. Run relevant tests/checks for touched code where practical.
-9. End with: fixed items, deferred/skipped items (with reasons), and verification results.`;
-
   type EndReviewAction = "returnOnly" | "returnAndFix" | "returnAndSummarize";
   type EndReviewActionResult = "ok" | "cancelled" | "error";
   type EndReviewActionOptions = {
@@ -2171,6 +2238,48 @@ Instructions:
       return "ok";
     }
 
+    if (action === "returnAndFix") {
+      // Fast path: the review's final assistant response already is the
+      // handoff — carry it across the branch boundary verbatim instead of
+      // paying a branch-summary LLM round trip before the fixing turn can
+      // even start. Returning is a pure tree move (summarize: false).
+      const reviewText = getFinalReviewMessage(ctx, originId);
+      if (!reviewText) {
+        ctx.ui.notify(
+          "No completed review response found on the review branch — nothing to fix. Use /end-review → Return and summarize if you still want a branch summary.",
+          "error",
+        );
+        return "error";
+      }
+
+      try {
+        const result = await ctx.navigateTree(originId, { summarize: false });
+        if (result.cancelled) {
+          ctx.ui.notify(
+            "Navigation cancelled. Use /end-review to try again.",
+            "info",
+          );
+          return "cancelled";
+        }
+      } catch (error) {
+        ctx.ui.notify(`Failed to return: ${describeError(error)}`, "error");
+        return "error";
+      }
+
+      clearReviewState(ctx);
+      pi.sendUserMessage(buildFastFixPrompt(reviewText), {
+        deliverAs: "followUp",
+      });
+      if (notifySuccess) {
+        ctx.ui.notify(
+          "Review complete! Returned and queued a follow-up to fix findings.",
+          "info",
+        );
+      }
+      return "ok";
+    }
+
+    // action === "returnAndSummarize"
     const summaryResult = await navigateWithSummary(
       ctx,
       originId,
@@ -2199,22 +2308,11 @@ Instructions:
 
     clearReviewState(ctx);
 
-    if (action === "returnAndSummarize") {
-      if (!ctx.ui.getEditorText().trim()) {
-        ctx.ui.setEditorText("Act on the review findings");
-      }
-      if (notifySuccess) {
-        ctx.ui.notify("Review complete! Returned and summarized.", "info");
-      }
-      return "ok";
+    if (!ctx.ui.getEditorText().trim()) {
+      ctx.ui.setEditorText("Act on the review findings");
     }
-
-    pi.sendUserMessage(REVIEW_FIX_FINDINGS_PROMPT, { deliverAs: "followUp" });
     if (notifySuccess) {
-      ctx.ui.notify(
-        "Review complete! Returned and queued a follow-up to fix findings.",
-        "info",
-      );
+      ctx.ui.notify("Review complete! Returned and summarized.", "info");
     }
     return "ok";
   }
