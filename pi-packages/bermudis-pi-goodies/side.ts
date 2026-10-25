@@ -1,5 +1,5 @@
 /**
- * side — /side, /side-exit: consult a second model alongside the main session.
+ * side — /side, /end-side-session: consult a second model alongside the main session.
  *
  * Mechanics:
  * - /side picks a model (pi's own model selector when the runtime is
@@ -12,7 +12,7 @@
  *   of a session you were not part of"). The side model reviews quoted
  *   material instead of inheriting the main agent's history as its own, and
  *   is told to treat it as untrusted evidence, not instructions.
- * - /side-exit navigates back to the recorded tip, restores the main model,
+ * - /end-side-session navigates back to the recorded tip, restores the main model,
  *   and hands the main agent the side conversation — also as an attributed
  *   quote — with the mode chosen at exit: trajectory (full transcript),
  *   summary (the side model summarizes, shown as a cancellable progress
@@ -968,7 +968,7 @@ export default function side(pi: ExtensionAPI): void {
 
   pi.registerCommand("side", {
     description:
-      "Open a side consultation with another model (main agent parked; /side-exit to return)",
+      "Open a side consultation with another model (main agent parked; /end-side-session to return)",
     getArgumentCompletions: (prefix) =>
       filterSideModelCompletions(prefix, modelRegistryRef),
     handler: async (args, ctx) => {
@@ -979,11 +979,11 @@ export default function side(pi: ExtensionAPI): void {
       const arg = args.trim();
 
       // Model switching inside a side session is pi's own ctrl+l — the
-      // model_select handler keeps the badge honest and /side-exit reads the
+      // model_select handler keeps the badge honest and /end-side-session reads the
       // live model — so /side has no in-side behavior at all.
       if (markerIdx !== -1) {
         ctx.ui.notify(
-          "side: already in a side session — ctrl+l switches the side model, /side-exit to return",
+          "side: already in a side session — ctrl+l switches the side model, /end-side-session to return",
           "warning",
         );
         return;
@@ -1062,7 +1062,7 @@ export default function side(pi: ExtensionAPI): void {
       } satisfies SideMarkerData);
 
       ctx.ui.notify(
-        `side session open · ${modelRef(model)} · quote of main conversation is frozen at entry · /side-exit when done`,
+        `side session open · ${modelRef(model)} · quote of main conversation is frozen at entry · /end-side-session when done`,
         "info",
       );
       logGoodiesEvent({
@@ -1073,7 +1073,7 @@ export default function side(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerCommand("side-exit", {
+  pi.registerCommand("end-side-session", {
     description:
       "Close the side session and choose what the main agent receives: trajectory, summary, or nothing",
     getArgumentCompletions: (prefix) => filterExitCompletions(prefix),
@@ -1082,14 +1082,14 @@ export default function side(pi: ExtensionAPI): void {
 
       const marker = sideMarkerFromBranch(ctx);
       if (!marker) {
-        ctx.ui.notify("side-exit: not in a side session", "warning");
+        ctx.ui.notify("end-side-session: not in a side session", "warning");
         return;
       }
 
       const parsed = parseExitMode(args);
       if (parsed === null) {
         ctx.ui.notify(
-          `side-exit: unknown mode ${JSON.stringify(args.trim())} — expected ${EXIT_MODES.join(", ")}`,
+          `end-side-session: unknown mode ${JSON.stringify(args.trim())} — expected ${EXIT_MODES.join(", ")}`,
           "warning",
         );
         return;
@@ -1123,7 +1123,7 @@ export default function side(pi: ExtensionAPI): void {
           );
           if (picked === undefined) {
             ctx.ui.notify(
-              "side-exit cancelled — still in the side session",
+              "end-side-session cancelled — still in the side session",
               "warning",
             );
             return;
@@ -1147,7 +1147,7 @@ export default function side(pi: ExtensionAPI): void {
         if (!result.ok) {
           if (result.cancelled) {
             ctx.ui.notify(
-              "side-exit: summarization cancelled — still in the side session",
+              "end-side-session: summarization cancelled — still in the side session",
               "warning",
             );
           } else {
@@ -1155,7 +1155,10 @@ export default function side(pi: ExtensionAPI): void {
               type: "side_summary_failed",
               error: describeError(result.error),
             });
-            ctx.ui.notify(`side-exit: ${describeError(result.error)}`, "error");
+            ctx.ui.notify(
+              `end-side-session: ${describeError(result.error)}`,
+              "error",
+            );
           }
           return;
         }
@@ -1167,7 +1170,7 @@ export default function side(pi: ExtensionAPI): void {
       });
       if (result.cancelled) {
         ctx.ui.notify(
-          "side-exit: navigation cancelled — still in the side session",
+          "end-side-session: navigation cancelled — still in the side session",
           "warning",
         );
         return;
@@ -1190,13 +1193,13 @@ export default function side(pi: ExtensionAPI): void {
           }
         } else {
           ctx.ui.notify(
-            `side-exit: could not restore ${modelRef(marker.data.mainModel)} — still on the side model`,
+            `end-side-session: could not restore ${modelRef(marker.data.mainModel)} — still on the side model`,
             "warning",
           );
         }
       } else {
         ctx.ui.notify(
-          "side-exit: no main model was parked (model was unavailable at /side) — staying on the side model",
+          "end-side-session: no main model was parked (model was unavailable at /side) — staying on the side model",
           "warning",
         );
       }
