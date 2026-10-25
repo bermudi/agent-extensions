@@ -335,9 +335,11 @@ export default function (pi: ExtensionAPI): void {
     description:
       "Ask a vision model a specific question about an image file (jpg, png, gif, webp, bmp) and get a text answer. " +
       "The active model cannot view images itself — this is how it looks at one. Ask targeted questions " +
-      "('what error does the dialog show?', 'which element is highlighted?'). Set followUp=true to build on the " +
-      "previous Q&A about the same image — the vision model remembers its earlier answers, so relative references " +
-      "('the smaller button below it') work.",
+      "('what error does the dialog show?', 'which element is highlighted?'). One image per call — to compare " +
+      "images, combine them into one first (side-by-side montage for visual comparison, a pixel-diff image for exact " +
+      "differences) and ask about the result. Set followUp=true to " +
+      "build on the previous Q&A about the same image — the vision model remembers its earlier answers, so " +
+      "relative references ('the smaller button below it') work.",
     promptSnippet: "Ask a vision model targeted questions about image files",
     promptGuidelines: [
       "Use the vision tool to ask targeted questions about images (screenshots, diagrams, charts) — the active model cannot view images directly. Pass followUp=true to continue the previous thread about the same image.",
