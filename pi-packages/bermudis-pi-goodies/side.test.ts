@@ -869,10 +869,16 @@ describe("summarizeWithProgress", () => {
     const pending = summarizeWithProgress(h.ctx, sideModel, "transcript", 1);
     const handler = h.getInput();
     expect(handler).toBeDefined();
-    // Only a bare Esc cancels; escape sequences must pass through.
+    // Only Esc cancels; escape sequences and modified escapes must pass
+    // through. Esc itself arrives in three encodings across terminals
+    // (legacy byte, kitty CSI-u, xterm modifyOtherKeys) and all must cancel.
     expect(handler("\x1b[A")).toBeUndefined();
     expect(handler("\x1b[<u")).toBeUndefined();
+    expect(handler("\x1b[27;5u")).toBeUndefined(); // ctrl+esc is not plain esc
     expect(handler("\x1b")).toEqual({ consume: true });
+    expect(handler("\x1b[27u")).toEqual({ consume: true });
+    expect(handler("\x1b[27;1:1u")).toEqual({ consume: true });
+    expect(handler("\x1b[27;1;27~")).toEqual({ consume: true });
     const result = await pending;
     expect(result).toEqual({ ok: false, cancelled: true });
     expect(h.widgets[h.widgets.length - 1]).toEqual([WIDGET_KEY, undefined]);
@@ -962,8 +968,7 @@ describe("summarizeWithProgress", () => {
       expect(line.endsWith("…")).toBe(true);
     } finally {
       if (cols === undefined) {
-        delete (process.stdout as unknown as Record<string, unknown>)
-          .columns;
+        delete (process.stdout as unknown as Record<string, unknown>).columns;
       } else {
         Object.defineProperty(process.stdout, "columns", {
           value: cols,

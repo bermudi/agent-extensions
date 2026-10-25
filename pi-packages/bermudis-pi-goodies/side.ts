@@ -53,6 +53,7 @@ import {
   sessionEntryToContextMessages,
   shouldCompact,
 } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { describeError, extractTextParts } from "./json-file.ts";
 import { buildTrajectory, renderTrajectory } from "./copy-trajectory.ts";
 import { logGoodiesEvent } from "./goodies-log.ts";
@@ -712,8 +713,7 @@ const WIDGET_LINE_FALLBACK_WIDTH = 80;
  */
 function widgetLineCap(): number {
   const cols = process.stdout.columns;
-  if (typeof cols !== "number" || cols <= 0)
-    return WIDGET_LINE_FALLBACK_WIDTH;
+  if (typeof cols !== "number" || cols <= 0) return WIDGET_LINE_FALLBACK_WIDTH;
   return Math.max(20, Math.min(WIDGET_LINE_FALLBACK_WIDTH, cols - 2));
 }
 
@@ -744,10 +744,15 @@ export async function summarizeWithProgress(
     `⟳ summarizing side consultation (${turns}) with ${modelRef(sideModel)} — esc cancels`,
   );
   const unsubscribe = ctx.ui?.onTerminalInput?.((data) => {
-    // A bare Esc arrives as exactly "\x1b" (pi's stdin buffer flushes a lone
-    // ESC after its escape timeout); sequences like arrow keys arrive as
-    // longer chunks and pass through untouched.
-    if (data === "\x1b") {
+    // Esc reaches here in every encoding pi itself accepts: a lone "\x1b"
+    // (legacy terminals; pi's stdin buffer flushes it after its escape
+    // timeout, and WezTerm's kitty quirk sends it that way too), a kitty
+    // CSI-u sequence like "\x1b[27;1:1u" (pi-tui enables the kitty keyboard
+    // protocol at startup with the disambiguate flag, under which the spec
+    // reports the Esc press via CSI u instead of legacy bytes), and xterm
+    // modifyOtherKeys. Anything else — arrow keys, ctrl+esc — passes
+    // through untouched.
+    if (matchesKey(data, "escape")) {
       abort.abort();
       return { consume: true };
     }
