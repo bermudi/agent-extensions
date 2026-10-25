@@ -182,6 +182,33 @@ describe("clean-tui built-in metadata parity", () => {
       expect(definition.parameters).toEqual(native.parameters);
     }
   });
+
+  test("overrides are registration-neutral: defaultActive false on all seven", () => {
+    // pi activates any direct-exposure tool on registration unless its
+    // definition sets defaultActive: false (agent-session
+    // _isActivatedOnRegistration). clean-tui re-registers the built-in
+    // names purely to swap in burst renderers — without this flag that
+    // re-registration force-activated find/grep/ls (pi reserves them for
+    // bash-less sessions) in every session, and symmetrically would force
+    // bash into a read-only one. Verified against pi 1.4.0: with the flag,
+    // defaults give read/bash/edit/write (+vision); tools=read,grep,find,ls
+    // keeps the trio active WITH burst renderers (registry definitions are
+    // activation-independent). Do not remove this flag.
+    const h = freshHarness();
+    for (const name of [
+      "read",
+      "bash",
+      "edit",
+      "write",
+      "find",
+      "grep",
+      "ls",
+    ] as const) {
+      const definition = h.tool(name) as Record<string, unknown>;
+      expect(definition.defaultActive).toBe(false);
+      expect(definition.renderShell).toBe("self");
+    }
+  });
 });
 
 describe("clean-tui load-time configuration", () => {

@@ -1383,6 +1383,19 @@ export default function cleanTui(pi: ExtensionAPI): void {
     const definition = {
       ...native, // retain promptSnippet/Guidelines, schema, execution mode, preparation and all future metadata
       ...burst,
+      // Renderer override ONLY — registration must never touch activation.
+      // pi activates any direct-exposure tool on registration unless
+      // defaultActive is false (agent-session _isActivatedOnRegistration),
+      // so re-registering the built-in names here used to force-activate
+      // find/grep/ls — pi keeps them for bash-less read-only sessions — in
+      // every session, and symmetrically would force bash into one. With
+      // defaultActive: false the definitions sit in the registry with their
+      // burst renderers for whenever the tool IS active: already-active
+      // tools stay active through re-registration (the refresh seeds the
+      // next active set from the previous one), inactive ones stay inactive
+      // until pi's own gating (base defaults, --tools/defaultTools, /tools,
+      // setActiveTools) names them.
+      defaultActive: false,
       async execute(
         toolCallId: string,
         params: never,

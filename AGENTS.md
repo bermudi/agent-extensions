@@ -25,6 +25,11 @@ pi-packages/
                          # clean-tui render paths MUST follow the render-safety rules in its
                          # README (pi-tui fullRender escalation: clearOnShrink + above-viewport
                          # changes wipe the screen in regular mode; fullscreen has neither)
+                         # clean-tui re-registers the 7 builtin tool names as renderer swaps ONLY:
+                         # every definition carries defaultActive:false (pi activates direct tools
+                         # on registration otherwise, which force-activated find/grep/ls — the
+                         # bash-less fallback trio — into every session; fixed 2026-10-24, bisect
+                         # story in ~/build/pi-mono/spurious-default-tools-1.4.0.md). Never drop it.
                          # prefer-tools.ts is a NUDGE, not a security boundary: it steers
                          # well-intentioned models toward modern tools (trash/uv/rg). Don't
                          # harden it against adversarial bypass or treat exotic false negatives

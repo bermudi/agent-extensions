@@ -42,8 +42,13 @@ the balance footer). State persists to `~/.pi/agent/goodies.json`.
 While enabled, the tool overrides carry the built-ins' full definitions —
 schema, execution, and system-prompt contributions (`promptSnippet`,
 `promptGuidelines`) — so the model sees exactly what vanilla pi would show it;
-the extension is purely presentational. Every feature toggle, clean-tui
-included, takes effect on the next `/reload` or new session.
+the extension is purely presentational. They re-register with
+`defaultActive: false`: registering a tool name in pi activates it by
+default, which used to force `find`/`grep`/`ls` (pi's bash-less fallback
+trio) into every session — registration is now strictly a renderer swap and
+the active tool set stays exactly what vanilla pi would pick. Every feature
+toggle, clean-tui included, takes effect on the next `/reload` or new
+session.
 Kilo's provider and its balance footer are bundled here.
 
 ## Smart summaries for long bash commands
