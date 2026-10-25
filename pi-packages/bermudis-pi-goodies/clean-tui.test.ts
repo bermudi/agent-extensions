@@ -172,6 +172,7 @@ describe("clean-tui built-in metadata parity", () => {
           key === "renderCall" ||
           key === "renderResult" ||
           key === "renderShell" ||
+          key === "defaultActive" || // intentionally divergent (registration-neutral); covered by dedicated test below
           key === "execute"
         )
           continue;
