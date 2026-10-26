@@ -7,8 +7,14 @@ import type {
   CustomEntry,
   CustomMessageEntry,
   ExtensionCommandContext,
+  MessageRenderOptions,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import {
+  KeybindingsManager,
+  getKeybindings,
+  setKeybindings,
+} from "@earendil-works/pi-tui";
 import {
   activeSideModel,
   applySideStatus,
@@ -25,7 +31,9 @@ import {
   parseExitMode,
   parseModelArg,
   parseSideMarkerData,
+  sideHandoffRenderer,
   summarizeWithProgress,
+  type SideHandoffDetails,
 } from "./side.ts";
 import {
   formatSideLensSuffix,
@@ -977,6 +985,96 @@ describe("summarizeWithProgress", () => {
           enumerable: true,
         });
       }
+    }
+  });
+});
+
+describe("sideHandoffRenderer", () => {
+  type RendererMessage = Parameters<typeof sideHandoffRenderer>[0];
+  type RendererTheme = Parameters<typeof sideHandoffRenderer>[2];
+
+  const identityTheme = {
+    fg: (_color: string, text: string) => text,
+  } as unknown as RendererTheme;
+  const options = (expanded: boolean) =>
+    ({ expanded, outputPad: 1 }) as MessageRenderOptions;
+
+  const details: SideHandoffDetails = {
+    markerId: "m1",
+    coveredUpTo: "e9",
+    model: { provider: "openai", id: "gpt-6.1-sol" },
+    kind: "summary",
+    turnCount: 2,
+  };
+
+  function handoffMessage(content: string | unknown[]): RendererMessage {
+    return {
+      role: "custom",
+      customType: "side-transcript",
+      content,
+      display: true,
+      details,
+      timestamp: Date.now(),
+    } as unknown as RendererMessage;
+  }
+
+  test("collapsed: single header line with the toggle-key hint", () => {
+    const component = sideHandoffRenderer(
+      handoffMessage("hidden body"),
+      options(false),
+      identityTheme,
+    );
+    const lines = component!.render(100);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(
+      "▸ side summary · openai/gpt-6.1-sol · 2 turns → main context",
+    );
+    expect(lines[0]).toContain("(ctrl+o to expand)");
+  });
+
+  test("expanded: renders the entire content — no line cap", () => {
+    const body = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join(
+      "\n",
+    );
+    const component = sideHandoffRenderer(
+      handoffMessage(body),
+      options(true),
+      identityTheme,
+    );
+    const lines = component!.render(100);
+    expect(lines).toHaveLength(81); // header + all 80 body lines
+    expect(lines[1]).toBe("line 1");
+    expect(lines[80]).toBe("line 80");
+    expect(lines[0]).toContain("(ctrl+o to collapse)");
+  });
+
+  test("expanded with non-string content falls back to the header", () => {
+    const component = sideHandoffRenderer(
+      handoffMessage([{ type: "text", text: "x" }]),
+      options(true),
+      identityTheme,
+    );
+    expect(component!.render(100)).toHaveLength(1);
+  });
+
+  test("a rebound app.tools.expand is reflected in the hint", () => {
+    // pi-tui's manager with a minimal definition set — the same class the
+    // host's manager extends, exercising the same getKeys/userBindings path.
+    const rebound = new KeybindingsManager(
+      { "app.tools.expand": { defaultKeys: "ctrl+o" } },
+      { "app.tools.expand": "ctrl+e" },
+    );
+    const original = getKeybindings();
+    setKeybindings(rebound);
+    try {
+      const component = sideHandoffRenderer(
+        handoffMessage("body"),
+        options(false),
+        identityTheme,
+      );
+      expect(component!.render(100)[0]).toContain("(ctrl+e to expand)");
+    } finally {
+      setKeybindings(original);
     }
   });
 });

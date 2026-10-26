@@ -43,6 +43,7 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  MessageRenderer,
   SessionEntry,
   ToolInfo,
 } from "@earendil-works/pi-coding-agent";
@@ -53,7 +54,7 @@ import {
   sessionEntryToContextMessages,
   shouldCompact,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey } from "@earendil-works/pi-tui";
+import { getKeybindings, matchesKey } from "@earendil-works/pi-tui";
 import { describeError, extractTextParts } from "./json-file.ts";
 import { buildTrajectory, renderTrajectory } from "./copy-trajectory.ts";
 import { logGoodiesEvent } from "./goodies-log.ts";
@@ -85,7 +86,7 @@ interface SideMarkerData {
   mainTipId: string;
 }
 
-interface SideHandoffDetails {
+export interface SideHandoffDetails {
   markerId: string;
   coveredUpTo: string;
   model: ModelRef;
@@ -423,6 +424,50 @@ export function buildSummaryHandoff(
 }
 
 export const SUMMARY_INSTRUCTIONS = `Summarize this side consultation for the main agent that was not part of it. Preserve: the consultant's main conclusions; explicit agreement or disagreement with the main session's work and why; verified facts, numbers, and citations; concrete recommendations. Omit process narrative and tool trivia. The "Assistant" turns are the consultant; "User" turns are the human asking questions. Be concise and specific.`;
+
+/**
+ * Transcript renderer for the handoff message: collapsed shows the header
+ * with the toggle-key hint, expanded shows the entire content — the toggle's
+ * contract is some/all, so there is deliberately no line cap. The key is
+ * resolved at render time from pi-tui's live registry (pi's extension loader
+ * aliases this import to the host instance, so a rebound app.tools.expand
+ * shows the user's actual key; an unpopulated registry falls back to pi's
+ * default binding).
+ */
+export const sideHandoffRenderer: MessageRenderer<SideHandoffDetails> = (
+  message,
+  options,
+  theme,
+) => {
+  const details = message.details;
+  const kind = details?.kind === "summary" ? "summary" : "trajectory";
+  const label = details ? modelRef(details.model) : "side model";
+  const turns = details?.turnCount ?? "?";
+  const expandKey =
+    getKeybindings().getKeys("app.tools.expand").join("/") || "ctrl+o";
+  const header =
+    theme.fg(
+      "customMessageLabel",
+      `▸ side ${kind} · ${label} · ${turns} turns → main context`,
+    ) +
+    theme.fg(
+      "dim",
+      ` (${expandKey} to ${options.expanded ? "collapse" : "expand"})`,
+    );
+  if (!options.expanded || typeof message.content !== "string") {
+    return { render: () => [header], invalidate: () => {} };
+  }
+  const lines = message.content.split("\n");
+  return {
+    render: (width: number) => [
+      header,
+      ...lines.map((line) =>
+        theme.fg("customMessageText", line.slice(0, Math.max(width, 1))),
+      ),
+    ],
+    invalidate: () => {},
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Command argument handling
@@ -941,29 +986,7 @@ export default function side(pi: ExtensionAPI): void {
 
   pi.registerMessageRenderer<SideHandoffDetails>(
     SIDE_HANDOFF_TYPE,
-    (message, options, theme) => {
-      const details = message.details;
-      const kind = details?.kind === "summary" ? "summary" : "trajectory";
-      const label = details ? modelRef(details.model) : "side model";
-      const turns = details?.turnCount ?? "?";
-      const header = theme.fg(
-        "customMessageLabel",
-        `▸ side ${kind} · ${label} · ${turns} turns → main context`,
-      );
-      if (!options.expanded || typeof message.content !== "string") {
-        return { render: () => [header], invalidate: () => {} };
-      }
-      const lines = message.content.split("\n").slice(0, 60);
-      return {
-        render: (width: number) => [
-          header,
-          ...lines.map((line) =>
-            theme.fg("customMessageText", line.slice(0, Math.max(width, 1))),
-          ),
-        ],
-        invalidate: () => {},
-      };
-    },
+    sideHandoffRenderer,
   );
 
   pi.registerCommand("side", {
