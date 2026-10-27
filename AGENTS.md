@@ -37,6 +37,10 @@ pi-packages/
                          # quoted or not) beats exhaustive bash semantics. (bermudi, 2026-09-29,
                          # after I scope-crept a quote-handling fix into a 17-case bash-semantics
                          # matrix framed as 'closing verified bypasses')
+                         # rg -r guard: prioritize ordinary multiline shell structure and
+                         # correct argv boundaries (continuations, quotes, redirects, option
+                         # values); don't grow an adversarial expansion/obfuscation matrix.
+                         # Parser regressions are checked against real Bash argv capture.
                          # python/pip/pytest/mypy blocking removed 2026-10-24 (bermudi): uv
                          # steering is AGENTS.md's job now — "block python except inline
                          # scripts" would be another semantics matrix; don't re-add it.

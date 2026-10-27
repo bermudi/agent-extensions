@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { detectLegacyTool, RG_REPLACE_REASON } from "./prefer-tools.ts";
 
 describe("detectLegacyTool", () => {
@@ -326,6 +327,10 @@ describe("detectLegacyTool rg replace guard", () => {
     blocked("rg -g '*.ts' -rn foo .");
     blocked('rg "-r" foo .');
     blocked("rg '-rn' foo .");
+    blocked('"rg" -rn foo .');
+    blocked("'rg' -rn foo .");
+    blocked('sudo "rg" -rn foo .');
+    blocked('FOO=bar "rg" -rn foo .');
     blocked("./rg -rn foo .");
     blocked("sudo rg -rn foo .");
     blocked("FOO=bar rg -rn foo .");
@@ -347,6 +352,9 @@ describe("detectLegacyTool rg replace guard", () => {
 
   it("allows rg without the replace flag", () => {
     allowed("rg -n foo .");
+    allowed('"rg" -n foo .');
+    allowed("echo 'rg' -rn foo");
+    allowed("'rg'foo -rn");
     allowed("rg pattern file.txt");
     allowed("rg -U -n foo .");
     allowed("rg -g '*.ts' -n foo src");
@@ -369,6 +377,7 @@ describe("detectLegacyTool rg replace guard", () => {
     allowed("rg --field-context-separator '-r' -n foo -");
     allowed("rg --field-match-separator=-r -n foo -");
     allowed("rg --field-context-separator=-r -n foo -");
+    allowed("rg --context-separator '-rn' -n foo -");
   });
 
   it("stops at a shell comment", () => {
@@ -391,4 +400,253 @@ describe("detectLegacyTool rg replace guard", () => {
     allowed("grep -rn --include='*.ts' foo src");
     allowed("git grep -n foo");
   });
+
+  it("finds rg in multiline command lists, pipelines and conditionals", () => {
+    blocked("cd src\nrg -rn needle .");
+    blocked("cd src && \\\nrg -rn needle .");
+    blocked("cd src && \\\n  rg -rn needle .");
+    blocked("printf '%s\\n' needle |\n  rg -rn needle");
+    blocked("if rg -n first .; then\n  rg -rln second .\nfi");
+    blocked("(\n  rg -rn needle .\n)");
+  });
+
+  it("joins continued lines before inspecting rg arguments", () => {
+    blocked("rg \\\n-rn needle .");
+    blocked("rg \\\n  -g '*.ts' \\\n  -rn needle src");
+    blocked("rg needle \\\n  -rn .");
+    blocked("rg --regexp \\\n  needle \\\n  -rn .");
+    allowed("rg \\\n  -n needle .");
+    allowed("rg -e \\\n-r file");
+    allowed("rg --glob \\\n-r .");
+    allowed("rg --replace \\\n  -rn needle .");
+    allowed("rg --replace=output \\\n  -n needle .");
+  });
+
+  it("recognizes literal flags with expanded values without expanding variables", () => {
+    blocked('rg -r"$replacement" needle .');
+    blocked('rg -g"$glob" \\\n  -rn needle .');
+    allowed('rg -g"$glob" \\\n  -n needle .');
+    allowed('rg --replace="$replacement" \\\n  -n needle .');
+    allowed('rg "$pattern" "$path"');
+    allowed('rg -e "$pattern" -- "$path"');
+  });
+
+  it("does not carry rg arguments across real command boundaries", () => {
+    allowed("rg -n needle .\nprintf '%s\\n' -rn");
+    allowed("rg -n needle . |\n  cat -r");
+    allowed("rg -n needle . &&\n  echo -rn");
+    allowed("echo rg \\\n  -rn needle .");
+    allowed("printf '%s\\n' 'rg \\\n-rn needle .'");
+    allowed("rg -n needle . # -rn is not an argument\nprintf '%s\\n' done");
+  });
+
+  it("keeps redirections separate from commands and option values", () => {
+    blocked(">out rg -rn needle .");
+    blocked("2>out rg -rn needle .");
+    blocked("rg -e needle >out -rn .");
+    allowed(">out echo rg -rn needle");
+    allowed("rg -e 2>out -r file");
+    allowed("rg --replace >out \\\n  -rn needle .");
+  });
+
+  it("keeps inspecting the command line after a heredoc redirect", () => {
+    blocked("rg needle <<'EOF' -rn\nneedle\nEOF");
+    blocked("<<'EOF' rg -rn needle\nneedle\nEOF");
+    allowed("rg --replace <<'EOF' -rn needle\nneedle\nEOF");
+    allowed("cat <<'EOF'\nrg \\\n-rn literal\nEOF");
+    allowed(
+      "cat <<'FIRST' <<'SECOND'\nrg -rn literal\nFIRST\nrg -rn literal\nSECOND",
+    );
+    blocked(
+      "cat <<'FIRST' <<'SECOND'\nliteral\nFIRST\nliteral\nSECOND\nrg -rn needle .",
+    );
+  });
+
+  it("finds multiline substitutions without treating literal bodies as commands", () => {
+    blocked('echo "$(rg -n "needle" -rn file)"');
+    blocked("cat <<EOF\n$(rg \\\n-rn needle .)\nEOF");
+    blocked("cat <<EOF\n$(\n  rg -rn needle .\n)\nEOF");
+    allowed('echo "$(rg -n "needle" file)"');
+    allowed("cat <<'EOF'\n$(\n  rg -rn needle .\n)\nEOF");
+  });
+
+  it("treats array elements as data while scanning their substitutions", () => {
+    allowed('example=("rg" "-rn" needle)\nprintf \'%s\\n\' "${example[@]}"');
+    allowed("declare -a example=(rg -rn needle)");
+    blocked('example=("$(rg -rn needle .)")');
+    blocked("example=(<(rg -rn needle .))");
+    allowed('args=(\n  # "$(rg -rn needle .)"\n  --hidden\n)');
+    allowed('args=(word#literal "#$(printf text)")');
+    blocked(
+      "args=(\n  --hidden # don't search ignored paths\n)\nrg -rn needle .",
+    );
+  });
+
+  it("treats case patterns as data, not case bodies", () => {
+    allowed(
+      "cmd=rm\ncase \"$cmd\" in\n  'rm') printf '%s\\n' 'use trash instead' ;;\nesac",
+    );
+    allowed("case \"$cmd\" in\n  'rg'|grep) printf '%s\\n' -rn ;;\nesac");
+    blocked('case "$cmd" in\n  search) rg \\\n  -rn needle . ;;\nesac');
+    blocked('case "$(rg -rn needle .)" in\n  *) echo done ;;\nesac');
+  });
+});
+
+describe("prefer-tools real Bash word boundaries", () => {
+  // This function only records argv; it does not stand in for ripgrep's
+  // option parser. The oracle here is Bash's own parsing of fixed scripts.
+  // FD 3 keeps capture separate from stdout, even through 2>/dev/null.
+  const capture = "exec 3>&2\nrg() { printf '%s\\0' rg \"$@\" >&3; }\n";
+  const fixtures = [
+    {
+      name: "literal array elements",
+      source: 'example=("rg" "-rn" needle)\nprintf \'%s\\n\' "${example[@]}"',
+      args: null,
+      blocked: false,
+    },
+    {
+      name: "commented-out array substitution",
+      source: 'args=(\n  # "$(rg -rn needle .)"\n  --hidden\n)',
+      args: null,
+      blocked: false,
+    },
+    {
+      name: "array comment does not swallow the next command",
+      source:
+        "args=(\n  --hidden # don't search ignored paths\n)\nrg -rn needle .",
+      args: ["-rn", "needle", "."],
+      blocked: true,
+    },
+    {
+      name: "literal case pattern",
+      source: "cmd=rg\ncase \"$cmd\" in\n  'rg') printf '%s\\n' -rn ;;\nesac",
+      args: null,
+      blocked: false,
+    },
+    {
+      name: "command in array substitution",
+      source: 'example=("$(rg -rn needle .)")',
+      args: ["-rn", "needle", "."],
+      blocked: true,
+    },
+    {
+      name: "command in case body",
+      source: 'cmd=search\ncase "$cmd" in\n  search) rg -rn needle . ;;\nesac',
+      args: ["-rn", "needle", "."],
+      blocked: true,
+    },
+    {
+      name: "continued command list",
+      source: "true && \\\n  rg -rn needle .",
+      args: ["-rn", "needle", "."],
+      blocked: true,
+    },
+    {
+      name: "continued argument without indentation",
+      source: "rg \\\n-rn needle .",
+      args: ["-rn", "needle", "."],
+      blocked: true,
+    },
+    {
+      name: "continued option value",
+      source: "rg --replace \\\n  -rn needle .",
+      args: ["--replace", "-rn", "needle", "."],
+      blocked: false,
+    },
+    {
+      name: "short option with an attached expanded value",
+      source: 'replacement=n\nrg -r"$replacement" needle .',
+      args: ["-rn", "needle", "."],
+      blocked: true,
+    },
+    {
+      name: "glob with an attached expanded value",
+      source: 'glob="*.ts"\nrg -g"$glob" \\\n  -rn needle .',
+      args: ["-g*.ts", "-rn", "needle", "."],
+      blocked: true,
+    },
+    {
+      name: "redirect between option and value",
+      source: "rg -e 2>/dev/null \\\n  -r file",
+      args: ["-e", "-r", "file"],
+      blocked: false,
+    },
+    {
+      name: "leading redirect",
+      source: "2>/dev/null rg -rn needle .",
+      args: ["-rn", "needle", "."],
+      blocked: true,
+    },
+    {
+      name: "multiline pipeline",
+      source: "printf '%s\\n' needle |\n  rg -rn needle",
+      args: ["-rn", "needle"],
+      blocked: true,
+    },
+    {
+      name: "heredoc redirect followed by options",
+      source: "rg <<'EOF' -rn needle\nrg -rn literal\nEOF",
+      args: ["-rn", "needle"],
+      blocked: true,
+    },
+    {
+      name: "quoted pattern inside substitution",
+      source: 'echo "$(rg -n "needle" -rn file)"',
+      args: ["-n", "needle", "-rn", "file"],
+      blocked: true,
+    },
+    {
+      name: "multiline substitution inside heredoc",
+      source: "cat <<EOF\n$(\n  rg -rn needle .\n)\nEOF",
+      args: ["-rn", "needle", "."],
+      blocked: true,
+    },
+  ];
+
+  it.each(fixtures)("$name", ({ source, args, blocked }) => {
+    const result = spawnSync(
+      "bash",
+      ["--noprofile", "--norc", "-c", capture + source],
+      {
+        encoding: "utf8",
+        env: { PATH: process.env.PATH, LC_ALL: "C" },
+        timeout: 2000,
+      },
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stderr.split("\0")).toEqual(
+      args === null ? [""] : ["rg", ...args, ""],
+    );
+    expect(detectLegacyTool(source)).toBe(
+      blocked ? RG_REPLACE_REASON : undefined,
+    );
+  });
+
+  it.skipIf(!Bun.which("rg"))(
+    "ripgrep accepts dash-prefixed values, not just flags",
+    () => {
+      for (const args of [
+        ["--regexp", "-r"],
+        ["--glob", "-r", "needle"],
+        ["--replace", "-rn", "needle"],
+        ["--context-separator", "-rn", "needle"],
+        ["--field-match-separator", "-r", "needle"],
+      ]) {
+        const result = spawnSync("rg", ["--no-config", ...args, "-"], {
+          encoding: "utf8",
+          env: { PATH: process.env.PATH, LC_ALL: "C" },
+          input: "-r needle\n",
+          timeout: 2000,
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+        // These fixed argv contain no shell metacharacters.
+        expect(
+          detectLegacyTool(`rg --no-config ${args.join(" ")} -`),
+        ).toBeUndefined();
+      }
+    },
+  );
 });

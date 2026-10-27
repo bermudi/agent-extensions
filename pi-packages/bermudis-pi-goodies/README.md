@@ -51,6 +51,19 @@ toggle, clean-tui included, takes effect on the next `/reload` or new
 session.
 Kilo's provider and its balance footer are bundled here.
 
+## Bash tool nudges
+
+`prefer-tools` inspects ordinary shell command structure, including multiline
+command lists, pipelines, backslash-newline continuations, redirects, and
+command substitutions. For `rg`, short `-r` is blocked even in a cluster such
+as `-rn`; use `-n` for line numbers or spell out `--replace` for replacement.
+Option values, comments, and literal heredoc bodies are not treated as flags
+or commands.
+
+This steers accidental tool misuse; it is not a security boundary or a shell
+evaluator. It does not resolve variable/glob expansions, aliases, or command
+strings passed to `eval` or `bash -c`.
+
 ## Smart summaries for long bash commands
 
 clean-tui can replace long bash command lines with a short plain-English

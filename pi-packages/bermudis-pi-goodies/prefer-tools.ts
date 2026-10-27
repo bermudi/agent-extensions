@@ -2,13 +2,17 @@
  * prefer-tools — Enforce modern CLI tooling by blocking the legacy equivalents.
  *
  * A small, quote/heredoc-aware lexer checks each `bash` command for legacy
- * tools in unquoted command position. Single-quoted strings, quoted heredoc
- * bodies, and plain arguments are literal. Everything bash actually executes
- * is parsed instead: `$(...)` and backtick substitutions — unquoted, inside
- * double quotes (they do NOT suppress substitution), inside `${...}` and
+ * tools in command position. One word reader handles both command names and
+ * arguments, removing quotes and backslash-newline continuations without
+ * confusing a continued line with a new command. Quoted heredoc bodies and
+ * plain arguments are literal. Executed substitutions are scanned: `$(...)`
+ * and backticks — unquoted, inside double quotes (which do NOT suppress
+ * substitution), inside `${...}` and
  * `$((...))` bodies — plus substitutions in unquoted heredoc bodies.
  * Env-var assignment prefixes (`FOO=bar rm x`) are recognized and skipped so
  * the real command that follows them is still checked.
+ * This is an accidental-misuse nudge, not a shell evaluator or a security
+ * boundary: no variable/glob expansion, aliases, or parsing of eval/bash -c.
  *
  *   rm                  -> trash <path>   (moves to the trash can; recoverable)
  *   trash-rm            -> blocked       (permanently deletes from the trash can)
@@ -79,8 +83,8 @@ const WORD_STOP = " \t\n\r|&;<>()\"'`$";
  * a mere argument (`FOO=bar rm x`).
  * The name must be a portable shell identifier, matching bash's own rule —
  * `1=2 x` is not an assignment in bash either (it is a command name, so the
- * real command never runs). readWord stops at `$`/quotes, so `FOO="a b"` and
- * `FOO=$(rm)` yield `FOO=` and still match.
+ * real command never runs). Called on the raw source of a whole word, so
+ * quoted/expanded values (`FOO="a b"`, `FOO=$BASE`) still match.
  */
 function isAssignmentWord(word: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(word);
@@ -150,6 +154,22 @@ function readQuote(
     if (c === quote) {
       j++;
       break;
+    }
+    // Quotes inside a substitution belong to that nested command, not to
+    // the surrounding string: `"$(rg "needle" -rn file)"`.
+    if (quote === '"') {
+      if (s.startsWith("$(", j)) {
+        j = skipBalancedParens(s, j, s.startsWith("$((", j) ? 3 : 2);
+        continue;
+      }
+      if (s.startsWith("${", j)) {
+        j = skipBalancedBraces(s, j);
+        continue;
+      }
+      if (c === "`") {
+        j = readQuote(s, j, "`", true);
+        continue;
+      }
     }
     j++;
   }
@@ -388,7 +408,16 @@ type Op =
   | { type: "redirect"; next: number }
   | { type: "heredoc"; next: number; indented: boolean };
 
-function readOperator(s: string, i: number): Op | null {
+function readOperator(s: string, i: number, ioNumber = false): Op | null {
+  // An IO number is part of a redirect only at a word boundary (`2>out`),
+  // never in the middle of an argument (`file2>out`).
+  if (ioNumber) {
+    let end = i;
+    while (end < s.length && /[0-9]/.test(s[end])) end++;
+    if (end > i && (s[end] === "<" || s[end] === ">")) {
+      return readOperator(s, end);
+    }
+  }
   const c = s[i];
   if (c === "<") {
     if (s.startsWith("<<-", i))
@@ -442,42 +471,13 @@ function readHeredocDelimiter(
 }
 
 /**
- * Scan a single heredoc-body line for command substitutions bash will
- * execute. An unquoted heredoc body is double-quote-like: it expands
- * `$(...)` and backticks, and both quote characters are literal there —
+ * Skip the literal body, scanning unquoted bodies for command substitutions
+ * as one region so substitutions can span lines. A body is double-quote-like:
+ * it expands `$(...)` and backticks, and both quote characters are literal —
  * bash-verified, `"$(rm)"` and `'$(rm)'` in the body both run. Only a
  * backslash suppresses expansion (`\$(rm)` is literal). Returns the matched
  * rule's reason if a blocked tool is found, undefined otherwise.
  */
-function scanHeredocLineForCommandSubs(line: string): string | undefined {
-  let i = 0;
-  while (i < line.length) {
-    const c = line[i];
-    if (c === "\\" && i + 1 < line.length) {
-      i += 2;
-      continue;
-    }
-    if (line.startsWith("$(", i)) {
-      const end = skipBalancedParens(line, i, 2);
-      const inner = line.slice(i + 2, end - 1);
-      const reason = detectLegacyTool(inner);
-      if (reason) return reason;
-      i = end;
-      continue;
-    }
-    if (c === "`") {
-      const end = readQuote(line, i, "`", true);
-      const inner = line.slice(i + 1, end - 1);
-      const reason = detectLegacyTool(inner);
-      if (reason) return reason;
-      i = end;
-      continue;
-    }
-    i++;
-  }
-  return undefined;
-}
-
 function skipHeredocBody(
   s: string,
   i: number,
@@ -492,18 +492,18 @@ function skipHeredocBody(
     let line = s.slice(pos, end);
     if (indented) line = line.replace(/^\t+/, "");
     if (line === delimiter) {
-      return { next: nl === -1 ? s.length : nl + 1 };
-    }
-    // In unquoted heredocs, command substitutions execute — scan for
-    // blocked tools inside $(...) and backticks.
-    if (!quoted) {
-      const reason = scanHeredocLineForCommandSubs(line);
-      if (reason) return { next: end, reason };
+      return {
+        next: nl === -1 ? s.length : nl + 1,
+        reason: quoted ? undefined : scanExecutedSubs(s, i, pos, "double"),
+      };
     }
     if (nl === -1) break;
     pos = nl + 1;
   }
-  return { next: s.length };
+  return {
+    next: s.length,
+    reason: quoted ? undefined : scanExecutedSubs(s, i, s.length, "double"),
+  };
 }
 
 /** sudo options that consume the next word as their argument. */
@@ -550,26 +550,37 @@ const RG_SHORT_VALUE_OPTS = new Set([
 ]);
 
 /**
- * Long rg options that consume the next word as a value. Values are skipped
- * before flag inspection, so `--field-match-separator -r` (ripgrep accepts
+ * Long rg options that consume a value (checked against ripgrep 15.2 --help).
+ * Values are skipped before flag inspection, so `--field-match-separator -r` (ripgrep accepts
  * `-r` there as literal output text) is not mistaken for the replace flag.
  */
 const RG_LONG_VALUE_OPTS = new Set([
   "--after-context",
   "--before-context",
+  "--color",
+  "--colors",
   "--context",
+  "--context-separator",
+  "--dfa-size-limit",
   "--encoding",
+  "--engine",
   "--field-context-separator",
   "--field-match-separator",
   "--file",
   "--glob",
+  "--generate",
+  "--hostname-bin",
+  "--hyperlink-format",
   "--iglob",
+  "--ignore-file",
   "--max-columns",
   "--max-count",
   "--max-depth",
   "--max-filesize",
   "--path-separator",
   "--pre",
+  "--pre-glob",
+  "--regex-size-limit",
   "--regexp",
   "--replace",
   "--sort",
@@ -582,12 +593,25 @@ const RG_LONG_VALUE_OPTS = new Set([
 ]);
 
 /**
- * Read one shell word after an `rg` command, keeping quoted content as part
- * of the token so `rg "-r"` and `rg '-rn'` are caught like their unquoted
- * twins. Stops at whitespace or an unquoted operator.
+ * Read one whole shell word, shared by command and rg-argument inspection.
+ * Only literal text is resolved; an expansion makes the value unknown, but
+ * substitutions are still scanned for commands that execute. In particular,
+ * letters in `$pattern` must never be mistaken for flags.
  */
-function readArgWord(s: string, i: number): { word: string; next: number } {
+function readShellWord(
+  s: string,
+  i: number,
+): {
+  word?: string;
+  prefix?: string;
+  next: number;
+  assignment: boolean;
+  reason?: string;
+} {
+  const start = i;
   let word = "";
+  let prefix: string | undefined;
+  let literal = true;
   while (i < s.length) {
     const c = s[i];
     if (c === " " || c === "\t" || c === "\r" || c === "\n") break;
@@ -595,19 +619,52 @@ function readArgWord(s: string, i: number): { word: string; next: number } {
     if (c === "'" || c === '"') {
       const end = readQuote(s, i, c, c === '"');
       const innerEnd = s[end - 1] === c ? end - 1 : end;
-      word += s.slice(i + 1, innerEnd);
+      if (c === "'") {
+        word += s.slice(i + 1, innerEnd);
+      } else {
+        const reason = scanExecutedSubs(s, i + 1, innerEnd, "double");
+        if (reason) return { next: end, assignment: false, reason };
+        for (let j = i + 1; j < innerEnd; j++) {
+          const ch = s[j];
+          if (ch === "\\" && /[$`"\\\n]/.test(s[j + 1] ?? "")) {
+            j++;
+            if (s[j] !== "\n") word += s[j];
+          } else {
+            if (ch === "$" || ch === "`") {
+              prefix ??= word;
+              literal = false;
+            }
+            word += ch;
+          }
+        }
+      }
       i = end;
       continue;
     }
     if (c === "\\" && i + 1 < s.length) {
-      word += s[i + 1];
+      // Bash removes this pair before splitting words. It is neither a
+      // token nor a separator, including when it appears inside a word.
+      if (s[i + 1] !== "\n") word += s[i + 1];
       i += 2;
+      continue;
+    }
+    if (c === "`") {
+      const end = readQuote(s, i, "`", true);
+      const innerEnd = s[end - 1] === "`" ? end - 1 : end;
+      const reason = detectLegacyTool(s.slice(i + 1, innerEnd));
+      if (reason) return { next: end, assignment: false, reason };
+      prefix ??= word;
+      literal = false;
+      i = end;
       continue;
     }
     if (c === "$") {
       const d = readDollar(s, i);
       if (d) {
-        word += s.slice(i, d.next);
+        if (d.reason)
+          return { next: d.next, assignment: false, reason: d.reason };
+        prefix ??= word;
+        literal = false;
         i = d.next;
         continue;
       }
@@ -615,7 +672,61 @@ function readArgWord(s: string, i: number): { word: string; next: number } {
     word += c;
     i++;
   }
-  return { word, next: i };
+  return {
+    word: literal ? word : undefined,
+    prefix: prefix ?? word,
+    next: i,
+    assignment: isAssignmentWord(s.slice(start, i)),
+  };
+}
+
+/**
+ * Array elements are shell words, not commands. Use the same word reader
+ * here so comments stay outside words and quotes/expansions stay inside.
+ */
+function readArrayAssignment(
+  s: string,
+  start: number,
+): { next: number; reason?: string } {
+  let i = start + 1;
+  let depth = 1;
+  while (i < s.length) {
+    if (/\s/.test(s[i])) {
+      i++;
+      continue;
+    }
+    if (s.startsWith("\\\n", i)) {
+      i += 2;
+      continue;
+    }
+    if (s[i] === "#") {
+      const nl = s.indexOf("\n", i);
+      i = nl === -1 ? s.length : nl;
+      continue;
+    }
+    if (s.startsWith("<(", i) || s.startsWith(">(", i)) {
+      const end = skipBalancedParens(s, i, 2);
+      const innerEnd = s[end - 1] === ")" ? end - 1 : end;
+      const reason = detectLegacyTool(s.slice(i + 2, innerEnd));
+      if (reason) return { next: end, reason };
+      i = end;
+      continue;
+    }
+    if (s[i] === "(") {
+      depth++;
+      i++;
+      continue;
+    }
+    if (s[i] === ")") {
+      if (--depth === 0) return { next: i + 1 };
+      i++;
+      continue;
+    }
+    const token = readShellWord(s, i);
+    if (token.reason) return token;
+    i = token.next > i ? token.next : i + 1;
+  }
+  return { next: i };
 }
 
 /**
@@ -633,23 +744,37 @@ function rgUsesReplaceFlag(s: string, start: number): boolean {
       i++;
       continue;
     }
+    if (s.startsWith("\\\n", i)) {
+      i += 2;
+      continue;
+    }
     if (c === "\n") break;
     // Unquoted `#` at the start of a word begins a shell comment: bash never
     // passes it (or anything after it) to rg, so `rg -n foo . # avoid -rn`
     // must not be blocked for what its comment merely mentions. Mid-word `#`
     // (`rg foo#bar`) stays inside the word read below, matching bash.
     if (c === "#") break;
-    const op = readOperator(s, i);
+    const op = readOperator(s, i, true);
     if (op) {
-      if (op.type !== "redirect") break;
+      if (op.type === "separator") break;
+      if (op.type === "heredoc") {
+        const delim = readHeredocDelimiter(s, op.next);
+        if (!delim) break;
+        i = delim.next;
+        continue;
+      }
       // Redirections may appear among a command's arguments; consume the
       // target (`>out`) and keep looking at the real rg options after it.
       i = op.next;
       while (i < s.length && (s[i] === " " || s[i] === "\t")) i++;
-      if (i < s.length) i = readArgWord(s, i).next;
+      while (s.startsWith("\\\n", i)) {
+        i += 2;
+        while (s[i] === " " || s[i] === "\t") i++;
+      }
+      if (i < s.length) i = readShellWord(s, i).next;
       continue;
     }
-    const { word, next } = readArgWord(s, i);
+    const { word, prefix, next } = readShellWord(s, i);
     if (next === i) {
       i++;
       continue;
@@ -660,17 +785,25 @@ function rgUsesReplaceFlag(s: string, start: number): boolean {
       continue;
     }
     if (word === "--") break;
-    if (word.startsWith("--")) {
-      if (!word.includes("=") && RG_LONG_VALUE_OPTS.has(word)) skipValue = true;
+    // A known prefix is enough to identify `-r"$replacement"`, without
+    // pretending we know the value of `$replacement` or `-$flags`.
+    const arg = word ?? prefix ?? "";
+    if (arg.startsWith("--")) {
+      if (
+        word !== undefined &&
+        !word.includes("=") &&
+        RG_LONG_VALUE_OPTS.has(word)
+      )
+        skipValue = true;
       continue;
     }
-    if (!word.startsWith("-") || word === "-") continue;
-    for (let k = 1; k < word.length; k++) {
-      const flag = word[k];
+    if (!arg.startsWith("-") || arg === "-") continue;
+    for (let k = 1; k < arg.length; k++) {
+      const flag = arg[k];
       if (flag === "r") return true;
       if (RG_SHORT_VALUE_OPTS.has(flag)) {
         // The rest of the cluster (or the next word) is this option's value.
-        if (k === word.length - 1) skipValue = true;
+        if (word !== undefined && k === word.length - 1) skipValue = true;
         break;
       }
     }
@@ -681,41 +814,19 @@ function rgUsesReplaceFlag(s: string, start: number): boolean {
 export function detectLegacyTool(command: string): string | undefined {
   let i = 0;
   let commandPos = true;
-  // Set once an env-var assignment word is seen in the current simple
-  // command; cleared wherever a new command starts (every `commandPos = true`
-  // site). While it is set, quotes/expansions/redirect targets belonging to
-  // the assignment must not demote command position.
-  let assignmentPrefix = false;
   let sudoNext = false;
   let skipNextWord = false;
   let redirectTarget = false;
-  let heredoc: {
+  const heredocs: {
     delimiter: string;
     indented: boolean;
     quoted: boolean;
-    pending: boolean;
-  } | null = null;
+  }[] = [];
+  // Only case bodies contain commands. The subject and clause patterns are
+  // data, although substitutions in either still execute.
+  const cases: { phase: "subject" | "in" | "pattern" | "body" }[] = [];
 
   while (i < command.length) {
-    if (heredoc && !heredoc.pending) {
-      const result = skipHeredocBody(
-        command,
-        i,
-        heredoc.delimiter,
-        heredoc.indented,
-        heredoc.quoted,
-      );
-      if (result.reason) return result.reason;
-      i = result.next;
-      heredoc = null;
-      commandPos = true;
-      assignmentPrefix = false;
-      redirectTarget = false;
-      sudoNext = false;
-      skipNextWord = false;
-      continue;
-    }
-
     const c = command[i];
 
     if (c === " " || c === "\t" || c === "\r") {
@@ -723,60 +834,74 @@ export function detectLegacyTool(command: string): string | undefined {
       continue;
     }
 
-    if (c === "\n") {
-      if (heredoc?.pending) {
-        heredoc.pending = false;
-      } else {
-        commandPos = true;
-      }
-      assignmentPrefix = false;
-      redirectTarget = false;
-      sudoNext = false;
-      skipNextWord = false;
-      i++;
+    if (command.startsWith("\\\n", i)) {
+      i += 2;
       continue;
     }
 
     if (c === "#") {
       const nl = command.indexOf("\n", i);
       if (nl === -1) break;
-      if (heredoc?.pending) heredoc.pending = false;
-      i = nl + 1;
+      i = nl;
+      continue;
+    }
+
+    if (c === "\n") {
+      i++;
+      // Bash reads each queued heredoc body after the command line, in
+      // declaration order. None of those bodies are command-list text.
+      for (const heredoc of heredocs) {
+        const result = skipHeredocBody(
+          command,
+          i,
+          heredoc.delimiter,
+          heredoc.indented,
+          heredoc.quoted,
+        );
+        if (result.reason) return result.reason;
+        i = result.next;
+      }
+      heredocs.length = 0;
       commandPos = true;
-      assignmentPrefix = false;
       redirectTarget = false;
       sudoNext = false;
       skipNextWord = false;
       continue;
     }
 
-    const op = readOperator(command, i);
+    const op = readOperator(command, i, true);
     if (op) {
+      const caseState = cases.at(-1);
+      const clauseEnd =
+        command.startsWith(";;", i) || command.startsWith(";&", i);
+      const patternEnd = command[i] === ")";
       i = op.next;
+      if (caseState?.phase === "pattern") {
+        if (patternEnd) {
+          caseState.phase = "body";
+          commandPos = true;
+        }
+        continue;
+      }
+      if (caseState?.phase === "body" && clauseEnd) {
+        caseState.phase = "pattern";
+      }
       if (op.type === "separator") {
         commandPos = true;
-        assignmentPrefix = false;
         redirectTarget = false;
         sudoNext = false;
         skipNextWord = false;
       } else if (op.type === "redirect") {
         redirectTarget = true;
-        sudoNext = false;
-        skipNextWord = false;
       } else if (op.type === "heredoc") {
         const delim = readHeredocDelimiter(command, i);
         if (!delim) break;
-        heredoc = {
+        heredocs.push({
           delimiter: delim.delimiter,
           indented: op.indented,
           quoted: delim.quoted,
-          pending: true,
-        };
+        });
         i = delim.next;
-        commandPos = false;
-        redirectTarget = false;
-        sudoNext = false;
-        skipNextWord = false;
       }
       continue;
     }
@@ -785,10 +910,13 @@ export function detectLegacyTool(command: string): string | undefined {
     // next word is in command position. Without this, `{ rm; }` evades
     // detection because `{` is read as a word and `rm` lands in argument
     // position.
-    if (c === "{" && (i + 1 >= command.length || /\s/.test(command[i + 1]))) {
+    if (
+      commandPos &&
+      c === "{" &&
+      (i + 1 >= command.length || /\s/.test(command[i + 1]))
+    ) {
       i++;
       commandPos = true;
-      assignmentPrefix = false;
       redirectTarget = false;
       sudoNext = false;
       skipNextWord = false;
@@ -799,102 +927,90 @@ export function detectLegacyTool(command: string): string | undefined {
     if (c === "}" && (i === 0 || /\s|[;&|()]/.test(command[i - 1]))) {
       i++;
       commandPos = true;
-      assignmentPrefix = false;
       redirectTarget = false;
       sudoNext = false;
       skipNextWord = false;
       continue;
     }
 
-    if (c === "'" || c === '"' || c === "`") {
-      const quote = c;
-      const end = readQuote(command, i, quote, quote !== "'");
-      // Double quotes and backticks execute their contents (single quotes
-      // don't): `echo "$(rm x)"` and `echo \`rm x\`` must be caught like
-      // their unquoted twin.
-      if (quote === '"') {
-        const innerEnd = command[end - 1] === '"' ? end - 1 : end;
-        const reason = scanExecutedSubs(command, i + 1, innerEnd, "double");
-        if (reason) return reason;
-      } else if (quote === "`") {
-        const innerEnd = command[end - 1] === "`" ? end - 1 : end;
-        const reason = detectLegacyTool(command.slice(i + 1, innerEnd));
-        if (reason) return reason;
-      }
-      i = end;
-      if (redirectTarget) redirectTarget = false;
-      if (sudoNext) sudoNext = false;
-      // Part of an assignment's value (`FOO="a b" rm x`) — not a command
-      // word, so command position survives the quote.
-      if (commandPos && !assignmentPrefix) commandPos = false;
-      continue;
-    }
-
-    if (c === "$") {
-      const d = readDollar(command, i);
-      if (d) {
-        if (d.reason) return d.reason;
-        i = d.next;
-        if (redirectTarget) redirectTarget = false;
-        if (sudoNext) sudoNext = false;
-        // Same as quotes: `$VAR` / `$(...)` here expands an assignment value
-        // (`FOO=$BASE rm x`), so it must not end command position either.
-        if (commandPos && !assignmentPrefix) commandPos = false;
-      } else {
-        i++;
-      }
-      continue;
-    }
-
-    const { word, next } = readWord(command, i);
-    if (word.length === 0) {
-      i = next;
+    const wordStart = i;
+    const { word, next, assignment, reason } = readShellWord(command, i);
+    if (reason) return reason;
+    // Always make progress on incomplete/unsupported syntax.
+    if (next === i) {
+      i++;
       continue;
     }
     i = next;
 
     if (redirectTarget) {
       redirectTarget = false;
-      // A redirect target is never a command: `FOO=1 > /dev/null rm x` still
-      // runs `rm`, so don't let the target end command position mid-assignment.
-      if (!assignmentPrefix) commandPos = false;
+      continue;
+    }
+
+    const caseState = cases.at(-1);
+    const unquoted = command.slice(wordStart, next) === word;
+    if (caseState && caseState.phase !== "body") {
+      if (caseState.phase === "subject") {
+        caseState.phase = "in";
+      } else if (caseState.phase === "in" && word === "in" && unquoted) {
+        caseState.phase = "pattern";
+      } else if (caseState.phase === "pattern" && word === "esac" && unquoted) {
+        cases.pop();
+        commandPos = false;
+      }
+      continue;
+    }
+    if (commandPos && word === "esac" && unquoted && caseState) {
+      cases.pop();
+      commandPos = false;
+      continue;
+    }
+
+    // An array assignment's parentheses enclose values, not a subshell.
+    // Scan only substitutions there, just as for other assignment values.
+    // This also covers `declare -a items=(...)` and `local items=(...)`.
+    if (assignment && command[i] === "(") {
+      const result = readArrayAssignment(command, i);
+      if (result.reason) return result.reason;
+      i = result.next;
       continue;
     }
 
     if (commandPos) {
+      if (skipNextWord) {
+        skipNextWord = false;
+        continue;
+      }
       if (word === "sudo") {
         sudoNext = true;
+        continue;
+      }
+      if (!sudoNext && word === "case" && unquoted) {
+        cases.push({ phase: "subject" });
         continue;
       }
       // Env-var assignment prefix: skip it and stay in command position so
       // the word after it (`rm`, …) is the one checked. Under
       // sudo it likewise keeps sudoNext armed (`sudo FOO=bar rm x`).
-      if (isAssignmentWord(word) && !skipNextWord) {
-        assignmentPrefix = true;
-        continue;
-      }
+      if (assignment) continue;
       if (sudoNext) {
-        if (word.startsWith("-")) {
+        if (word?.startsWith("-")) {
           // Options that take an argument consume the next word.
           if (SUDO_OPTS_WITH_ARG.has(word)) skipNextWord = true;
           continue;
         }
-        if (skipNextWord) {
-          skipNextWord = false;
-          continue;
-        }
-        const reason = matchCommandAt(command, word, i);
-        if (reason) return reason;
         sudoNext = false;
-      } else {
-        if (skipNextWord) {
-          skipNextWord = false;
-          continue;
-        }
+      }
+      if (word !== undefined) {
         const reason = matchCommandAt(command, word, i);
         if (reason) return reason;
       }
-      if (!COMMAND_PREFIX_KEYWORDS.has(word)) {
+      if (
+        word === undefined ||
+        !unquoted ||
+        !COMMAND_PREFIX_KEYWORDS.has(word)
+      ) {
         commandPos = false;
       }
     } else {
