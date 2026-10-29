@@ -7,6 +7,7 @@
  * - Review against a base branch (PR style)
  * - Review uncommitted changes
  * - Review a specific commit
+ * - Review a commit range (A..B or A...B)
  * - Shared custom review instructions (applied to all review modes when configured)
  *
  * Usage:
@@ -16,6 +17,8 @@
  * - `/review uncommitted` - review uncommitted changes directly
  * - `/review branch main` - review against main branch
  * - `/review commit abc123` - review specific commit
+ * - `/review commit abc123..def456` - review a commit range (`...` = merge-base diff)
+ * - `/review range abc123 def456` - same range, endpoints as separate args
  * - `/review folder src docs` - review specific folders/files (snapshot, not diff)
  * - `/review` selector includes Add/Remove custom review instructions (applies to all modes)
  * - `/review --extra "focus on performance regressions"` - add extra review instruction (works with any mode)
@@ -54,6 +57,13 @@
  *   ctx.ui.select dialogs when ctx.mode !== "tui", the end-review loader
  *   only renders in TUI mode, and the review widget renders as string
  *   lines outside the TUI
+ * - commit ranges: `/review commit A..B` / `A...B`, `/review range A B`,
+ *   and a "Review a commit range" preset with a two-pick range picker
+ *   (older start → newer end from recent commits, then `..` vs `...`;
+ *   the single-commit selector is pickCommit(), shared by both).
+ *   parseCommitRange()/buildCommitRange()/commitsNewerThan() are exported;
+ *   buildReviewPrompt() lists `git log --oneline <range>` commits when
+ *   available and otherwise instructs the agent to run it.
  * - /end-review "Return and fix findings" fast path: the review branch's
  *   final assistant response already IS the handoff, so capture it verbatim
  *   (getFinalReviewMessage: walk the leaf path back to the common ancestor
@@ -264,6 +274,14 @@ type ReviewTarget =
   | { type: "uncommitted" }
   | { type: "baseBranch"; branch: string }
   | { type: "commit"; sha: string; title?: string }
+  | {
+      type: "commitRange";
+      range: string;
+      from: string;
+      to: string;
+      threeDot: boolean;
+      title?: string;
+    }
   | { type: "pullRequest"; prNumber: number; baseBranch: string; title: string }
   | { type: "folder"; paths: string[] };
 
@@ -282,6 +300,15 @@ const COMMIT_PROMPT_WITH_TITLE =
 
 const COMMIT_PROMPT =
   "Review the code changes introduced by commit {sha}. Provide prioritized, actionable findings.";
+
+const COMMIT_RANGE_PROMPT =
+  "Review the code changes introduced by the commit range {range}. Run `git log --oneline {range}` to see the commits in the range, then run `git diff {range}` to inspect the combined diff. Provide prioritized, actionable findings.";
+
+const COMMIT_RANGE_THREE_DOT_NOTE =
+  " The three-dot form diffs the second endpoint against the merge base of the two endpoints.";
+
+const COMMIT_RANGE_PROMPT_WITH_COMMITS =
+  "Review the code changes introduced by the commit range {range}. The commits in the range are:\n\n{commits}\n\nRun `git diff {range}` to inspect the combined diff. Provide prioritized, actionable findings.";
 
 const PULL_REQUEST_PROMPT =
   "Review pull request #{prNumber} (\"{title}\") against the base branch '{baseBranch}'. The merge base commit for this comparison is {mergeBaseSha}. Run `git diff {mergeBaseSha}` to inspect the changes that would be merged. Provide prioritized, actionable findings.";
@@ -692,6 +719,59 @@ export function parseReviewPaths(tokens: string[]): string[] {
 }
 
 /**
+ * Parse a git commit range: `A..B` (direct diff) or `A...B` (diff of B
+ * against the merge base of A and B, like a PR). Endpoints are any git rev
+ * (SHA, branch, tag, `HEAD~3`, …). Open-ended ranges (`A..`, `..B`) and
+ * option-like endpoints (`-x`) are rejected so a malformed range fails here
+ * instead of as a confusing git error in the review prompt.
+ */
+export function parseCommitRange(value: string): {
+  from: string;
+  to: string;
+  threeDot: boolean;
+  range: string;
+} | null {
+  const trimmed = value.trim();
+  const threeDot = trimmed.includes("...");
+  const separator = threeDot ? "..." : "..";
+  if (!trimmed.includes(separator)) return null;
+  if (trimmed.split(separator).length !== 2) return null;
+  const [from, to] = trimmed.split(separator) as [string, string];
+  for (const endpoint of [from, to]) {
+    if (!endpoint) return null;
+    if (endpoint.includes("..") || /\s/.test(endpoint)) return null;
+    if (endpoint.startsWith("-") || endpoint.startsWith(".")) return null;
+  }
+  return { from, to, threeDot, range: trimmed };
+}
+
+const invalidRangeError = (value: string) =>
+  `Invalid commit range '${value}'. Use A..B or A...B (e.g. HEAD~3..HEAD).`;
+
+/**
+ * Commits newer than `sha` in a newest-first `git log` list — the valid
+ * ending picks for a range starting (exclusively) at `sha`.
+ */
+export function commitsNewerThan<T extends { sha: string }>(
+  commits: readonly T[],
+  sha: string,
+): T[] {
+  const index = commits.findIndex((commit) => commit.sha === sha);
+  return index === -1 ? [] : commits.slice(0, index);
+}
+
+/** Assemble a commitRange target from two picked revs, or null if invalid. */
+export function buildCommitRange(
+  from: string,
+  to: string,
+  threeDot: boolean,
+): Extract<ReviewTarget, { type: "commitRange" }> | null {
+  if (!from || !to) return null;
+  const parsed = parseCommitRange(`${from}${threeDot ? "..." : ".."}${to}`);
+  return parsed ? { type: "commitRange", ...parsed } : null;
+}
+
+/**
  * Parse command arguments for direct invocation.
  * Returns the target or a special marker for PR that needs async handling.
  *
@@ -751,7 +831,53 @@ export function parseArgs(args: string | undefined): ParsedReviewArgs {
       const sha = parts[1];
       if (!sha) return { target: null, extraInstruction };
       const title = parts.slice(2).join(" ") || undefined;
+      if (sha.includes("..")) {
+        const range = parseCommitRange(sha);
+        if (!range) {
+          return {
+            target: null,
+            extraInstruction,
+            error: invalidRangeError(sha),
+          };
+        }
+        return {
+          target: { type: "commitRange", ...range, title },
+          extraInstruction,
+        };
+      }
       return { target: { type: "commit", sha, title }, extraInstruction };
+    }
+
+    case "range": {
+      const first = parts[1];
+      if (!first) return { target: null, extraInstruction };
+      // `range A..B [title…]` or `range A B [title…]`
+      const isRangeToken = first.includes("..");
+      const second = isRangeToken ? undefined : parts[2];
+      if (!isRangeToken && !second) {
+        return {
+          target: null,
+          extraInstruction,
+          error: invalidRangeError(first),
+        };
+      }
+      const range = parseCommitRange(
+        isRangeToken ? first : `${first}..${second}`,
+      );
+      if (!range) {
+        return {
+          target: null,
+          extraInstruction,
+          error: invalidRangeError(
+            isRangeToken ? first : `${first}..${second}`,
+          ),
+        };
+      }
+      const title = parts.slice(isRangeToken ? 2 : 3).join(" ") || undefined;
+      return {
+        target: { type: "commitRange", ...range, title },
+        extraInstruction,
+      };
     }
 
     case "folder": {
@@ -891,6 +1017,30 @@ export async function buildReviewPrompt(
       }
       return COMMIT_PROMPT.replace("{sha}", () => target.sha);
 
+    case "commitRange": {
+      const { range, threeDot, title } = target;
+      const note = threeDot ? COMMIT_RANGE_THREE_DOT_NOTE : "";
+      let prompt: string;
+      try {
+        const { stdout, code } = await pi.exec("git", [
+          "log",
+          "--oneline",
+          range,
+        ]);
+        const commits = code === 0 ? stdout.trim() : "";
+        prompt = commits
+          ? COMMIT_RANGE_PROMPT_WITH_COMMITS.replace(
+              /{range}/g,
+              () => range,
+            ).replace("{commits}", () => commits)
+          : COMMIT_RANGE_PROMPT.replace(/{range}/g, () => range);
+      } catch {
+        prompt = COMMIT_RANGE_PROMPT.replace(/{range}/g, () => range);
+      }
+      if (title) prompt += ` The range is described as: "${title}".`;
+      return prompt + note;
+    }
+
     case "pullRequest": {
       const mergeBase = await getMergeBase(pi, target.baseBranch);
       const basePrompt = mergeBase
@@ -928,6 +1078,14 @@ function getUserFacingHint(target: ReviewTarget): string {
       return target.title
         ? `commit ${shortSha}: ${target.title}`
         : `commit ${shortSha}`;
+    }
+    case "commitRange": {
+      const shortRef = (ref: string) =>
+        /^[0-9a-f]{8,}$/i.test(ref) ? ref.slice(0, 7) : ref;
+      const label = `${shortRef(target.from)}${target.threeDot ? "..." : ".."}${shortRef(target.to)}`;
+      return target.title
+        ? `commit range ${label}: ${target.title}`
+        : `commit range ${label}`;
     }
 
     case "pullRequest": {
@@ -992,6 +1150,11 @@ const REVIEW_PRESETS = [
   },
   { value: "commit", label: "Review a commit", description: "" },
   {
+    value: "commitRange",
+    label: "Review a commit range",
+    description: "(A..B or A...B)",
+  },
+  {
     value: "pullRequest",
     label: "Review a pull request",
     description: "(GitHub PR)",
@@ -1013,6 +1176,7 @@ type ReviewPresetValue =
 const REVIEW_VERBS_WITH_ARGUMENT = new Set([
   "branch",
   "commit",
+  "range",
   "folder",
   "pr",
   "--extra",
@@ -1021,6 +1185,7 @@ const REVIEW_VERBS = [
   "uncommitted",
   "branch",
   "commit",
+  "range",
   "folder",
   "pr",
   "--extra",
@@ -1409,6 +1574,12 @@ export default function reviewExtension(pi: ExtensionAPI) {
           break;
         }
 
+        case "commitRange": {
+          const target = await showCommitRangePicker(ctx);
+          if (target) return target;
+          break;
+        }
+
         case "folder": {
           const target = await showFolderInput(ctx);
           if (target) return target;
@@ -1609,18 +1780,14 @@ export default function reviewExtension(pi: ExtensionAPI) {
   }
 
   /**
-   * Show commit selector
+   * Pick one commit from a newest-first list: searchable list in the TUI,
+   * plain select dialog outside it (RPC hosts).
    */
-  async function showCommitSelector(
+  async function pickCommit(
     ctx: ExtensionContext,
-  ): Promise<ReviewTarget | null> {
-    const commits = await getRecentCommits(pi, 20);
-
-    if (commits.length === 0) {
-      ctx.ui.notify("No commits found", "error");
-      return null;
-    }
-
+    commits: Array<{ sha: string; title: string }>,
+    heading: string,
+  ): Promise<{ sha: string; title: string } | null> {
     const items: SelectItem[] = commits.map((commit) => ({
       value: commit.sha,
       label: `${commit.sha.slice(0, 7)} ${commit.title}`,
@@ -1635,9 +1802,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
           container.addChild(
             new DynamicBorder((str) => theme.fg("accent", str)),
           );
-          container.addChild(
-            new Text(theme.fg("accent", theme.bold("Select commit to review"))),
-          );
+          container.addChild(new Text(theme.fg("accent", theme.bold(heading))));
 
           const searchInput = new Input();
           container.addChild(searchInput);
@@ -1745,14 +1910,87 @@ export default function reviewExtension(pi: ExtensionAPI) {
       const { options, valueFor } = buildSelectOptions(
         items.map((item) => ({ value: item.value, label: item.label })),
       );
-      const selected = await ctx.ui.select("Select commit to review", options);
+      const selected = await ctx.ui.select(heading, options);
       const sha = selected === undefined ? undefined : valueFor(selected);
       const commit = commits.find((c) => c.sha === sha);
       result = commit ? { sha: commit.sha, title: commit.title } : null;
     }
 
-    if (!result) return null;
-    return { type: "commit", sha: result.sha, title: result.title };
+    return result;
+  }
+
+  /**
+   * Show commit selector
+   */
+  async function showCommitSelector(
+    ctx: ExtensionContext,
+  ): Promise<ReviewTarget | null> {
+    const commits = await getRecentCommits(pi, 20);
+    if (commits.length === 0) {
+      ctx.ui.notify("No commits found", "error");
+      return null;
+    }
+    const commit = await pickCommit(ctx, commits, "Select commit to review");
+    if (!commit) return null;
+    return { type: "commit", sha: commit.sha, title: commit.title };
+  }
+
+  const RANGE_TYPE_OPTIONS = [
+    "Two-dot (A..B) — direct diff",
+    "Three-dot (A...B) — merge-base diff",
+  ] as const;
+
+  /**
+   * Range picker: pick the older starting commit (excluded from the range),
+   * then an ending commit from only the commits newer than it, then the
+   * two-dot/three-dot flavour. Cancelling any step returns to the preset menu.
+   */
+  async function showCommitRangePicker(
+    ctx: ExtensionContext,
+  ): Promise<ReviewTarget | null> {
+    const commits = await getRecentCommits(pi, 20);
+    if (commits.length === 0) {
+      ctx.ui.notify("No commits found", "error");
+      return null;
+    }
+    if (commits.length < 2) {
+      ctx.ui.notify("Need at least two commits to pick a range", "error");
+      return null;
+    }
+
+    const from = await pickCommit(
+      ctx,
+      commits,
+      "Select starting commit (older, excluded from the range)",
+    );
+    if (!from) return null;
+
+    const headCandidates = commitsNewerThan(commits, from.sha);
+    if (headCandidates.length === 0) {
+      ctx.ui.notify(
+        "Starting commit is the newest commit — pick an older starting commit.",
+        "error",
+      );
+      return null;
+    }
+
+    const to = await pickCommit(
+      ctx,
+      headCandidates,
+      "Select ending commit (newer, included in the range)",
+    );
+    if (!to) return null;
+
+    const rangeType = await ctx.ui.select("Select range type", [
+      ...RANGE_TYPE_OPTIONS,
+    ]);
+    if (rangeType === undefined) return null;
+
+    return buildCommitRange(
+      from.sha,
+      to.sha,
+      rangeType.startsWith("Three-dot"),
+    );
   }
 
   /**
@@ -1928,7 +2166,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
   // Register the /review command
   pi.registerCommand("review", {
     description:
-      "Review code changes (PR, uncommitted, branch, commit, or folder)",
+      "Review code changes (PR, uncommitted, branch, commit, commit range, or folder)",
     getArgumentCompletions: completeReviewArgument,
     handler: async (args, ctx) => {
       if (!ctx.hasUI) {

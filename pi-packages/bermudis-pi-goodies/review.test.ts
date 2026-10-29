@@ -6,12 +6,15 @@ import {
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import reviewExtension, {
+  buildCommitRange,
   buildFastFixPrompt,
   buildReviewPrompt,
   buildSelectOptions,
+  commitsNewerThan,
   completeReviewArgument,
   getFinalReviewMessage,
   parseArgs,
+  parseCommitRange,
   parsePrReference,
   parseReviewPaths,
   tokenizeArgs,
@@ -61,6 +64,7 @@ describe("/review argument completion", () => {
       "uncommitted",
       "branch ",
       "commit ",
+      "range ",
       "folder ",
       "pr ",
       "--extra ",
@@ -297,6 +301,237 @@ describe("parseReviewPaths (folder editor flow)", () => {
   });
 });
 
+describe("parseCommitRange", () => {
+  test("two-dot and three-dot ranges parse with endpoints kept verbatim", () => {
+    expect(parseCommitRange("abc123..def456")).toEqual({
+      from: "abc123",
+      to: "def456",
+      threeDot: false,
+      range: "abc123..def456",
+    });
+    expect(parseCommitRange("main...HEAD")).toEqual({
+      from: "main",
+      to: "HEAD",
+      threeDot: true,
+      range: "main...HEAD",
+    });
+    expect(parseCommitRange("v1.2..HEAD~3")).toEqual({
+      from: "v1.2",
+      to: "HEAD~3",
+      threeDot: false,
+      range: "v1.2..HEAD~3",
+    });
+  });
+
+  test("malformed ranges are rejected", () => {
+    expect(parseCommitRange("abc123")).toBeNull();
+    expect(parseCommitRange("..HEAD")).toBeNull();
+    expect(parseCommitRange("abc123..")).toBeNull();
+    expect(parseCommitRange("abc123...")).toBeNull();
+    expect(parseCommitRange("a..b..c")).toBeNull();
+    expect(parseCommitRange("a....b")).toBeNull();
+    expect(parseCommitRange("-a..b")).toBeNull();
+    expect(parseCommitRange("a..-b")).toBeNull();
+  });
+});
+
+describe("parseArgs commit ranges", () => {
+  test("commit <range> and range verbs produce a commitRange target", () => {
+    const expected = {
+      target: {
+        type: "commitRange",
+        range: "abc123..def456",
+        from: "abc123",
+        to: "def456",
+        threeDot: false,
+      },
+      extraInstruction: undefined,
+    };
+    expect(parseArgs("commit abc123..def456")).toEqual(expected);
+    expect(parseArgs("range abc123..def456")).toEqual(expected);
+    expect(parseArgs("range abc123 def456")).toEqual(expected);
+    expect(parseArgs("range main...HEAD")).toEqual({
+      target: {
+        type: "commitRange",
+        range: "main...HEAD",
+        from: "main",
+        to: "HEAD",
+        threeDot: true,
+      },
+      extraInstruction: undefined,
+    });
+    expect(parseArgs('range abc..def --extra "focus on perf"')).toEqual({
+      ...expected,
+      target: { ...expected.target, range: "abc..def", from: "abc", to: "def" },
+      extraInstruction: "focus on perf",
+    });
+  });
+
+  test("single commit still parses as commit; malformed range errors", () => {
+    expect(parseArgs("commit abc123")).toEqual({
+      target: { type: "commit", sha: "abc123", title: undefined },
+      extraInstruction: undefined,
+    });
+    expect(parseArgs("commit abc..")).toMatchObject({
+      target: null,
+      error: expect.stringContaining("Invalid commit range"),
+    });
+    expect(parseArgs("range abc")).toMatchObject({
+      target: null,
+      error: expect.stringContaining("Invalid commit range"),
+    });
+  });
+});
+
+describe("range picker helpers", () => {
+  // git log order: newest first.
+  const commits = [
+    { sha: "c333333", title: "third commit" },
+    { sha: "b222222", title: "second commit" },
+    { sha: "a111111", title: "first commit" },
+  ];
+
+  test("head candidates are only commits newer than the picked start", () => {
+    expect(commitsNewerThan(commits, "a111111")).toEqual(commits.slice(0, 2));
+    expect(commitsNewerThan(commits, "b222222")).toEqual(commits.slice(0, 1));
+    expect(commitsNewerThan(commits, "c333333")).toEqual([]);
+    expect(commitsNewerThan(commits, "unknown")).toEqual([]);
+  });
+
+  test("buildCommitRange assembles two-dot and three-dot targets", () => {
+    expect(buildCommitRange("a111111", "c333333", false)).toEqual({
+      type: "commitRange",
+      range: "a111111..c333333",
+      from: "a111111",
+      to: "c333333",
+      threeDot: false,
+    });
+    expect(buildCommitRange("a111111", "c333333", true)).toEqual({
+      type: "commitRange",
+      range: "a111111...c333333",
+      from: "a111111",
+      to: "c333333",
+      threeDot: true,
+    });
+    expect(buildCommitRange("", "c333333", false)).toBeNull();
+  });
+});
+
+describe("/review commit-range picker (RPC select flow)", () => {
+  const LOG =
+    "c333333 third commit\nb222222 second commit\na111111 first commit\n";
+
+  function setupPickerHarness(selectQueue: Array<string | undefined>) {
+    const handlers = new Map<
+      string,
+      (args: string, ctx: ExtensionCommandContext) => Promise<void>
+    >();
+    const notifications: string[] = [];
+    const sent: string[] = [];
+    const selectCalls: Array<{ title: string; options: string[] }> = [];
+    const queue = [...selectQueue];
+
+    const pi = {
+      on: () => {},
+      registerCommand: (
+        name: string,
+        command: {
+          handler: (
+            args: string,
+            ctx: ExtensionCommandContext,
+          ) => Promise<void>;
+        },
+      ) => handlers.set(name, command.handler),
+      appendEntry: () => {},
+      exec: async (_cmd: string, args: string[]) => {
+        if (args[0] === "log") return { stdout: LOG, code: 0, stderr: "" };
+        if (args[0] === "status") return { stdout: "", code: 0, stderr: "" };
+        if (args[0] === "branch" && args[1] === "--show-current")
+          return { stdout: "main\n", code: 0, stderr: "" };
+        if (args[0] === "symbolic-ref")
+          return { stdout: "origin/main\n", code: 0, stderr: "" };
+        return { stdout: "", code: 0, stderr: "" };
+      },
+      sendUserMessage: (text: string) => sent.push(text),
+    } as unknown as ExtensionAPI;
+    reviewExtension(pi);
+
+    const ctx = {
+      hasUI: true,
+      mode: "rpc",
+      cwd: "/",
+      sessionManager: {
+        getBranch: () => [],
+        // One existing message → "Current session" mode, so executeReview
+        // never sets the module-level review-origin state other suites use.
+        getEntries: () => [
+          { type: "message", message: { role: "user", content: "hi" } },
+        ],
+        getLeafId: () => "leaf-1",
+      },
+      ui: {
+        select: async (title: string, options: string[]) => {
+          selectCalls.push({ title, options });
+          return queue.shift();
+        },
+        notify: (message: string) => notifications.push(message),
+        editor: async () => undefined,
+        setWidget: () => {},
+        setEditorText: () => {},
+        getEditorText: () => "",
+        custom: async () => undefined,
+      },
+      navigateTree: async () => ({ cancelled: false }),
+    } as unknown as ExtensionCommandContext;
+
+    const handler = handlers.get("review");
+    if (!handler) throw new Error("review command was not registered");
+    return { run: () => handler("", ctx), notifications, sent, selectCalls };
+  }
+
+  test("two picks + three-dot choice reviews the assembled range", async () => {
+    const harness = setupPickerHarness([
+      "Review a commit range (A..B or A...B)",
+      "a111111 first commit",
+      "c333333 third commit",
+      "Three-dot (A...B) — merge-base diff",
+      "Current session",
+    ]);
+    await harness.run();
+
+    expect(harness.selectCalls.map((c) => c.title)).toEqual([
+      "Select a review preset",
+      "Select starting commit (older, excluded from the range)",
+      "Select ending commit (newer, included in the range)",
+      "Select range type",
+      "Start review in:",
+    ]);
+    // The ending list cannot offer the start commit or anything older.
+    expect(harness.selectCalls[2]?.options).toEqual([
+      "c333333 third commit",
+      "b222222 second commit",
+    ]);
+    expect(harness.sent).toHaveLength(1);
+    expect(harness.sent[0]).toContain("commit range a111111...c333333");
+    expect(harness.sent[0]).toContain("merge base");
+  });
+
+  test("picking the newest commit as start returns to the preset menu", async () => {
+    const harness = setupPickerHarness([
+      "Review a commit range (A..B or A...B)",
+      "c333333 third commit",
+      undefined, // cancel the re-shown preset menu
+    ]);
+    await harness.run();
+
+    expect(harness.sent).toEqual([]);
+    expect(harness.notifications).toContain(
+      "Starting commit is the newest commit — pick an older starting commit.",
+    );
+    expect(harness.notifications).toContain("Review cancelled");
+  });
+});
+
 describe("buildReviewPrompt ($-pattern safety)", () => {
   // User-controlled strings passed as the replacement of String.replace let
   // `$&`, `` $` ``, and `$'` splice matched/left/right template context into
@@ -363,6 +598,39 @@ describe("buildReviewPrompt ($-pattern safety)", () => {
     expect(prompt).toContain("'main$`'");
     expect(prompt).toContain("#42");
     expect(prompt).toContain("deadbeef123");
+  });
+
+  test("commit range prompt names the range and the git commands", async () => {
+    const prompt = await buildReviewPrompt(piStub(), {
+      type: "commitRange",
+      range: "abc123..def456",
+      from: "abc123",
+      to: "def456",
+      threeDot: false,
+    });
+    expect(prompt).toContain("commit range abc123..def456");
+    expect(prompt).toContain("git log --oneline abc123..def456");
+    expect(prompt).toContain("git diff abc123..def456");
+  });
+
+  test("commit range prompt lists commits when git log succeeds", async () => {
+    const prompt = await buildReviewPrompt(
+      piStub(async (_cmd, args) =>
+        args[0] === "log"
+          ? { stdout: "def456 feat: x\nabc123 fix: $& y\n", code: 0 }
+          : { stdout: "", code: 1 },
+      ),
+      {
+        type: "commitRange",
+        range: "abc..def",
+        from: "abc",
+        to: "def",
+        threeDot: true,
+      },
+    );
+    expect(prompt).toContain("def456 feat: x");
+    expect(prompt).toContain("abc123 fix: $& y");
+    expect(prompt).toContain("merge base");
   });
 
   test("folder paths round-trip verbatim", async () => {
