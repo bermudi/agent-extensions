@@ -333,6 +333,23 @@ describe("parseCommitRange", () => {
     expect(parseCommitRange("-a..b")).toBeNull();
     expect(parseCommitRange("a..-b")).toBeNull();
   });
+
+  test("shell metacharacters in endpoints are rejected (prompt embeds the range in agent-run commands)", () => {
+    expect(parseCommitRange("a..b;id")).toBeNull();
+    expect(parseCommitRange("a..b$(id)")).toBeNull();
+    expect(parseCommitRange("a..b`id`")).toBeNull();
+    expect(parseCommitRange("a..b|id")).toBeNull();
+    expect(parseCommitRange("a..b&id")).toBeNull();
+    expect(parseCommitRange("a;b..c")).toBeNull();
+    expect(parseCommitRange("a..b>c")).toBeNull();
+    expect(parseArgs("commit a..b;id")).toMatchObject({
+      target: null,
+      error: expect.stringContaining("Invalid commit range"),
+    });
+    // Legitimate rev syntax still parses.
+    expect(parseCommitRange("feat/x-1..HEAD@{1}")).not.toBeNull();
+    expect(parseCommitRange("v1.2.3..release/2.0~3")).not.toBeNull();
+  });
 });
 
 describe("parseArgs commit ranges", () => {
@@ -631,6 +648,61 @@ describe("buildReviewPrompt ($-pattern safety)", () => {
     expect(prompt).toContain("def456 feat: x");
     expect(prompt).toContain("abc123 fix: $& y");
     expect(prompt).toContain("merge base");
+  });
+
+  test("three-dot range lists commits with the two-dot log range (the diff's actual commit set)", async () => {
+    const calls: string[][] = [];
+    const stub = piStub(async (_cmd, args) => {
+      calls.push(args);
+      return { stdout: "def456 feat: x\n", code: 0 };
+    });
+    const prompt = await buildReviewPrompt(stub, {
+      type: "commitRange",
+      range: "main...feature",
+      from: "main",
+      to: "feature",
+      threeDot: true,
+    });
+    // git log A...B is a symmetric difference (includes main-only commits
+    // on diverged endpoints); the reviewed diff A...B contains only
+    // merge-base..feature commits, which is exactly git log main..feature.
+    expect(calls).toEqual([["log", "--oneline", "-n", "101", "main..feature"]]);
+    expect(prompt).toContain("commit range main...feature");
+    expect(prompt).toContain("git diff main...feature");
+  });
+
+  test("three-dot fallback prompt tells the agent to log two-dot but diff three-dot", async () => {
+    const prompt = await buildReviewPrompt(piStub(), {
+      type: "commitRange",
+      range: "main...feature",
+      from: "main",
+      to: "feature",
+      threeDot: true,
+    });
+    expect(prompt).toContain("git log --oneline main..feature");
+    expect(prompt).toContain("git diff main...feature");
+    expect(prompt).not.toContain("git log --oneline main...feature");
+  });
+
+  test("commit list is capped at 100 with a truncation note", async () => {
+    const many = Array.from(
+      { length: 150 },
+      (_, i) => `sha${String(i + 1).padStart(3, "0")} commit ${i + 1}`,
+    ).join("\n");
+    const prompt = await buildReviewPrompt(
+      piStub(async () => ({ stdout: `${many}\n`, code: 0 })),
+      {
+        type: "commitRange",
+        range: "abc..def",
+        from: "abc",
+        to: "def",
+        threeDot: false,
+      },
+    );
+    expect(prompt).toContain("commit 100");
+    expect(prompt).not.toContain("commit 101");
+    expect(prompt).toContain("truncated");
+    expect(prompt).toContain("git log --oneline abc..def");
   });
 
   test("folder paths round-trip verbatim", async () => {

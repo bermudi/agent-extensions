@@ -1597,24 +1597,29 @@ describe("clean-tui AI summary", () => {
   });
 
   test("bash bullets keep up to 100 chars of the command", () => {
-    const h = freshHarness();
-    h.emit("session_start", { reason: "startup" });
-    h.emit("agent_start");
+    const restore = setTerminalSize({ columns: 120 });
+    try {
+      const h = freshHarness();
+      h.emit("session_start", { reason: "startup" });
+      h.emit("agent_start");
 
-    // A real burst: both rows render as bullets under one "bash ×2" header.
-    // 100-char command fits whole; 105-char command ellipsizes to 99 + "…".
-    const cmdA = "echo " + "a".repeat(95); // 100 chars — fits whole
-    const cmdB = "echo " + "b".repeat(100); // 105 chars — 99 chars + ellipsis
-    const a = h.row("bash", "a");
-    a.setArgs({ command: cmdA });
-    const b = h.row("bash", "b");
-    b.setArgs({ command: cmdB });
-    b.setResult({ content: ["ok"] });
-    a.setResult({ content: ["ok"] });
+      // A real burst: both rows render as bullets under one "bash ×2" header.
+      // 100-char command fits whole; 105-char command ellipsizes to 99 + "…".
+      const cmdA = "echo " + "a".repeat(95); // 100 chars — fits whole
+      const cmdB = "echo " + "b".repeat(100); // 105 chars — 99 chars + ellipsis
+      const a = h.row("bash", "a");
+      a.setArgs({ command: cmdA });
+      const b = h.row("bash", "b");
+      b.setArgs({ command: cmdB });
+      b.setResult({ content: ["ok"] });
+      a.setResult({ content: ["ok"] });
 
-    const text = textOf(a.lastCallComponent);
-    expect(text).toContain("a".repeat(95));
-    expect(text).toContain("b".repeat(94) + "…");
+      const text = textOf(a.lastCallComponent);
+      expect(text).toContain("a".repeat(95));
+      expect(text).toContain("b".repeat(94) + "…");
+    } finally {
+      restore();
+    }
   });
 
   test("unset summary-model means off: zero requests, zero noise", async () => {

@@ -302,13 +302,19 @@ const COMMIT_PROMPT =
   "Review the code changes introduced by commit {sha}. Provide prioritized, actionable findings.";
 
 const COMMIT_RANGE_PROMPT =
-  "Review the code changes introduced by the commit range {range}. Run `git log --oneline {range}` to see the commits in the range, then run `git diff {range}` to inspect the combined diff. Provide prioritized, actionable findings.";
+  "Review the code changes introduced by the commit range {range}. Run `git log --oneline {logRange}` to see the commits in the range, then run `git diff {range}` to inspect the combined diff. Provide prioritized, actionable findings.";
 
 const COMMIT_RANGE_THREE_DOT_NOTE =
   " The three-dot form diffs the second endpoint against the merge base of the two endpoints.";
 
 const COMMIT_RANGE_PROMPT_WITH_COMMITS =
   "Review the code changes introduced by the commit range {range}. The commits in the range are:\n\n{commits}\n\nRun `git diff {range}` to inspect the combined diff. Provide prioritized, actionable findings.";
+
+/** Max commits embedded in the review prompt; the rest is noted as truncated. */
+export const COMMIT_RANGE_COMMIT_LIMIT = 100;
+
+const COMMIT_RANGE_TRUNCATED_NOTE =
+  "\n\n(Commit list truncated to the first {limit} commits — run `git log --oneline {logRange}` for the full list.)";
 
 const PULL_REQUEST_PROMPT =
   "Review pull request #{prNumber} (\"{title}\") against the base branch '{baseBranch}'. The merge base commit for this comparison is {mergeBaseSha}. Run `git diff {mergeBaseSha}` to inspect the changes that would be merged. Provide prioritized, actionable findings.";
@@ -723,7 +729,11 @@ export function parseReviewPaths(tokens: string[]): string[] {
  * against the merge base of A and B, like a PR). Endpoints are any git rev
  * (SHA, branch, tag, `HEAD~3`, …). Open-ended ranges (`A..`, `..B`) and
  * option-like endpoints (`-x`) are rejected so a malformed range fails here
- * instead of as a confusing git error in the review prompt.
+ * instead of as a confusing git error in the review prompt. Endpoints are
+ * also restricted to a git-ref character set: the range is interpolated
+ * verbatim into the prompt's `git log`/`git diff` instructions, which the
+ * reviewing agent runs through a shell, so shell metacharacters (`;`, `$()`,
+ * backticks, `|`, …) must never reach it.
  */
 export function parseCommitRange(value: string): {
   from: string;
@@ -741,6 +751,7 @@ export function parseCommitRange(value: string): {
     if (!endpoint) return null;
     if (endpoint.includes("..") || /\s/.test(endpoint)) return null;
     if (endpoint.startsWith("-") || endpoint.startsWith(".")) return null;
+    if (!/^[A-Za-z0-9._/~^@{}-]+$/.test(endpoint)) return null;
   }
   return { from, to, threeDot, range: trimmed };
 }
@@ -1018,24 +1029,51 @@ export async function buildReviewPrompt(
       return COMMIT_PROMPT.replace("{sha}", () => target.sha);
 
     case "commitRange": {
-      const { range, threeDot, title } = target;
+      const { range, from, to, threeDot, title } = target;
       const note = threeDot ? COMMIT_RANGE_THREE_DOT_NOTE : "";
+      // Always list with the two-dot range: `git log A...B` is a symmetric
+      // difference and would include A-only commits on diverged endpoints,
+      // while the reviewed `git diff A...B` contains exactly A..B's commits.
+      const logRange = `${from}..${to}`;
+      const fallbackPrompt = () =>
+        COMMIT_RANGE_PROMPT.replace(/{range}/g, () => range).replace(
+          /{logRange}/g,
+          () => logRange,
+        );
       let prompt: string;
       try {
         const { stdout, code } = await pi.exec("git", [
           "log",
           "--oneline",
-          range,
+          "-n",
+          `${COMMIT_RANGE_COMMIT_LIMIT + 1}`,
+          logRange,
         ]);
-        const commits = code === 0 ? stdout.trim() : "";
-        prompt = commits
-          ? COMMIT_RANGE_PROMPT_WITH_COMMITS.replace(
-              /{range}/g,
-              () => range,
-            ).replace("{commits}", () => commits)
-          : COMMIT_RANGE_PROMPT.replace(/{range}/g, () => range);
+        const lines =
+          code === 0
+            ? stdout
+                .trim()
+                .split("\n")
+                .filter((line) => line.trim())
+            : [];
+        if (lines.length === 0) {
+          prompt = fallbackPrompt();
+        } else {
+          const truncated = lines.length > COMMIT_RANGE_COMMIT_LIMIT;
+          const commits = lines.slice(0, COMMIT_RANGE_COMMIT_LIMIT).join("\n");
+          prompt = COMMIT_RANGE_PROMPT_WITH_COMMITS.replace(
+            /{range}/g,
+            () => range,
+          ).replace("{commits}", () => commits);
+          if (truncated) {
+            prompt += COMMIT_RANGE_TRUNCATED_NOTE.replace(
+              "{limit}",
+              String(COMMIT_RANGE_COMMIT_LIMIT),
+            ).replace(/{logRange}/g, () => logRange);
+          }
+        }
       } catch {
-        prompt = COMMIT_RANGE_PROMPT.replace(/{range}/g, () => range);
+        prompt = fallbackPrompt();
       }
       if (title) prompt += ` The range is described as: "${title}".`;
       return prompt + note;
