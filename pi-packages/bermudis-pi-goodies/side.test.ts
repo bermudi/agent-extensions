@@ -1048,6 +1048,27 @@ describe("sideHandoffRenderer", () => {
     expect(lines[0]).toContain("(ctrl+o to collapse)");
   });
 
+  test("expanded: long lines word-wrap to width instead of clipping", () => {
+    // One paragraph (no newlines) plus an unbreakable token, with a blank
+    // line between — the summary shape that used to render chopped mid-word.
+    const body = `${"word ".repeat(60).trim()}\n\n${"x".repeat(250)}`;
+    const component = sideHandoffRenderer(
+      handoffMessage(body),
+      options(true),
+      identityTheme,
+    );
+    const lines = component!.render(40);
+    expect(lines.length).toBeGreaterThan(4); // wrapped, not one clipped row each
+    for (const line of lines.slice(1)) {
+      expect(line.length).toBeLessThanOrEqual(40);
+    }
+    // Nothing is lost to the pane edge: every non-whitespace char survives.
+    const squashed = lines.slice(1).join("").replace(/\s+/g, "");
+    expect(squashed).toBe(body.replace(/\s+/g, ""));
+    // The blank source line survives as an empty row.
+    expect(lines.slice(1)).toContain("");
+  });
+
   test("expanded with non-string content falls back to the header", () => {
     const component = sideHandoffRenderer(
       handoffMessage([{ type: "text", text: "x" }]),

@@ -54,7 +54,11 @@ import {
   sessionEntryToContextMessages,
   shouldCompact,
 } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, matchesKey } from "@earendil-works/pi-tui";
+import {
+  getKeybindings,
+  matchesKey,
+  wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { describeError, extractTextParts } from "./json-file.ts";
 import { buildTrajectory, renderTrajectory } from "./copy-trajectory.ts";
 import { logGoodiesEvent } from "./goodies-log.ts";
@@ -428,11 +432,13 @@ export const SUMMARY_INSTRUCTIONS = `Summarize this side consultation for the ma
 /**
  * Transcript renderer for the handoff message: collapsed shows the header
  * with the toggle-key hint, expanded shows the entire content — the toggle's
- * contract is some/all, so there is deliberately no line cap. The key is
- * resolved at render time from pi-tui's live registry (pi's extension loader
- * aliases this import to the host instance, so a rebound app.tools.expand
- * shows the user's actual key; an unpopulated registry falls back to pi's
- * default binding).
+ * contract is some/all, so there is deliberately no line cap. Body rows are
+ * word-wrapped to the render width: slicing at the pane edge cut every
+ * summary paragraph mid-word and made the delivered consultation unreadable.
+ * The key is resolved at render time from pi-tui's live registry (pi's
+ * extension loader aliases this import to the host instance, so a rebound
+ * app.tools.expand shows the user's actual key; an unpopulated registry
+ * falls back to pi's default binding).
  */
 export const sideHandoffRenderer: MessageRenderer<SideHandoffDetails> = (
   message,
@@ -457,12 +463,12 @@ export const sideHandoffRenderer: MessageRenderer<SideHandoffDetails> = (
   if (!options.expanded || typeof message.content !== "string") {
     return { render: () => [header], invalidate: () => {} };
   }
-  const lines = message.content.split("\n");
+  const content = message.content;
   return {
     render: (width: number) => [
       header,
-      ...lines.map((line) =>
-        theme.fg("customMessageText", line.slice(0, Math.max(width, 1))),
+      ...wrapTextWithAnsi(content, Math.max(width, 1)).map((line) =>
+        theme.fg("customMessageText", line),
       ),
     ],
     invalidate: () => {},
