@@ -22,15 +22,19 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import providerBalance, {
   balanceCacheKey,
+  claudeUsageToBalance,
   codexQuotaToBalance,
   commandcodeBalanceToBalance,
+  fetchClaudeUsage,
   fetchOpenAIQuota,
   formatBalance,
+  formatClaudeUsage,
   formatCodexQuota,
   formatCommandcodeBalance,
   formatCredits,
   formatZaiQuota,
   openAIAppIsRegistered,
+  parseClaudeUsage,
   parseCodexAccountId,
   parseCodexQuota,
   parseCommandcodeBalance,
@@ -1932,6 +1936,431 @@ describe("formatCommandcodeBalance", () => {
         nowMs,
       ),
     ).toBe("5h: 75% ↻2h");
+  });
+});
+
+describe("parseClaudeUsage", () => {
+  // Verbatim shape captured from a live GET /api/oauth/usage (Claude Pro,
+  // 2026-10-31): utilization is 0-100 "percent used" and resets_at is an
+  // ISO-8601 string with microseconds. The long tail of null provider windows
+  // is real — the endpoint always emits its full field list.
+  const liveProBody = {
+    five_hour: {
+      utilization: 26,
+      resets_at: "2026-10-31T01:50:00.087270+00:00",
+      limit_dollars: null,
+      used_dollars: null,
+      remaining_dollars: null,
+      locked_reason: null,
+    },
+    seven_day: {
+      utilization: 4,
+      resets_at: "2026-11-03T07:00:00.087288+00:00",
+      limit_dollars: null,
+      used_dollars: null,
+      remaining_dollars: null,
+      locked_reason: null,
+    },
+    seven_day_oauth_apps: null,
+    seven_day_opus: null,
+    seven_day_sonnet: null,
+    seven_day_cowork: null,
+    cinder_cove: null,
+    wattle_ember: null,
+    extra_usage: {
+      is_enabled: false,
+      monthly_limit: null,
+      used_credits: null,
+      utilization: null,
+      currency: null,
+      disabled_reason: null,
+    },
+    limits: [
+      {
+        kind: "session",
+        group: "session",
+        percent: 26,
+        severity: "normal",
+        resets_at: "2026-10-31T01:50:00.087270+00:00",
+        scope: null,
+        is_active: true,
+      },
+      {
+        kind: "weekly_all",
+        group: "weekly",
+        percent: 4,
+        severity: "normal",
+        resets_at: "2026-11-03T07:00:00.087288+00:00",
+        scope: null,
+        is_active: false,
+      },
+    ],
+  };
+
+  test("parses the live Pro response into both plan windows", () => {
+    expect(parseClaudeUsage(liveProBody)).toEqual({
+      fiveHour: {
+        usedPercent: 26,
+        windowSeconds: 18_000,
+        resetAt: 1_793_411_400,
+      },
+      sevenDay: {
+        usedPercent: 4,
+        windowSeconds: 604_800,
+        resetAt: 1_793_689_200,
+      },
+      scoped: [],
+      credits: null,
+    });
+  });
+
+  test("keeps a window that has no reset timestamp", () => {
+    expect(
+      parseClaudeUsage({ five_hour: { utilization: 12, resets_at: null } }),
+    ).toEqual({
+      fiveHour: { usedPercent: 12, windowSeconds: 18_000 },
+      sevenDay: null,
+      scoped: [],
+      credits: null,
+    });
+  });
+
+  test("collects Opus/Sonnet weekly windows and model-scoped limits", () => {
+    const usage = parseClaudeUsage({
+      five_hour: { utilization: 10, resets_at: "2026-10-31T01:50:00Z" },
+      seven_day: { utilization: 20 },
+      seven_day_opus: { utilization: 35, resets_at: "2026-11-03T07:00:00Z" },
+      seven_day_sonnet: { utilization: 45 },
+      limits: [
+        { kind: "weekly_all", percent: 20, resets_at: "2026-11-03T07:00:00Z" },
+        {
+          kind: "weekly_scoped",
+          percent: 88,
+          resets_at: "2026-11-04T09:00:00Z",
+          scope: { model: { display_name: "Fable" } },
+        },
+        // A scoped row with no model name cannot be labelled; skip it rather
+        // than rendering a nameless segment.
+        { kind: "weekly_scoped", percent: 50, scope: null },
+      ],
+    });
+
+    expect(usage?.scoped).toEqual([
+      {
+        label: "Opus",
+        usedPercent: 35,
+        windowSeconds: 604_800,
+        resetAt: 1_793_689_200,
+      },
+      { label: "Sonnet", usedPercent: 45, windowSeconds: 604_800 },
+      {
+        label: "Fable",
+        usedPercent: 88,
+        windowSeconds: 604_800,
+        resetAt: 1_793_782_800,
+      },
+    ]);
+  });
+
+  test("reports remaining usage credits only while extra usage is enabled", () => {
+    expect(
+      parseClaudeUsage({
+        seven_day: { utilization: 5 },
+        extra_usage: {
+          is_enabled: true,
+          monthly_limit: 50,
+          used_credits: 12.5,
+        },
+      })?.credits,
+    ).toBe(37.5);
+
+    // A disabled pool is not a balance: never show $0.00 as if it were money
+    // the account could spend.
+    expect(
+      parseClaudeUsage({
+        seven_day: { utilization: 5 },
+        extra_usage: {
+          is_enabled: false,
+          monthly_limit: 50,
+          used_credits: 12.5,
+        },
+      })?.credits,
+    ).toBeNull();
+
+    // Enabled but uncapped (unlimited): no dollar figure to show.
+    expect(
+      parseClaudeUsage({
+        seven_day: { utilization: 5 },
+        extra_usage: {
+          is_enabled: true,
+          monthly_limit: null,
+          used_credits: 3,
+        },
+      })?.credits,
+    ).toBeNull();
+  });
+
+  test("rejects responses with nothing usable", () => {
+    expect(parseClaudeUsage(null)).toBeNull();
+    expect(parseClaudeUsage({})).toBeNull();
+    // A fieldless body is how this endpoint reports in-band errors.
+    expect(
+      parseClaudeUsage({ error: { type: "rate_limit_error" } }),
+    ).toBeNull();
+    // utilization must be a number; a string is not coerced.
+    expect(parseClaudeUsage({ five_hour: { utilization: "26" } })).toBeNull();
+  });
+});
+
+describe("claudeUsageToBalance", () => {
+  test("flips used to remaining and labels scoped windows", () => {
+    expect(
+      claudeUsageToBalance({
+        fiveHour: { usedPercent: 26, windowSeconds: 18_000 },
+        sevenDay: { usedPercent: 4, windowSeconds: 604_800 },
+        scoped: [{ label: "Opus", usedPercent: 35, windowSeconds: 604_800 }],
+        credits: 37.5,
+      }),
+    ).toEqual([
+      { quota: { remainingPercent: 74, windowSeconds: 18_000 } },
+      { quota: { remainingPercent: 96, windowSeconds: 604_800 } },
+      {
+        label: "Opus",
+        quota: { remainingPercent: 65, windowSeconds: 604_800 },
+      },
+      { credits: 37.5 },
+    ]);
+  });
+});
+
+describe("formatClaudeUsage", () => {
+  const nowMs = 1_793_400_000_000; // 190 min before the 5h reset, 80.3h before 7d
+  test("renders the session and weekly windows the panel shows", () => {
+    expect(
+      formatClaudeUsage(
+        {
+          fiveHour: {
+            usedPercent: 26,
+            windowSeconds: 18_000,
+            resetAt: 1_793_411_400,
+          },
+          sevenDay: {
+            usedPercent: 4,
+            windowSeconds: 604_800,
+            resetAt: 1_793_689_200,
+          },
+          scoped: [],
+          credits: null,
+        },
+        nowMs,
+      ),
+      // Countdowns are status-bar coarse: whole hours under a day (190m -> 3h),
+      // then hours inside days. Matches every other provider's footer.
+    ).toBe("5h: 74% ↻3h · 7d: 96% ↻3d8h");
+  });
+
+  test("omits windows the plan does not have", () => {
+    expect(
+      formatClaudeUsage(
+        {
+          fiveHour: null,
+          sevenDay: { usedPercent: 100, windowSeconds: 604_800 },
+          scoped: [],
+          credits: null,
+        },
+        nowMs,
+      ),
+    ).toBe("7d: 0%");
+  });
+});
+
+describe("fetchClaudeUsage", () => {
+  function jsonResponse(value: unknown, status = 200): Response {
+    return new Response(JSON.stringify(value), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  test("reads the OAuth usage endpoint with the account's bearer token", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const url = input instanceof Request ? input.url : String(input);
+      calls.push({ url, headers: new Headers(init?.headers) });
+      return jsonResponse({
+        five_hour: { utilization: 26, resets_at: "2026-10-31T01:50:00Z" },
+        seven_day: { utilization: 4, resets_at: "2026-11-03T07:00:00Z" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const balance = await fetchClaudeUsage(
+        "test-oauth-token",
+        new AbortController().signal,
+      );
+      expect(balance).toEqual([
+        {
+          quota: {
+            remainingPercent: 74,
+            windowSeconds: 18_000,
+            resetAt: 1_793_411_400,
+          },
+        },
+        {
+          quota: {
+            remainingPercent: 96,
+            windowSeconds: 604_800,
+            resetAt: 1_793_689_200,
+          },
+        },
+      ]);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe("https://api.anthropic.com/api/oauth/usage");
+      expect(calls[0]?.headers.get("authorization")).toBe(
+        "Bearer test-oauth-token",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("surfaces a rejected request instead of a wrong reading", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      jsonResponse(
+        { error: { type: "authentication_error" } },
+        401,
+      )) as typeof fetch;
+
+    try {
+      await expect(
+        fetchClaudeUsage("expired", new AbortController().signal),
+      ).rejects.toThrow("Claude usage request failed: 401");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("treats an in-band error body as a failed reading", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      jsonResponse({ error: { type: "rate_limit_error" } })) as typeof fetch;
+
+    try {
+      await expect(
+        fetchClaudeUsage("token", new AbortController().signal),
+      ).rejects.toThrow("Claude usage response was invalid");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("anthropic subscription gating", () => {
+  // The registry wiring itself is the new surface here: `anthropic` must be
+  // registered with requiresOAuth so an API-key account never asks for
+  // subscription usage it does not have, and a non-anthropic model never
+  // triggers the read at all.
+  function harness(options: { provider: string; usingOAuth: boolean }): {
+    run: () => Promise<void>;
+    fetches: string[];
+    cleanup: () => Promise<void>;
+  } {
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: unknown) => unknown
+    >();
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    setGoodiesLogPathForTesting(join(directory, "goodies.log"));
+    providerBalance(
+      {
+        on(event, handler) {
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: unknown) => unknown,
+          );
+        },
+        events: { emit() {}, on: () => () => {} },
+      } as unknown as ExtensionAPI,
+      { cacheDir: directory, random: () => 0.5 },
+    );
+    const fetches: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      fetches.push(input instanceof Request ? input.url : String(input));
+      return new Response(
+        JSON.stringify({
+          five_hour: { utilization: 26, resets_at: "2026-10-31T01:50:00Z" },
+          seven_day: { utilization: 4, resets_at: "2026-11-03T07:00:00Z" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const ctx = {
+      mode: "tui",
+      model: { provider: options.provider },
+      isIdle: () => false,
+      ui: { setFooter() {} },
+      sessionManager: { getBranch: () => [] },
+      modelRegistry: {
+        isUsingOAuth: () => options.usingOAuth,
+        getApiKeyForProvider: async () => "anthropic-oauth-token",
+        getProviderAuth: async () => undefined,
+      },
+    } as unknown as ExtensionContext;
+
+    return {
+      run: async () => {
+        const start = handlers.get("session_start");
+        if (!start) throw new Error("missing session_start");
+        start({}, ctx);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      },
+      fetches,
+      cleanup: async () => {
+        globalThis.fetch = originalFetch;
+        setGoodiesLogPathForTesting(undefined);
+        await rm(directory, { recursive: true, force: true });
+      },
+    };
+  }
+
+  test("reads usage for an OAuth subscription login", async () => {
+    const h = harness({ provider: "anthropic", usingOAuth: true });
+    try {
+      await h.run();
+      expect(h.fetches).toEqual(["https://api.anthropic.com/api/oauth/usage"]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  test("never reads usage for an API-key anthropic account", async () => {
+    const h = harness({ provider: "anthropic", usingOAuth: false });
+    try {
+      await h.run();
+      expect(h.fetches).toEqual([]);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  test("never reads anthropic usage while another provider is active", async () => {
+    const h = harness({ provider: "openrouter", usingOAuth: true });
+    try {
+      await h.run();
+      // The active provider's own balance is read; anthropic's is not.
+      expect(h.fetches).not.toContain(
+        "https://api.anthropic.com/api/oauth/usage",
+      );
+    } finally {
+      await h.cleanup();
+    }
   });
 });
 

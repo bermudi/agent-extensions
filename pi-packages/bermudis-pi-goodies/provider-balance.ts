@@ -64,6 +64,16 @@ const COMMANDCODE_API_BASE = (
   process.env.COMMANDCODE_API_URL || "https://api.commandcode.ai"
 ).replace(/\/+$/, "");
 const COMMANDCODE_CREDITS_ENDPOINT = `${COMMANDCODE_API_BASE}/alpha/billing/credits`;
+/**
+ * Subscription usage for Anthropic Pro/Max plans. Same host and bearer as the
+ * chat completions pi already sends to api.anthropic.com, and the endpoint
+ * Claude Code's own /usage panel reads. Deliberately NOT derived from
+ * ANTHROPIC_BASE_URL: proxy/gateway base URLs carry no subscription quota, so
+ * only the dedicated override moves this read.
+ */
+const ANTHROPIC_USAGE_ENDPOINT = `${(
+  process.env.ANTHROPIC_USAGE_URL || "https://api.anthropic.com"
+).replace(/\/+$/, "")}/api/oauth/usage`;
 const BALANCE_FETCH_TIMEOUT_MS = 5_000;
 /**
  * While Pi is waiting for input, periodically adopt another session's fresh
@@ -759,7 +769,7 @@ export interface CommandcodeBalance {
 const COMMANDCODE_FIVE_HOUR_SECONDS = 5 * 60 * 60;
 const COMMANDCODE_WEEK_SECONDS = 7 * 24 * 60 * 60;
 
-function parseCommandcodeResetAtSeconds(value: unknown): number | undefined {
+function parseResetAtSeconds(value: unknown): number | undefined {
   let millis: number | null = null;
   if (typeof value === "number" && Number.isFinite(value)) {
     // Millisecond epochs are ~1e12 and up; second epochs are ~1e9.
@@ -768,7 +778,10 @@ function parseCommandcodeResetAtSeconds(value: unknown): number | undefined {
     const parsed = Date.parse(value.trim());
     millis = Number.isNaN(parsed) ? null : parsed;
   }
-  return millis !== null && millis > 0 ? millis / 1000 : undefined;
+  // Whole seconds: ISO inputs carry sub-second precision (the live Claude
+  // endpoint returns microseconds), but every consumer compares these against
+  // second-granular countdowns and caches them as numbers.
+  return millis !== null && millis > 0 ? Math.floor(millis / 1000) : undefined;
 }
 
 function parseCommandcodeWindow(
@@ -778,7 +791,7 @@ function parseCommandcodeWindow(
   const used = numericProperty(value, "used");
   const cap = numericProperty(value, "cap");
   if (used === null || cap === null || cap <= 0) return null;
-  const resetAt = parseCommandcodeResetAtSeconds(asRecord(value)?.resetAt);
+  const resetAt = parseResetAtSeconds(asRecord(value)?.resetAt);
   return {
     usedPercent: (used / cap) * 100,
     windowSeconds,
@@ -855,6 +868,154 @@ async function fetchCommandcodeBalance(
   return commandcodeBalanceToBalance(balance);
 }
 
+// --- Claude (Anthropic Pro/Max subscription) ------------------------------
+// Anthropic exposes subscription usage at GET /api/oauth/usage on
+// api.anthropic.com — the same host and bearer Claude Code's /usage panel
+// reads. The response body is the utilization object itself (verified live
+// 2026-10-31 against Claude Code 2.1.314): window utilization is 0–100
+// "percent used" and resets_at is an ISO-8601 string. The panel renders
+// "Current session" (five_hour) and "This week" (seven_day) from it; Max
+// plans can add per-model weekly windows (seven_day_opus/seven_day_sonnet
+// and limits[] rows with kind "weekly_scoped"), which get segment labels.
+// API-key auth has no subscription quota, so the adapter is OAuth-gated.
+
+export interface ClaudeUsageWindow {
+  usedPercent: number;
+  windowSeconds: number;
+  /** Unix timestamp in seconds, from the API's ISO `resets_at`. */
+  resetAt?: number;
+}
+
+export interface ClaudeUsage {
+  fiveHour: ClaudeUsageWindow | null;
+  sevenDay: ClaudeUsageWindow | null;
+  /** Per-model weekly windows ("Opus", "Sonnet", or a model display name). */
+  scoped: Array<ClaudeUsageWindow & { label: string }>;
+  /** Remaining usage-credit dollars when extra usage is enabled with a cap. */
+  credits: number | null;
+}
+
+const CLAUDE_FIVE_HOUR_SECONDS = 5 * 60 * 60;
+const CLAUDE_WEEK_SECONDS = 7 * 24 * 60 * 60;
+
+function parseClaudeUsageWindow(
+  value: unknown,
+  windowSeconds: number,
+): ClaudeUsageWindow | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const usedPercent = numericProperty(record, "utilization");
+  if (usedPercent === null) return null;
+  const resetAt = parseResetAtSeconds(record.resets_at);
+  return {
+    usedPercent,
+    windowSeconds,
+    ...(resetAt !== undefined ? { resetAt } : {}),
+  };
+}
+
+export function parseClaudeUsage(value: unknown): ClaudeUsage | null {
+  const payload = asRecord(value);
+  if (!payload) return null;
+
+  const fiveHour = parseClaudeUsageWindow(
+    payload.five_hour,
+    CLAUDE_FIVE_HOUR_SECONDS,
+  );
+  const sevenDay = parseClaudeUsageWindow(
+    payload.seven_day,
+    CLAUDE_WEEK_SECONDS,
+  );
+
+  // Per-model weekly windows. The explicit fields cover Opus/Sonnet on Max
+  // plans; limits[] rows with kind "weekly_scoped" carry newer model-scoped
+  // windows (Claude Code renders those as "Current week (<model>)").
+  const scoped: Array<ClaudeUsageWindow & { label: string }> = [];
+  for (const [field, label] of [
+    ["seven_day_opus", "Opus"],
+    ["seven_day_sonnet", "Sonnet"],
+  ] as const) {
+    const window = parseClaudeUsageWindow(payload[field], CLAUDE_WEEK_SECONDS);
+    if (window) scoped.push({ label, ...window });
+  }
+  if (Array.isArray(payload.limits)) {
+    for (const candidate of payload.limits) {
+      if (stringProperty(candidate, "kind") !== "weekly_scoped") continue;
+      const displayName = stringProperty(
+        objectProperty(objectProperty(candidate, "scope"), "model"),
+        "display_name",
+      );
+      if (!displayName) continue;
+      const usedPercent = numericProperty(candidate, "percent");
+      if (usedPercent === null) continue;
+      const resetAt = parseResetAtSeconds(asRecord(candidate)?.resets_at);
+      scoped.push({
+        label: displayName,
+        usedPercent,
+        windowSeconds: CLAUDE_WEEK_SECONDS,
+        ...(resetAt !== undefined ? { resetAt } : {}),
+      });
+    }
+  }
+
+  // Usage credits (extra usage): a monthly dollar cap, not a prepaid pool
+  // balance — show remaining-to-cap only when the feature is on.
+  const extraUsage = asRecord(payload.extra_usage);
+  let credits: number | null = null;
+  if (extraUsage?.is_enabled === true) {
+    const monthlyLimit = numericProperty(extraUsage, "monthly_limit");
+    const usedCredits = numericProperty(extraUsage, "used_credits");
+    if (monthlyLimit !== null && usedCredits !== null) {
+      credits = Math.max(0, monthlyLimit - usedCredits);
+    }
+  }
+
+  if (!fiveHour && !sevenDay && scoped.length === 0 && credits === null) {
+    return null;
+  }
+  return { fiveHour, sevenDay, scoped, credits };
+}
+
+export function claudeUsageToBalance(usage: ClaudeUsage): Balance {
+  const segments: BalanceSegment[] = [];
+  for (const window of [usage.fiveHour, usage.sevenDay]) {
+    if (window) segments.push({ quota: windowToQuota(window) });
+  }
+  for (const window of usage.scoped) {
+    segments.push({ label: window.label, quota: windowToQuota(window) });
+  }
+  if (usage.credits !== null) segments.push({ credits: usage.credits });
+  return segments;
+}
+
+export function formatClaudeUsage(
+  usage: ClaudeUsage,
+  nowMs = Date.now(),
+): string {
+  return formatBalance(claudeUsageToBalance(usage), nowMs);
+}
+
+export async function fetchClaudeUsage(
+  token: string,
+  signal: AbortSignal,
+): Promise<Balance> {
+  const response = await fetch(ANTHROPIC_USAGE_ENDPOINT, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    },
+    signal: timeoutSignal(BALANCE_FETCH_TIMEOUT_MS, signal),
+  });
+  if (!response.ok) {
+    throw new Error(`Claude usage request failed: ${response.status}`);
+  }
+  const usage = parseClaudeUsage(await response.json());
+  if (usage === null) {
+    throw new Error("Claude usage response was invalid");
+  }
+  return claudeUsageToBalance(usage);
+}
+
 const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
   kilo: { fetch: fetchKiloBalance },
   openrouter: { fetch: fetchOpenRouterBalance },
@@ -869,6 +1030,9 @@ const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
   // Both CommandCode transports share one account and one key.
   commandcode: { fetch: fetchCommandcodeBalance },
   "commandcode-anthropic": { fetch: fetchCommandcodeBalance },
+  // Anthropic Pro/Max subscription windows ("Current session", "This week").
+  // API-key auth has no subscription quota, so never fetch it without OAuth.
+  anthropic: { fetch: fetchClaudeUsage, requiresOAuth: true },
 };
 
 // --- Shared balance cache ---------------------------------------------------
@@ -915,7 +1079,9 @@ export function balanceCacheKey(
               : provider === "commandcode" ||
                   provider === "commandcode-anthropic"
                 ? COMMANDCODE_CREDITS_ENDPOINT
-                : provider;
+                : provider === "anthropic"
+                  ? ANTHROPIC_USAGE_ENDPOINT
+                  : provider;
   const fingerprint = createHash("sha256").update(identity).digest("hex");
   return `v2:${provider}:${endpoint}:${fingerprint}`;
 }
