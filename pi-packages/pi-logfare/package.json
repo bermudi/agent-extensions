@@ -1,0 +1,27 @@
+{
+  "name": "pi-logfare",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pi provider package for Logfare (logfare.ai) — registers the provider from its live /v1/models catalog; pi's models-store keeps the last-good list",
+  "main": "extensions/index.ts",
+  "pi": {
+    "extensions": [
+      "extensions/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=1.4.0 <2.0.0"
+  }
+}

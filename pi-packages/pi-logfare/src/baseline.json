@@ -1,0 +1,683 @@
+[
+  {
+    "api": "logfare-decisions",
+    "contextWindow": 32768,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "8ball",
+    "input": [
+      "text"
+    ],
+    "name": "8-Ball",
+    "type": "classifier"
+  },
+  {
+    "api": "logfare-decisions",
+    "contextWindow": 65537,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "clef",
+    "input": [
+      "text",
+      "image"
+    ],
+    "name": "Clef",
+    "type": "classifier"
+  },
+  {
+    "api": "logfare-decisions",
+    "contextWindow": 24576,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "clef-flash",
+    "input": [
+      "text",
+      "image"
+    ],
+    "name": "Clef Flash",
+    "type": "classifier"
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 1048576,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "deepseek-v4-pro-0813",
+    "input": [
+      "text"
+    ],
+    "maxTokens": 16384,
+    "name": "DeepSeek V4 Pro 0813",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": "max",
+      "medium": null,
+      "minimal": null,
+      "off": "none",
+      "xhigh": null
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 1048576,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "deepseek-v4.1-flash-1017",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "DeepSeek V4.1 Flash 1017",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": "max",
+      "medium": null,
+      "minimal": null,
+      "off": "none",
+      "xhigh": null
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens"
+    },
+    "contextWindow": 256000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gemma-4-26b",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "Gemma 4 26B",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 262144,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "glm-5.3",
+    "input": [
+      "text"
+    ],
+    "maxTokens": 16384,
+    "name": "GLM 5.3",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": "max",
+      "medium": null,
+      "minimal": null,
+      "off": null,
+      "xhigh": null
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 1048576,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "glm-5.3-flash",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GLM 5.3 Flash",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": "max",
+      "medium": null,
+      "minimal": null,
+      "off": null,
+      "xhigh": null
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens"
+    },
+    "contextWindow": 1047576,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-4.1",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 4.1",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens"
+    },
+    "contextWindow": 1047576,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-4.1-nano",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 4.1 Nano",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens"
+    },
+    "contextWindow": 128000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-4o",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 4o",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens"
+    },
+    "contextWindow": 128000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-4o-mini",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 4o Mini",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 400000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-5-chat",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT-5 Chat",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": null,
+      "medium": "medium",
+      "minimal": "minimal",
+      "off": null,
+      "xhigh": null
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 400000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-5-chat-2",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 5 Chat 2",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": null,
+      "medium": "medium",
+      "minimal": "minimal",
+      "off": null,
+      "xhigh": null
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 400000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-5-kiara",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 5 Kiara",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": null,
+      "medium": "medium",
+      "minimal": "minimal",
+      "off": null,
+      "xhigh": null
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 400000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-5-mini",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 5 Mini",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": null,
+      "medium": "medium",
+      "minimal": "minimal",
+      "off": null,
+      "xhigh": null
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 400000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-5-nano",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 5 Nano",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": null,
+      "medium": "medium",
+      "minimal": "minimal",
+      "off": null,
+      "xhigh": null
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_completion_tokens"
+    },
+    "contextWindow": 128000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-5.2-chat",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 5.2 Chat",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 400000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-5.2_critique",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 5.2 Critique",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": null,
+      "medium": "medium",
+      "minimal": null,
+      "off": "none",
+      "xhigh": "xhigh"
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 400000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-5.4-mini-kb-curate",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT 5.4 Mini Kb Curate",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": null,
+      "medium": "medium",
+      "minimal": null,
+      "off": "none",
+      "xhigh": "xhigh"
+    }
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens"
+    },
+    "contextWindow": 400000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "gpt-chat-latest",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "GPT Chat Latest",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens"
+    },
+    "contextWindow": 262144,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "kimi-k2.6",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "Kimi K2.6",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": null,
+    "contextWindow": 32768,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "logfare/auto",
+    "input": [
+      "text"
+    ],
+    "maxTokens": 16384,
+    "name": "Logfare Auto",
+    "reasoning": true,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 1000000,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "minimax-m3.1-flash",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "MiniMax M3.1 Flash",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": "high",
+      "low": "low",
+      "max": "max",
+      "medium": "medium",
+      "minimal": null,
+      "off": null,
+      "xhigh": "xhigh"
+    }
+  },
+  {
+    "compat": null,
+    "contextWindow": 32768,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "noctis-auto",
+    "input": [
+      "text"
+    ],
+    "maxTokens": 16384,
+    "name": "Noctis Auto",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": null,
+    "contextWindow": 32768,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "noctis-auto-paid",
+    "input": [
+      "text"
+    ],
+    "maxTokens": 16384,
+    "name": "Noctis Auto Paid",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens"
+    },
+    "contextWindow": 1047576,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "obi2",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "Obi 2",
+    "reasoning": false,
+    "thinkingLevelMap": null
+  },
+  {
+    "compat": {
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": true
+    },
+    "contextWindow": 262144,
+    "cost": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "qwen-3.8-27b",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 16384,
+    "name": "Qwen 3.8 27b",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "high": null,
+      "low": "low",
+      "max": null,
+      "medium": "medium",
+      "minimal": null,
+      "off": "none",
+      "xhigh": "xhigh"
+    }
+  }
+]
