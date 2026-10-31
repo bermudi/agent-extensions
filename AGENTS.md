@@ -57,19 +57,34 @@ pi-packages/
                          # watchdog comparing live credentials vs the displayed cache keys, and its
                          # post-fetch recheck reads the ACTIVE token LAST (commit after that is sync —
                          # never move an await between the final read and the cache commit).
-                         # anthropic (Claude Pro/Max) subscription usage (added 2026-10-31): the footer
-                         # reads GET https://api.anthropic.com/api/oauth/usage with the `anthropic`
-                         # OAuth bearer — the same endpoint Claude Code's own `/usage` panel uses
-                         # (`/api/oauth/usage`, found by `strings` on the native binary; it answers 200
-                         # for a Claude Code token too). Live shape, pinned in provider-balance.test.ts:
+                         # anthropic (Claude Pro/Max) subscription usage (added 2026-10-31). Two provider ids:
+                         # `anthropic` (pi's own OAuth login, "Anthropic (Claude Pro/Max)") and
+                         # `claude-code` (@earendil-works/pi-claude-code, the extension bermudi actually
+                         # uses — models appear as claude-code/claude-*). Both read
+                         # GET https://api.anthropic.com/api/oauth/usage, the endpoint Claude Code's own
+                         # `/usage` panel uses (found via `strings` on the native binary; answers 200 for
+                         # a Claude Code token too). Live shape, pinned in provider-balance.test.ts:
                          # utilization is 0–100 "percent used", resets_at is an ISO-8601 string WITH
                          # microseconds (Date.parse handles it; floor to whole seconds), and the body
                          # carries a long tail of null provider windows — parse defensively. The panel's
                          # "Current session" is five_hour, "This week" is seven_day; Max plans add
                          # seven_day_opus/seven_day_sonnet plus limits[] rows with kind "weekly_scoped"
-                         # (scope.model.display_name labels them). Adapter is requiresOAuth:true — pi's
-                         # anthropic OAuth is "Anthropic (Claude Pro/Max)" and API-key auth has no
-                         # subscription quota, so a key-authenticated session must never fetch it.
+                         # (scope.model.display_name labels them).
+                         # CRITICAL: pi-claude-code holds NO token. Its auth deliberately resolves to the
+                         # sentinel string "external-process" (provider.ts: "never imports Claude Code
+                         # credentials"; the CLI owns login and does the requests), so the registry cannot
+                         # hand the adapter a bearer. fetchClaudeCodeUsage therefore ignores the token arg
+                         # and reads Claude Code's own ambient credential: CLAUDE_CODE_OAUTH_TOKEN if set,
+                         # else <configDir>/.credentials.json → claudeAiOauth.accessToken, config dir =
+                         # PI_CLAUDE_CODE_CONFIG_DIR || CLAUDE_CONFIG_DIR || ~/.claude (mirrors provider.ts).
+                         # That token is read in-process into one Authorization header only — never logged,
+                         # echoed, cached, or returned; errors carry status codes, never credentials.
+                         # Both adapters are requiresOAuth:true (isUsingOAuth = snapshot auth type ===
+                         # "oauth"; pi-claude-code's check() reports "oauth" only for a subscription login,
+                         # so an API-key Claude Code install is skipped). Caveat: the balance cache key for
+                         # claude-code uses the sentinel, so all sessions share one entry — correct while
+                         # one ambient Claude Code login exists per machine, and the next turn_end refresh
+                         # rewrites it after an account switch.
   critique/               # ACTIVE (opt-in): launch the Bun-only Critique TUI from Pi
   council/                # DEVELOPMENT (not linked in .pi/extensions or ~/.pi/agent/extensions as of
                          # 2026-09-29): read-only multi-model design council — /council snapshots the

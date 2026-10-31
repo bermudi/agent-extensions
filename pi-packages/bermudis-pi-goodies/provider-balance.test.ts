@@ -4,12 +4,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
   statSync,
   unlinkSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
@@ -22,9 +23,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import providerBalance, {
   balanceCacheKey,
+  claudeCodeConfigDir,
   claudeUsageToBalance,
   codexQuotaToBalance,
   commandcodeBalanceToBalance,
+  fetchClaudeCodeUsage,
   fetchClaudeUsage,
   fetchOpenAIQuota,
   formatBalance,
@@ -38,6 +41,7 @@ import providerBalance, {
   parseCodexAccountId,
   parseCodexQuota,
   parseCommandcodeBalance,
+  readClaudeCodeCredentials,
   parseKiloBalance,
   parseOpenAIClientId,
   parseOpenRouterCredits,
@@ -2256,6 +2260,187 @@ describe("fetchClaudeUsage", () => {
       ).rejects.toThrow("Claude usage response was invalid");
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("readClaudeCodeCredentials", () => {
+  // Claude Code owns the login for the claude-code provider; the adapter reads
+  // its ambient credential. Tests always point the config dir at a temp
+  // directory so they can never touch the operator's real ~/.claude.
+  function withCredentialFile(
+    contents: string | null,
+    fn: (env: Record<string, string | undefined>) => void,
+  ): void {
+    const directory = mkdtempSync(join(tmpdir(), "claude-cred-test-"));
+    try {
+      if (contents !== null) {
+        writeFileSync(join(directory, ".credentials.json"), contents);
+      }
+      fn({ PI_CLAUDE_CODE_CONFIG_DIR: directory });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  test("reads the subscription token and its expiry", () => {
+    withCredentialFile(
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: "sk-ant-oat-test",
+          expiresAt: 1_800_000_000_000,
+          subscriptionType: "pro",
+        },
+      }),
+      (env) => {
+        expect(readClaudeCodeCredentials(env)).toEqual({
+          accessToken: "sk-ant-oat-test",
+          expiresAt: 1_800_000_000_000,
+        });
+      },
+    );
+  });
+
+  test("honours CLAUDE_CONFIG_DIR and the config-dir precedence", () => {
+    expect(claudeCodeConfigDir({ CLAUDE_CONFIG_DIR: "/tmp/cc" })).toBe(
+      "/tmp/cc",
+    );
+    // The provider's own override wins over the generic one.
+    expect(
+      claudeCodeConfigDir({
+        PI_CLAUDE_CODE_CONFIG_DIR: "/tmp/pi-cc",
+        CLAUDE_CONFIG_DIR: "/tmp/cc",
+      }),
+    ).toBe("/tmp/pi-cc");
+    // Nothing set falls back to Claude Code's default location.
+    expect(claudeCodeConfigDir({})).toBe(join(homedir(), ".claude"));
+  });
+
+  test("prefers an explicit CLAUDE_CODE_OAUTH_TOKEN over the file", () => {
+    withCredentialFile(
+      JSON.stringify({ claudeAiOauth: { accessToken: "from-file" } }),
+      (env) => {
+        expect(
+          readClaudeCodeCredentials({
+            ...env,
+            CLAUDE_CODE_OAUTH_TOKEN: "tok-env",
+          }).accessToken,
+        ).toBe("tok-env");
+      },
+    );
+  });
+
+  test("explains an absent or unusable credential instead of guessing", () => {
+    withCredentialFile(null, (env) => {
+      expect(() => readClaudeCodeCredentials(env)).toThrow(
+        "run `claude auth login`",
+      );
+    });
+    withCredentialFile("not json", (env) => {
+      expect(() => readClaudeCodeCredentials(env)).toThrow("not valid JSON");
+    });
+    withCredentialFile(JSON.stringify({ claudeAiOauth: {} }), (env) => {
+      expect(() => readClaudeCodeCredentials(env)).toThrow(
+        "no subscription token",
+      );
+    });
+    // An API-key-only Claude Code install carries no OAuth block.
+    withCredentialFile(JSON.stringify({ apiKey: "x" }), (env) => {
+      expect(() => readClaudeCodeCredentials(env)).toThrow(
+        "no subscription token",
+      );
+    });
+  });
+});
+
+describe("fetchClaudeCodeUsage", () => {
+  function credentialDir(expiresAt?: number): string {
+    const directory = mkdtempSync(join(tmpdir(), "claude-cred-test-"));
+    writeFileSync(
+      join(directory, ".credentials.json"),
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: "sk-ant-oat-from-claude-code",
+          ...(expiresAt !== undefined ? { expiresAt } : {}),
+        },
+      }),
+    );
+    return directory;
+  }
+
+  test("authenticates with Claude Code's token, not the provider sentinel", async () => {
+    const directory = credentialDir(Date.now() + 3_600_000);
+    const previous = process.env.PI_CLAUDE_CODE_CONFIG_DIR;
+    const originalFetch = globalThis.fetch;
+    const authorizations: Array<string | null> = [];
+    process.env.PI_CLAUDE_CODE_CONFIG_DIR = directory;
+    globalThis.fetch = (async (
+      _input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      authorizations.push(new Headers(init?.headers).get("authorization"));
+      return new Response(
+        JSON.stringify({
+          five_hour: { utilization: 26, resets_at: "2026-10-31T01:50:00Z" },
+          seven_day: { utilization: 4, resets_at: "2026-11-03T07:00:00Z" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      // The registry hands this provider the literal sentinel string; it must
+      // be replaced by Claude Code's real credential.
+      const balance = await fetchClaudeCodeUsage(
+        "external-process",
+        new AbortController().signal,
+      );
+      expect(authorizations).toEqual(["Bearer sk-ant-oat-from-claude-code"]);
+      expect(balance).toEqual([
+        {
+          quota: {
+            remainingPercent: 74,
+            windowSeconds: 18_000,
+            resetAt: 1_793_411_400,
+          },
+        },
+        {
+          quota: {
+            remainingPercent: 96,
+            windowSeconds: 604_800,
+            resetAt: 1_793_689_200,
+          },
+        },
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(directory, { recursive: true, force: true });
+      if (previous === undefined) delete process.env.PI_CLAUDE_CODE_CONFIG_DIR;
+      else process.env.PI_CLAUDE_CODE_CONFIG_DIR = previous;
+    }
+  });
+
+  test("does not send an expired token", async () => {
+    const directory = credentialDir(Date.now() - 60_000);
+    const previous = process.env.PI_CLAUDE_CODE_CONFIG_DIR;
+    const originalFetch = globalThis.fetch;
+    let fetched = false;
+    process.env.PI_CLAUDE_CODE_CONFIG_DIR = directory;
+    globalThis.fetch = (async () => {
+      fetched = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await expect(
+        fetchClaudeCodeUsage("external-process", new AbortController().signal),
+      ).rejects.toThrow("refreshes on Claude Code's next run");
+      expect(fetched).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(directory, { recursive: true, force: true });
+      if (previous === undefined) delete process.env.PI_CLAUDE_CODE_CONFIG_DIR;
+      else process.env.PI_CLAUDE_CODE_CONFIG_DIR = previous;
     }
   });
 });

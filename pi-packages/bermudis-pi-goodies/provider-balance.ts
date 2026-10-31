@@ -24,6 +24,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import {
   writeJsonFileAtomic,
   describeError,
@@ -1016,6 +1017,98 @@ export async function fetchClaudeUsage(
   return claudeUsageToBalance(usage);
 }
 
+// --- Claude Code provider (pi-claude-code) ---------------------------------
+// The `claude-code` provider (@earendil-works/pi-claude-code) does NOT hold a
+// token: its auth resolves to the sentinel string "external-process" because
+// the Claude Code CLI owns the login and performs the requests itself. Pi's
+// registry therefore cannot hand this adapter a usable bearer, so the read
+// resolves Claude Code's own ambient credential instead.
+//
+// That credential is only ever read into this process to become one
+// Authorization header: it is never logged, echoed, cached, or returned. Failing
+// to find it is an expected, reported condition (the session simply shows no
+// Claude balance) — never a silently wrong number.
+
+export function claudeCodeConfigDir(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  // Mirrors the provider's own resolution order (see provider.ts
+  // PROVIDER_ENV_NAMES): PI_CLAUDE_CODE_CONFIG_DIR, then CLAUDE_CONFIG_DIR,
+  // then Claude Code's default.
+  return (
+    env.PI_CLAUDE_CODE_CONFIG_DIR ||
+    env.CLAUDE_CONFIG_DIR ||
+    join(homedir(), ".claude")
+  );
+}
+
+interface ClaudeCodeCredentials {
+  accessToken: string;
+  /** Epoch milliseconds, as Claude Code stores it. */
+  expiresAt?: number;
+}
+
+/**
+ * Claude Code's ambient OAuth credential. `CLAUDE_CODE_OAUTH_TOKEN` (a token
+ * minted by `claude setup-token`) wins when set; otherwise the credential file
+ * Claude Code maintains in its config directory is used.
+ */
+export function readClaudeCodeCredentials(
+  env: Record<string, string | undefined> = process.env,
+): ClaudeCodeCredentials {
+  const fromEnv = env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
+  if (fromEnv) return { accessToken: fromEnv };
+
+  const path = join(claudeCodeConfigDir(env), ".credentials.json");
+  const raw = readRegularJsonFile(path);
+  if (raw === null) {
+    throw new Error(
+      `Claude Code has no readable credential file at ${path}; run \`claude auth login\``,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`Claude Code credential file at ${path} is not valid JSON`);
+  }
+  const oauth = objectProperty(parsed, "claudeAiOauth");
+  const accessToken = stringProperty(oauth, "accessToken");
+  if (!accessToken) {
+    throw new Error(
+      `Claude Code credential file at ${path} has no subscription token; run \`claude auth login\``,
+    );
+  }
+  const expiresAt = numericProperty(oauth, "expiresAt");
+  return {
+    accessToken,
+    ...(expiresAt !== null ? { expiresAt } : {}),
+  };
+}
+
+/**
+ * Balance for the `claude-code` provider. The `token` argument is the registry
+ * sentinel and is deliberately ignored: the real credential comes from Claude
+ * Code, which owns the login.
+ */
+export async function fetchClaudeCodeUsage(
+  _token: string,
+  signal: AbortSignal,
+): Promise<Balance> {
+  const credentials = readClaudeCodeCredentials();
+  // Claude Code refreshes this token itself on its next run. Reporting the
+  // expiry beats sending a stale bearer that can only answer 401.
+  if (
+    credentials.expiresAt !== undefined &&
+    credentials.expiresAt <= Date.now()
+  ) {
+    throw new Error(
+      `Claude Code's OAuth token expired at ${new Date(credentials.expiresAt).toISOString()}; it refreshes on Claude Code's next run`,
+    );
+  }
+  return fetchClaudeUsage(credentials.accessToken, signal);
+}
+
 const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
   kilo: { fetch: fetchKiloBalance },
   openrouter: { fetch: fetchOpenRouterBalance },
@@ -1033,6 +1126,12 @@ const BALANCE_ADAPTERS: Readonly<Record<string, BalanceAdapter>> = {
   // Anthropic Pro/Max subscription windows ("Current session", "This week").
   // API-key auth has no subscription quota, so never fetch it without OAuth.
   anthropic: { fetch: fetchClaudeUsage, requiresOAuth: true },
+  // The pi-claude-code provider delegates login to the Claude Code CLI and
+  // resolves its own auth to a sentinel, so this adapter reads Claude Code's
+  // ambient credential itself. Pi still gates it on OAuth: the provider
+  // reports "oauth" only for a Claude subscription login, so an API-key
+  // Claude Code setup is skipped.
+  "claude-code": { fetch: fetchClaudeCodeUsage, requiresOAuth: true },
 };
 
 // --- Shared balance cache ---------------------------------------------------
@@ -1079,7 +1178,7 @@ export function balanceCacheKey(
               : provider === "commandcode" ||
                   provider === "commandcode-anthropic"
                 ? COMMANDCODE_CREDITS_ENDPOINT
-                : provider === "anthropic"
+                : provider === "anthropic" || provider === "claude-code"
                   ? ANTHROPIC_USAGE_ENDPOINT
                   : provider;
   const fingerprint = createHash("sha256").update(identity).digest("hex");
