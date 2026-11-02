@@ -59,8 +59,10 @@
  *   lines outside the TUI
  * - commit ranges: `/review commit A..B` / `A...B`, `/review range A B`,
  *   and a "Review a commit range" preset with a two-pick range picker
- *   (older start → newer end from recent commits, then `..` vs `...`;
- *   the single-commit selector is pickCommit(), shared by both).
+ *   (older start → newer end from recent commits, then `..` vs `...`; the
+ *   picker only asks `..` vs `...` when the two endpoints diverge, because
+ *   an ancestor start makes both diffs identical — see isAncestorOf; the
+ *   single-commit selector is pickCommit(), shared by both).
  *   parseCommitRange()/buildCommitRange()/commitsNewerThan() are exported;
  *   buildReviewPrompt() lists `git log --oneline <range>` commits when
  *   available and otherwise instructs the agent to run it.
@@ -515,6 +517,29 @@ async function getMergeBase(
 }
 
 /**
+ * Is `ancestor` an ancestor of (or equal to) `descendant`? The range picker
+ * uses this to skip the two-dot/three-dot question when it has only one
+ * answer: for an ancestor start, `git diff A..B` and `git diff A...B` are the
+ * same diff (the merge base is A itself) and the commit list is the same too.
+ *
+ * Any git failure (bad rev, bare repo) reports "no" — err toward asking the
+ * question, never toward silently picking a flavour.
+ */
+async function isAncestorOf(
+  pi: ExtensionAPI,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  const { code } = await pi.exec("git", [
+    "merge-base",
+    "--is-ancestor",
+    ancestor,
+    descendant,
+  ]);
+  return code === 0;
+}
+
+/**
  * Get list of local branches
  */
 async function getLocalBranches(pi: ExtensionAPI): Promise<string[]> {
@@ -781,6 +806,18 @@ export function buildCommitRange(
   const parsed = parseCommitRange(`${from}${threeDot ? "..." : ".."}${to}`);
   return parsed ? { type: "commitRange", ...parsed } : null;
 }
+
+/**
+ * The `..` vs `...` range-type options, in the order the picker offers them.
+ * The leading "Two-dot"/"Three-dot" token is load-bearing: the picker parses
+ * the answer back with startsWith. Only asked when the range's endpoints
+ * diverge (see showCommitRangePicker) — a straight line of commits makes both
+ * forms byte-identical, so the question would have one answer dressed as two.
+ */
+export const RANGE_TYPE_OPTIONS = [
+  "Two-dot (A..B) — compare A and B directly (both sides' changes)",
+  "Three-dot (A...B) — only what B adds since it split from A (PR style)",
+] as const;
 
 /**
  * Parse command arguments for direct invocation.
@@ -1973,15 +2010,11 @@ export default function reviewExtension(pi: ExtensionAPI) {
     return { type: "commit", sha: commit.sha, title: commit.title };
   }
 
-  const RANGE_TYPE_OPTIONS = [
-    "Two-dot (A..B) — direct diff",
-    "Three-dot (A...B) — merge-base diff",
-  ] as const;
-
   /**
    * Range picker: pick the older starting commit (excluded from the range),
-   * then an ending commit from only the commits newer than it, then the
-   * two-dot/three-dot flavour. Cancelling any step returns to the preset menu.
+   * then an ending commit from only the commits newer than it, then — only
+   * when the two endpoints diverge — the two-dot/three-dot flavour.
+   * Cancelling any step returns to the preset menu.
    */
   async function showCommitRangePicker(
     ctx: ExtensionContext,
@@ -2018,6 +2051,16 @@ export default function reviewExtension(pi: ExtensionAPI) {
       "Select ending commit (newer, included in the range)",
     );
     if (!to) return null;
+
+    // Both picks come from one branch's recent history, so the start is
+    // normally an ancestor of the end — and then `A..B` and `A...B` produce
+    // the same diff and the same commit list, so asking which one is a
+    // question with a single answer. Only ask when the endpoints genuinely
+    // diverge (a merge inside the recent history), where the choice changes
+    // what gets reviewed.
+    if (await isAncestorOf(pi, from.sha, to.sha)) {
+      return buildCommitRange(from.sha, to.sha, false);
+    }
 
     const rangeType = await ctx.ui.select("Select range type", [
       ...RANGE_TYPE_OPTIONS,

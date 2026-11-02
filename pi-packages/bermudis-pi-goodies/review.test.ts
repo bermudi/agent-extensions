@@ -17,6 +17,7 @@ import reviewExtension, {
   parseCommitRange,
   parsePrReference,
   parseReviewPaths,
+  RANGE_TYPE_OPTIONS,
   tokenizeArgs,
 } from "./review";
 
@@ -438,7 +439,10 @@ describe("/review commit-range picker (RPC select flow)", () => {
   const LOG =
     "c333333 third commit\nb222222 second commit\na111111 first commit\n";
 
-  function setupPickerHarness(selectQueue: Array<string | undefined>) {
+  function setupPickerHarness(
+    selectQueue: Array<string | undefined>,
+    options: { diverged?: boolean } = {},
+  ) {
     const handlers = new Map<
       string,
       (args: string, ctx: ExtensionCommandContext) => Promise<void>
@@ -462,6 +466,12 @@ describe("/review commit-range picker (RPC select flow)", () => {
       appendEntry: () => {},
       exec: async (_cmd: string, args: string[]) => {
         if (args[0] === "log") return { stdout: LOG, code: 0, stderr: "" };
+        // Ancestry of the two picked commits: default (code 0) means the
+        // start is an ancestor of the end, the case that skips the
+        // two-dot/three-dot question.
+        if (args[0] === "merge-base" && args[1] === "--is-ancestor") {
+          return { stdout: "", code: options.diverged ? 1 : 0, stderr: "" };
+        }
         if (args[0] === "status") return { stdout: "", code: 0, stderr: "" };
         if (args[0] === "branch" && args[1] === "--show-current")
           return { stdout: "main\n", code: 0, stderr: "" };
@@ -507,13 +517,16 @@ describe("/review commit-range picker (RPC select flow)", () => {
   }
 
   test("two picks + three-dot choice reviews the assembled range", async () => {
-    const harness = setupPickerHarness([
-      "Review a commit range (A..B or A...B)",
-      "a111111 first commit",
-      "c333333 third commit",
-      "Three-dot (A...B) — merge-base diff",
-      "Current session",
-    ]);
+    const harness = setupPickerHarness(
+      [
+        "Review a commit range (A..B or A...B)",
+        "a111111 first commit",
+        "c333333 third commit",
+        RANGE_TYPE_OPTIONS[1],
+        "Current session",
+      ],
+      { diverged: true },
+    );
     await harness.run();
 
     expect(harness.selectCalls.map((c) => c.title)).toEqual([
@@ -546,6 +559,26 @@ describe("/review commit-range picker (RPC select flow)", () => {
       "Starting commit is the newest commit — pick an older starting commit.",
     );
     expect(harness.notifications).toContain("Review cancelled");
+  });
+
+  test("ancestor endpoints skip the range-type question (identical diffs)", async () => {
+    const harness = setupPickerHarness([
+      "Review a commit range (A..B or A...B)",
+      "a111111 first commit",
+      "c333333 third commit",
+      "Current session",
+    ]);
+    await harness.run();
+
+    expect(harness.selectCalls.map((c) => c.title)).toEqual([
+      "Select a review preset",
+      "Select starting commit (older, excluded from the range)",
+      "Select ending commit (newer, included in the range)",
+      "Start review in:",
+    ]);
+    expect(harness.sent).toHaveLength(1);
+    expect(harness.sent[0]).toContain("commit range a111111..c333333");
+    expect(harness.sent[0]).not.toContain("commit range a111111...c333333");
   });
 });
 
