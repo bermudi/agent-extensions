@@ -549,13 +549,19 @@ in a separate harness, through a `sidekick(message, block?)` tool. Design:
 | piz | `GLM-5.3`, `GLM-5.3-Flash` | private `zcode.cjs app-server` core on a temp Unix socket (ZCode NDJSON) | mode `yolo` |
 | devin | `swe-2-medium` | `devin acp --model swe-2-medium` (ACP over stdio) | mode `bypass` |
 
-- **One sidekick per pi session; the on/off choice is session-wide.** Harness,
-  model, and session id persist in a `fusion-state` entry; resume reattaches
-  to the same sidekick session. The latest explicit `/fusion` choice survives
-  conversation tree navigation and reloads — navigating the lead conversation
-  does not rewind the sidekick's work or memory. Fork → fresh sidekick. Failed
-  reattach → fresh sidekick plus a "NEW sidekick, re-brief fully" note to the
-  lead.
+- **One sidekick per pi session; the on/off choice follows the branch.**
+  Harness, model, and session id persist in a `fusion-state` entry; resume
+  reattaches to the same sidekick session. `/tree` navigation restores the
+  choice the target point recorded (like pi's tool loadout): going back past
+  `/fusion` turns it off, going back into a fusion stretch turns it on and
+  reattaches the latest sidekick for that harness/model; each change shows a
+  notice. Exception — noise carries over: if no assistant turn *completed*
+  after the change on the branch you left (only errors/aborts), the live choice
+  stays and is recorded on the new branch, so retrying a failed prompt after
+  `/fusion` keeps the sidekick. Navigation that turns fusion off stops a
+  running handoff. Navigation never rewinds the sidekick's memory (or the files
+  on disk). Fork → fresh sidekick. Failed reattach → fresh sidekick plus a "NEW
+  sidekick, re-brief fully" note to the lead.
 - **Lead prompt stays fixed** (cache). Which sidekick is attached goes in an
   appended `fusion-note` message, never the system prompt. The doctrine rides
   the first handoff only.

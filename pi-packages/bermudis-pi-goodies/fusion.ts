@@ -11,6 +11,13 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+  STATE_ENTRY,
+  decideTreeState,
+  knownSidekick,
+  latestState,
+  type FusionState,
+} from "./fusion-branch.ts";
 import { connectDevin } from "./fusion-devin.ts";
 import { createLogger, saveReport } from "./fusion-log.ts";
 import { connectPiz } from "./fusion-piz.ts";
@@ -23,6 +30,7 @@ import {
   firstHandoff,
   leadUpdate,
   sidekickAttachedNote,
+  treeRestoredNote,
 } from "./fusion-prompts.ts";
 import {
   HARNESS_LABELS,
@@ -38,23 +46,12 @@ import {
 } from "./fusion-types.ts";
 
 const TOOL_NAME = "sidekick";
-const STATE_ENTRY = "fusion-state";
 const REPORT_MESSAGE = "fusion-report";
 const NOTE_MESSAGE = "fusion-note";
 const MAX_REPORT_CHARS = 40_000;
 const STALE_START_MESSAGE =
   "Fusion changed while the sidekick was starting; the start was discarded. Retry if fusion is still on.";
 const EDIT_TOOLS = new Set(["edit", "write", "apply_patch"]);
-
-interface FusionState {
-  enabled: boolean;
-  harness?: HarnessId;
-  model?: string;
-  /** Harness-side session id; lets a resumed pi session reattach to the same sidekick. */
-  sidekickSessionId?: string;
-  /** The sidekick already received its doctrine (sent with the first handoff only). */
-  sidekickBriefed?: boolean;
-}
 
 interface RunningHandoff {
   id: number;
@@ -724,16 +721,16 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     // fork branch below queues this session's own note after this clear.
     pendingNote = undefined;
     await disposeConnector();
-    state = { enabled: false };
-    for (const entry of ctx.sessionManager.getEntries()) {
-      if (
-        entry.type === "custom" &&
-        entry.customType === STATE_ENTRY &&
-        isFusionState(entry.data)
-      ) {
-        state = { ...entry.data };
-      }
-    }
+    // Branch-scoped: the state the current point of the conversation records;
+    // the sidekick session is the latest one the whole pi session knows for
+    // that choice (fusion-branch.ts).
+    const sm = ctx.sessionManager;
+    state = latestState(sm.getBranch());
+    if (state.enabled)
+      state = {
+        ...state,
+        ...knownSidekick(sm.getEntries(), state),
+      };
     if (state.enabled && event.reason === "fork") {
       // The parent session may still drive the original sidekick; a fork gets its own.
       state.sidekickSessionId = undefined;
@@ -745,23 +742,78 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     setStatus();
   });
 
-  pi.on("session_tree", (_event, ctx) => {
+  pi.on("session_tree", async (event, ctx) => {
     uiCtx = ctx;
-    setToolActive(state.enabled);
-    persist();
-    if (state.enabled) {
-      pendingNote = pendingNote ?? TREE_NAVIGATION_NOTE;
+    const sm = ctx.sessionManager;
+    const pathTo = (leafId: string | null) =>
+      leafId === null ? [] : sm.getBranch(leafId);
+    const before = state;
+    const decision = decideTreeState(
+      before,
+      pathTo(event.oldLeafId),
+      pathTo(event.newLeafId),
+    );
+    let stoppedHandoff: number | undefined;
+    let disposal: Promise<void> | undefined;
+    if (decision.kind === "switched") {
+      // The target point's own state wins: stop the live sidekick (like
+      // /fusion off or a swap) and adopt that point's choice. State is
+      // replaced synchronously; the dispose is awaited at the end, as in
+      // turnOff.
+      stoppedHandoff = running?.id;
+      if (before.enabled) disposal = disposeConnector();
+      state = decision.target.enabled
+        ? {
+            ...decision.target,
+            ...knownSidekick(sm.getEntries(), decision.target),
+          }
+        : { enabled: false };
+      pendingNote = state.enabled
+        ? treeRestoredNote(choiceLabel(state))
+        : undefined;
     } else {
-      pendingNote = undefined;
+      if (decision.kind === "carried") persist(); // record it on the new branch
+      pendingNote = state.enabled
+        ? (pendingNote ?? TREE_NAVIGATION_NOTE)
+        : undefined;
     }
+    // Pi restored the target branch's tool loadout; re-apply ours either way.
+    setToolActive(state.enabled);
     setStatus();
+    const notice = treeNotice(decision.kind, before, state, stoppedHandoff);
+    if (notice && ctx.hasUI) ctx.ui.notify(notice, "info");
     log.info("fusion.tree_synced", {
+      decision: decision.kind,
       enabled: state.enabled,
       harness: state.harness,
       model: state.model,
       sessionId: state.sidekickSessionId,
+      stoppedHandoff,
     });
+    await disposal;
   });
+
+  const treeNotice = (
+    kind: "same" | "carried" | "switched",
+    before: FusionState,
+    after: FusionState,
+    stoppedHandoff: number | undefined,
+  ): string | undefined => {
+    if (kind === "same") return undefined;
+    if (kind === "carried")
+      return after.enabled
+        ? `Fusion stays on (${choiceLabel(after)}): nothing completed after /fusion on the branch you left.`
+        : "Fusion stays off: nothing completed after /fusion off on the branch you left.";
+    const stopped =
+      stoppedHandoff !== undefined
+        ? ` Handoff #${stoppedHandoff} stopped.`
+        : "";
+    if (!after.enabled)
+      return `Fusion off: this point of the conversation had no sidekick. /fusion re-enables it.${stopped}`;
+    return before.enabled
+      ? `Fusion switched to ${choiceLabel(after)}: the sidekick this point of the conversation had.${stopped}`
+      : `Fusion on (${choiceLabel(after)}): this point of the conversation had the sidekick enabled. /fusion off disables it.`;
+  };
 
   pi.on("session_shutdown", async () => {
     await disposeConnector();
@@ -785,16 +837,4 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
       content: [...event.content, { type: "text", text: DIRECT_EDIT_NUDGE }],
     };
   });
-}
-
-function isFusionState(value: unknown): value is FusionState {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  if (typeof v.enabled !== "boolean") return false;
-  if (!v.enabled) return true;
-  return (
-    (v.harness === "piz" || v.harness === "devin") &&
-    typeof v.model === "string" &&
-    MODEL_CHOICES.some((c) => c.harness === v.harness && c.model === v.model)
-  );
 }

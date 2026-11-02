@@ -69,11 +69,16 @@ pi-packages/
                          # the slot (hoist yields). Protocol facts: Devin ACP swe-2-medium = model
                          # swe-2-high + thought_level medium. Live check:
                          # scripts/fusion-live-smoke.ts (real model turns); unit tests use fake connectors.
-                         # Fusion on/off and pairing are session-scoped: restore latest valid
-                         # fusion-state from getEntries, not getBranch; session_tree re-applies
-                         # tool activation after Pi restores the branch loadout without replacing
-                         # the live sidekick. Conversation navigation never rewinds sidekick
-                         # memory; forks clear the parent sidekick id.
+                         # Fusion on/off is BRANCH-scoped (fusion-branch.ts, 2026-11-02, reversing the
+                         # session-wide 49bfd6b at bermudi's call): state = latest fusion-state on
+                         # getBranch(leaf); sidekick session id = latest recorded anywhere (getEntries)
+                         # for that harness+model. session_tree: target point's state wins, EXCEPT a
+                         # change on the abandoned tail with no completed assistant turn after it
+                         # (stopReason stop/toolUse/length; error/aborted = noise) carries over and is
+                         # persisted onto the new branch. Always re-apply tool activation there — pi
+                         # restores the branch loadout first, and a badge-on/tool-missing mismatch is
+                         # the original bug (model searched for the tool, found nothing). Navigation
+                         # never rewinds sidekick memory; forks clear the parent sidekick id.
                          # anthropic (Claude Pro/Max) subscription usage (added 2026-10-31). Two provider ids:
                          # `anthropic` (pi's own OAuth login, "Anthropic (Claude Pro/Max)") and
                          # `claude-code` (@earendil-works/pi-claude-code, the extension bermudi actually

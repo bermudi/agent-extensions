@@ -46,6 +46,7 @@ function makePi() {
     { handler: (args: string, ctx: unknown) => Promise<void> }
   >();
   const entries: Entry[] = [];
+  let appendHook: ((customType: string, data: unknown) => void) | undefined;
   const sent: {
     message: { customType: string; content: string };
     options: unknown;
@@ -68,6 +69,7 @@ function makePi() {
     },
     appendEntry(customType: string, data: unknown) {
       entries.push({ type: "custom", customType, data });
+      appendHook?.(customType, data);
     },
     sendMessage(
       message: { customType: string; content: string },
@@ -94,6 +96,11 @@ function makePi() {
     sent,
     emit,
     active: () => active,
+    setAppendHook: (
+      hook: ((customType: string, data: unknown) => void) | undefined,
+    ) => {
+      appendHook = hook;
+    },
   };
 }
 
@@ -632,12 +639,27 @@ describe("persistence", () => {
   });
 
   for (const reason of ["resume", "reload"]) {
-    test(`the latest fusion choice across the whole session wins at session_start (${reason})`, async () => {
+    test(`session_start restores the current branch's choice, not another branch's (${reason})`, async () => {
+      const s = setup();
+      // Enabled only on a branch the current point is not on: stays off.
+      await s.emit(
+        "session_start",
+        { reason },
+        makeCtx([], [], [enabledEntry("elsewhere")]).ctx,
+      );
+      expect(s.active()).not.toContain("sidekick");
+    });
+
+    test(`session_start reattaches the latest sidekick the session recorded for the branch's choice (${reason})`, async () => {
       const s = setup();
       await s.emit(
         "session_start",
         { reason },
-        makeCtx([], [], [enabledEntry("old-1")]).ctx,
+        makeCtx(
+          [],
+          [enabledEntry("old-1")],
+          [enabledEntry("old-1"), enabledEntry("newer")],
+        ).ctx,
       );
       expect(s.active()).toContain("sidekick");
       const p = s
@@ -646,13 +668,12 @@ describe("persistence", () => {
           cwd: "/tmp",
         });
       await flush();
-      expect(s.calls.at(-1)!.resumeSessionId).toBe("old-1");
+      expect(s.calls.at(-1)!.resumeSessionId).toBe("newer");
       expect(s.made[0]!.prompts[0]).toBe("continue");
       s.made[0]!.finish("ok");
       expect(text(await p)).not.toMatch(/NEW sidekick/);
     });
   }
-
   test("unknown harness/model in saved state is ignored (stays off)", async () => {
     const s = setup();
     const entries: Entry[] = [
@@ -671,42 +692,268 @@ describe("persistence", () => {
   });
 });
 
+interface TreeEntry {
+  id: string;
+  parentId: string | null;
+  type: string;
+  customType?: string;
+  data?: unknown;
+  message?: { role: string; stopReason?: string };
+}
+
+/** A pi session tree: entries hang off the leaf; navigation moves the leaf. */
+class FakeSession {
+  entries: TreeEntry[] = [];
+  leaf: string | null = null;
+  private n = 0;
+  add(entry: Omit<TreeEntry, "id" | "parentId">): string {
+    const id = `e${++this.n}`;
+    this.entries.push({ ...entry, id, parentId: this.leaf });
+    this.leaf = id;
+    return id;
+  }
+  user(): string {
+    return this.add({ type: "message", message: { role: "user" } });
+  }
+  assistant(stopReason = "stop"): string {
+    return this.add({
+      type: "message",
+      message: { role: "assistant", stopReason },
+    });
+  }
+  /** A completed exchange; returns the assistant entry id. */
+  turn(): string {
+    this.user();
+    return this.assistant();
+  }
+  parentOf(id: string): string | null {
+    return this.entries.find((e) => e.id === id)!.parentId;
+  }
+  branch(fromId: string | null): TreeEntry[] {
+    const path: TreeEntry[] = [];
+    let id = fromId;
+    while (id !== null) {
+      const entry = this.entries.find((e) => e.id === id)!;
+      path.unshift(entry);
+      id = entry.parentId;
+    }
+    return path;
+  }
+  manager() {
+    return {
+      getBranch: (fromId?: string) => this.branch(fromId ?? this.leaf),
+      getEntries: () => [...this.entries],
+      getLeafId: () => this.leaf,
+    };
+  }
+  states(): TreeEntry[] {
+    return this.entries.filter((e) => e.customType === "fusion-state");
+  }
+}
+
 describe("tree navigation", () => {
   const cwd = { cwd: "/tmp" };
-  const navigate = (s: ReturnType<typeof setup>, ctx: unknown) =>
-    s.emit(
-      "session_tree",
-      { type: "session_tree", newLeafId: "n2", oldLeafId: "n1" },
-      ctx,
-    );
 
-  test("navigation reapplies the tool loadout, keeps the live sidekick, and snapshots state onto the branch", async () => {
+  /** setup() whose appendEntry writes into a session tree. */
+  const treeSetup = () => {
     const s = setup();
+    const session = new FakeSession();
+    s.setAppendHook((customType, data) =>
+      session.add({ type: "custom", customType, data }),
+    );
+    // Like pi: navigating moves the leaf, restores the branch's tool loadout
+    // (here: one without the sidekick, as in the bug report), then fires
+    // session_tree.
+    const navigate = async (to: string | null) => {
+      const oldLeafId = session.leaf;
+      session.leaf = to;
+      s.pi.setActiveTools(["read", "bash", "grep"]);
+      const c = makeCtx([]);
+      const ctx = { ...c.ctx, sessionManager: session.manager() };
+      await s.emit(
+        "session_tree",
+        { type: "session_tree", newLeafId: to, oldLeafId },
+        ctx,
+      );
+      return c;
+    };
+    const resume = () =>
+      s.emit(
+        "session_start",
+        { reason: "resume" },
+        { ...makeCtx([]).ctx, sessionManager: session.manager() },
+      );
+    const nextNote = async () =>
+      (
+        (await s.emit("before_agent_start", {}, {})) as
+          { message?: { content: string } } | undefined
+      )?.message?.content;
+    return { s, session, navigate, resume, nextNote };
+  };
+
+  test("navigating to a point before /fusion turns it off, with a notice", async () => {
+    const { s, session, navigate, resume, nextNote } = treeSetup();
+    const before = session.turn();
     await s.run("", ["Devin (SWE-2)"]);
     const sk = s.made[0]!;
+    await nextNote(); // the attach note rode the next run
+    session.turn();
+    const statesBefore = session.states().length;
+
+    const nav = await navigate(before);
+    expect(s.active()).not.toContain("sidekick");
+    expect(s.active()).toContain("grep");
+    expect(sk.disposed).toBe(true);
+    expect(nav.statuses.get("fusion")).toBeUndefined();
+    expect(nav.notes.at(-1)!.msg).toMatch(
+      /Fusion off: this point of the conversation had no sidekick/,
+    );
+    expect(await nextNote()).toBeUndefined();
+    // The target's own state needs no snapshot.
+    expect(session.states()).toHaveLength(statesBefore);
+    // And it stays off at resume from here.
+    await resume();
+    expect(s.active()).not.toContain("sidekick");
+  });
+
+  test("navigating to the root of a session that enabled fusion later turns it off", async () => {
+    const { s, session, navigate } = treeSetup();
+    await s.run("", ["Devin (SWE-2)"]);
+    session.turn();
+    await navigate(null);
+    expect(s.active()).not.toContain("sidekick");
+  });
+
+  for (const stopReason of ["error", "aborted"]) {
+    test(`/fusion after a failed (${stopReason}) prompt carries over when that prompt is retried`, async () => {
+      const { s, session, navigate, resume } = treeSetup();
+      session.turn();
+      const failedPrompt = session.user();
+      session.assistant(stopReason);
+      await s.run("", ["Devin (SWE-2)"]);
+      const sk = s.made[0]!;
+
+      // Selecting a user message in /tree puts the leaf on its parent.
+      const nav = await navigate(session.parentOf(failedPrompt));
+      expect(s.active()).toContain("sidekick");
+      expect(sk.disposed).toBe(false);
+      expect(nav.statuses.get("fusion")).toBe("side: SWE-2 Medium");
+      expect(nav.notes.at(-1)!.msg).toMatch(/Fusion stays on \(SWE-2 Medium\)/);
+      // Recorded on the new branch, so a resume from here keeps it.
+      const snapshot = session.states().at(-1)!;
+      expect(snapshot.parentId).toBe(session.parentOf(failedPrompt));
+      expect(snapshot.data).toMatchObject({
+        enabled: true,
+        sidekickSessionId: sk.sessionId,
+      });
+      await resume();
+      expect(s.active()).toContain("sidekick");
+      const p = s
+        .tool()
+        .execute("t", { message: "go" }, undefined, undefined, cwd);
+      await flush();
+      expect(s.calls.at(-1)!.resumeSessionId).toBe(sk.sessionId);
+      s.made.at(-1)!.finish("ok");
+      await p;
+    });
+
+    test(`a failed (${stopReason}) turn after /fusion is noise too`, async () => {
+      const { s, session, navigate } = treeSetup();
+      const before = session.turn();
+      await s.run("", ["Devin (SWE-2)"]);
+      session.user();
+      session.assistant(stopReason);
+      await navigate(before);
+      expect(s.active()).toContain("sidekick");
+      expect(s.made[0]!.disposed).toBe(false);
+    });
+  }
+
+  test("an explicit off with nothing completed after it stays off", async () => {
+    const { s, session, navigate } = treeSetup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const last = session.turn();
+    await s.run("off", []);
+    const nav = await navigate(last);
+    expect(s.active()).not.toContain("sidekick");
+    expect(nav.notes.at(-1)!.msg).toMatch(/Fusion stays off/);
+    expect(session.states().at(-1)!.data).toEqual({ enabled: false });
+    expect(s.calls).toHaveLength(1);
+  });
+
+  test("navigating back to a fusion point after real turns with it off re-enables it and reattaches the sidekick", async () => {
+    const { s, session, navigate, nextNote } = treeSetup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const sk = s.made[0]!;
+    await nextNote();
+    const onPoint = session.turn();
+    await s.run("off", []);
+    session.turn();
+
+    const nav = await navigate(onPoint);
+    expect(s.active()).toContain("sidekick");
+    expect(nav.statuses.get("fusion")).toBe("side: SWE-2 Medium");
+    expect(nav.notes.at(-1)!.msg).toMatch(/Fusion on \(SWE-2 Medium\)/);
+    expect(await nextNote()).toMatch(/restored by navigation/);
+    const p = s
+      .tool()
+      .execute("t", { message: "go" }, undefined, undefined, cwd);
+    await flush();
+    expect(s.calls.at(-1)!.resumeSessionId).toBe(sk.sessionId);
+    s.made.at(-1)!.finish("ok");
+    expect(text(await p)).not.toMatch(/NEW sidekick/);
+  });
+
+  test("navigating to before a sidekick swap switches back to the earlier sidekick", async () => {
+    const { s, session, navigate } = treeSetup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const devinPoint = session.turn();
+    await s.run("", ["piz (GLM coding plan)", "GLM-5.3"]);
+    const piz = s.made.at(-1)!;
+    expect(piz.harness).toBe("piz");
+    session.turn();
+
+    const nav = await navigate(devinPoint);
+    expect(piz.disposed).toBe(true);
+    expect(nav.statuses.get("fusion")).toBe("side: SWE-2 Medium");
+    expect(nav.notes.at(-1)!.msg).toMatch(/Fusion switched to SWE-2 Medium/);
+    const p = s
+      .tool()
+      .execute("t", { message: "go" }, undefined, undefined, cwd);
+    await flush();
+    expect(s.calls.at(-1)!.resumeSessionId).toBe(s.made[0]!.sessionId);
+    s.made.at(-1)!.finish("ok");
+    await p;
+  });
+
+  test("navigation within the fusion era reapplies the tool, keeps the live sidekick, and writes nothing", async () => {
+    const { s, session, navigate, nextNote } = treeSetup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const sk = s.made[0]!;
+    await nextNote();
+    const early = session.turn();
     const h = s
       .tool()
       .execute("t1", { message: "job" }, undefined, undefined, cwd);
     await flush();
     sk.finish("done");
     await h;
-    await s.emit("before_agent_start", {}, {});
-    s.pi.setActiveTools(["read", "bash", "grep"]);
-    const treeCtx = makeCtx([]);
-    await navigate(s, treeCtx.ctx);
+    session.turn();
+    const statesBefore = session.states().length;
+
+    const nav = await navigate(early);
     expect(s.active()).toContain("sidekick");
     expect(s.active()).toContain("grep");
     expect(s.calls).toHaveLength(1);
     expect(sk.disposed).toBe(false);
-    const saved = s.entries
-      .filter((e) => e.customType === "fusion-state")
-      .at(-1)!.data;
-    expect(saved).toMatchObject({
-      enabled: true,
-      sidekickSessionId: sk.sessionId,
-      sidekickBriefed: true,
-    });
-    expect(s.events.some((e) => e.event === "fusion.tree_synced")).toBe(true);
+    expect(session.states()).toHaveLength(statesBefore);
+    expect(nav.notes).toHaveLength(0);
+    expect(nav.statuses.get("fusion")).toBe("side: SWE-2 Medium");
+    expect(
+      s.events.some(
+        (e) => e.event === "fusion.tree_synced" && e.data?.decision === "same",
+      ),
+    ).toBe(true);
     const p = s
       .tool()
       .execute("t2", { message: "more" }, undefined, undefined, cwd);
@@ -715,83 +962,60 @@ describe("tree navigation", () => {
     expect(sk.prompts[1]).toBe("more");
     sk.finish("more done");
     await p;
-    expect(treeCtx.statuses.get("fusion")).toBe("side: SWE-2 Medium");
-    const note = (await s.emit("before_agent_start", {}, {})) as {
-      message?: { content: string };
-    };
-    expect(note.message?.content).toBe(TREE_NAVIGATION_NOTE);
-    expect(await s.emit("before_agent_start", {}, {})).toBeUndefined();
+    expect(await nextNote()).toBe(TREE_NAVIGATION_NOTE);
+    expect(await nextNote()).toBeUndefined();
   });
 
-  test("an explicit off survives navigation into a branch whose recorded state is on, and wins at restore", async () => {
-    const s = setup();
-    await s.run("", ["Devin (SWE-2)"]);
-    await s.run("off", []);
-    const sk = s.made[0]!;
-    s.pi.setActiveTools(["read", "bash", "sidekick", "grep"]);
-    const treeCtx = makeCtx([], [enabledEntry("historic")]);
-    await navigate(s, treeCtx.ctx);
-    expect(s.active()).not.toContain("sidekick");
-    expect(s.active()).toContain("grep");
-    expect(s.calls).toHaveLength(1);
-    expect(sk.disposed).toBe(true);
-    expect(s.entries.at(-1)!.data).toEqual({ enabled: false });
-    expect(treeCtx.statuses.get("fusion")).toBeUndefined();
-    expect(await s.emit("before_agent_start", {}, {})).toBeUndefined();
-
-    const s2 = setup();
-    await s2.emit(
-      "session_start",
-      { reason: "resume" },
-      makeCtx(
-        [],
-        [enabledEntry("old")],
-        [
-          enabledEntry("old"),
-          {
-            type: "custom",
-            customType: "fusion-state",
-            data: { enabled: false },
-          },
-        ],
-      ).ctx,
-    );
-    expect(s2.active()).not.toContain("sidekick");
-  });
-
-  test("navigation during a pending background handoff neither cancels nor double-delivers it", async () => {
-    const s = setup();
+  test("a pending background handoff survives navigation that keeps fusion on, delivered once", async () => {
+    const { s, session, navigate } = treeSetup();
     await s.run("", ["Devin (SWE-2)"]);
     const sk = s.made[0]!;
+    const early = session.turn();
     await s
       .tool()
       .execute("t", { message: "bg", block: false }, undefined, undefined, cwd);
-    const treeCtx = makeCtx([]);
-    s.pi.setActiveTools(["read", "bash"]);
-    await navigate(s, treeCtx.ctx);
+    session.turn();
+    const nav = await navigate(early);
     expect(sk.disposed).toBe(false);
     expect(s.active()).toContain("sidekick");
-    expect(treeCtx.statuses.get("fusion")).toBe("side: SWE-2 Medium ⏳");
+    expect(nav.statuses.get("fusion")).toBe("side: SWE-2 Medium ⏳");
     sk.finish("bg done");
     await flush();
     await flush();
     expect(s.sent).toHaveLength(1);
     expect(s.sent[0]!.message.content).toContain("bg done");
-    expect(treeCtx.statuses.get("fusion")).toBe("side: SWE-2 Medium");
+    expect(nav.statuses.get("fusion")).toBe("side: SWE-2 Medium");
   });
 
-  test("a queued 'NEW sidekick' note survives the tree sync instead of being overwritten", async () => {
-    const s = setup();
+  test("navigation that turns fusion off stops a running handoff and says so; its report never lands", async () => {
+    const { s, session, navigate } = treeSetup();
+    const before = session.turn();
     await s.run("", ["Devin (SWE-2)"]);
-    await navigate(s, makeCtx([]).ctx);
-    const note = (await s.emit("before_agent_start", {}, {})) as {
-      message?: { content: string };
-    };
-    expect(note.message?.content).toMatch(/NEW sidekick with no memory/);
-    expect(await s.emit("before_agent_start", {}, {})).toBeUndefined();
+    const sk = s.made[0]!;
+    session.turn();
+    await s
+      .tool()
+      .execute("t", { message: "bg", block: false }, undefined, undefined, cwd);
+    const nav = await navigate(before);
+    expect(sk.disposed).toBe(true);
+    expect(nav.notes.at(-1)!.msg).toMatch(/Handoff #1 stopped/);
+    sk.finish("late");
+    await flush();
+    await flush();
+    expect(s.sent).toHaveLength(0);
+  });
+
+  test("a queued 'NEW sidekick' note survives a navigation that keeps fusion on", async () => {
+    const { s, session, navigate, nextNote } = treeSetup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const onPoint = session.leaf;
+    session.user();
+    session.assistant("error");
+    await navigate(onPoint);
+    expect(await nextNote()).toMatch(/NEW sidekick with no memory/);
+    expect(await nextNote()).toBeUndefined();
   });
 });
-
 describe("direct-edit nudge", () => {
   test("appended once per lead run, only while fusion is on", async () => {
     const s = setup();

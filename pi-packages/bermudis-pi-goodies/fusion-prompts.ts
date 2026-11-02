@@ -31,6 +31,11 @@ export const SIDEKICK_TOOL_DESCRIPTION = [
 export const TREE_NAVIGATION_NOTE =
   "Fusion remains enabled after conversation navigation. Use the `sidekick` tool for handoffs; /fusion is the command that configures it. The sidekick retains its existing session and memory: navigating the lead conversation does not rewind its work.";
 
+/** Navigation landed on a point whose recorded fusion state is on (it was off, or another sidekick, before). */
+export function treeRestoredNote(label: string): string {
+  return `Fusion is enabled at this point of the conversation (restored by navigation): sidekick ${label}. Use the \`sidekick\` tool for handoffs; /fusion is the command that configures it. If it reattaches, it keeps its existing session and memory, including work from the branch the user navigated away from: navigation does not rewind its work or the files on disk.`;
+}
+
 /** Prepended to the very first handoff of a sidekick session. */
 export const SIDEKICK_DOCTRINE = `You are a sidekick: a hands-on coding agent working for a lead agent across many handoffs in one session. The lead talks to the user; you never do. You share the machine and repos with the lead; your shell sessions are your own.
 
