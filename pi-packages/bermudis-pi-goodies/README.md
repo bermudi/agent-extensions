@@ -310,15 +310,9 @@ carries nothing beyond the identity itself: no dedicated section tag, no
 explanation. Pi diffs prompt sections between runs, so a mid-session model
 switch (`/model`, Ctrl+P) re-sends just the rules section with the new
 identity, and the normal prompt-cache flow stays intact. Runs with no
-active model get the line removed rather than a stale identity.
-
-It mutates the structured prompt sections pi exposes to extensions on
-`before_agent_start` — the path pi recommends — instead of replacing the
-prompt. Pi diffs sections between runs and appends only the delta, so a
-mid-session model switch (`/model`, Ctrl+P) tells the new model its
-identity in one line without re-sending the whole prompt, and the normal
-prompt-cache flow stays intact. Runs with no active model get the section
-removed rather than a stale identity.
+active model get the line removed rather than a stale identity. The change
+is made through the structured prompt sections pi exposes to extensions on
+`before_agent_start`, never by rewriting the prompt.
 
 One known window (pi 0.99.x; fixed upstream in 1.4.0): turns triggered by
 extensions (`sendMessage` with `triggerTurn`) don't fire

@@ -14,7 +14,7 @@ pi -ne -e /home/daniel/build/agent-extensions/pi-packages/fusion/index.ts
 ## Use
 
 - `/fusion` — pick a harness, then a model (piz only). Enables the `sidekick` tool.
-- `/fusion status` — current sidekick, session id, context use.
+- `/fusion status` — current sidekick, session id, last reported context use.
 - `/fusion off` — stops the sidekick and removes the tool.
 
 Without `/fusion` the tool is not active (`defaultActive: false`) and refuses calls.
@@ -24,8 +24,10 @@ Without `/fusion` the tool is not active (`defaultActive: false`) and refuses ca
 | piz | `GLM-5.3`, `GLM-5.3-Flash` | private `zcode.cjs app-server` core on a temp Unix socket (ZCode NDJSON) | mode `yolo` |
 | devin | `swe-2-medium` | `devin acp --model swe-2-medium` (ACP over stdio) | mode `bypass` |
 
-Push and PR restrictions are prompt-only (the sidekick doctrine). Every shell
-command the sidekick runs is logged.
+Push and PR restrictions are prompt-only (the sidekick doctrine). `fusion.log`
+records lifecycle and usage metadata only — never shell commands, briefs, or
+tool inputs; tool activity reaches the lead as transient progress and is not
+persisted.
 
 ## Behavior
 
