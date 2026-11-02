@@ -826,7 +826,7 @@ describe("tree navigation", () => {
 
   for (const stopReason of ["error", "aborted"]) {
     test(`/fusion after a failed (${stopReason}) prompt carries over when that prompt is retried`, async () => {
-      const { s, session, navigate, resume } = treeSetup();
+      const { s, session, navigate, resume, nextNote } = treeSetup();
       session.turn();
       const failedPrompt = session.user();
       session.assistant(stopReason);
@@ -839,6 +839,9 @@ describe("tree navigation", () => {
       expect(sk.disposed).toBe(false);
       expect(nav.statuses.get("fusion")).toBe("side: SWE-2 Medium");
       expect(nav.notes.at(-1)!.msg).toMatch(/Fusion stays on \(SWE-2 Medium\)/);
+      // No run consumed /fusion's attach note yet; it is still the one queued.
+      expect(await nextNote()).toMatch(/^Sidekick attached: .*NEW sidekick/);
+      expect(await nextNote()).toBeUndefined();
       // Recorded on the new branch, so a resume from here keeps it.
       const snapshot = session.states().at(-1)!;
       expect(snapshot.parentId).toBe(session.parentOf(failedPrompt));
@@ -858,14 +861,20 @@ describe("tree navigation", () => {
     });
 
     test(`a failed (${stopReason}) turn after /fusion is noise too`, async () => {
-      const { s, session, navigate } = treeSetup();
+      const { s, session, navigate, nextNote } = treeSetup();
       const before = session.turn();
       await s.run("", ["Devin (SWE-2)"]);
       session.user();
+      // The failed run consumed the attach note; it lives on the tail we leave.
+      expect(await nextNote()).toMatch(/^Sidekick attached:/);
       session.assistant(stopReason);
       await navigate(before);
       expect(s.active()).toContain("sidekick");
       expect(s.made[0]!.disposed).toBe(false);
+      // The new branch never saw it, so the lead is introduced to it again.
+      expect(await nextNote()).toBe(
+        "Sidekick attached: Devin (SWE-2) · SWE-2 Medium. This is a NEW sidekick with no memory of earlier work in this session; brief it fully, including any context a previous sidekick had.",
+      );
     });
   }
 

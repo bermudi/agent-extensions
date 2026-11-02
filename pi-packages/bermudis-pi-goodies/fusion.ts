@@ -773,9 +773,18 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
         : undefined;
     } else {
       if (decision.kind === "carried") persist(); // record it on the new branch
-      pendingNote = state.enabled
-        ? (pendingNote ?? TREE_NAVIGATION_NOTE)
-        : undefined;
+      // A carried-over /fusion was never introduced on this branch: any
+      // attach note it queued was consumed by the failed run on the tail we
+      // left, so re-introduce the sidekick rather than claim it "remains".
+      pendingNote = !state.enabled
+        ? undefined
+        : (pendingNote ??
+          (decision.kind === "carried"
+            ? sidekickAttachedNote(
+                `${HARNESS_LABELS[state.harness!]} · ${choiceLabel(state)}`,
+                state.sidekickBriefed === true,
+              )
+            : TREE_NAVIGATION_NOTE));
     }
     // Pi restored the target branch's tool loadout; re-apply ours either way.
     setToolActive(state.enabled);
