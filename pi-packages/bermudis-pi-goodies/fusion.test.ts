@@ -199,6 +199,7 @@ function setup() {
   let gate: Promise<void> | undefined;
   let gateFilter: ((options: ConnectOptions) => boolean) | undefined;
   let lastStatuses = new Map<string, string>();
+  let lastCtx: ReturnType<typeof makeCtx>["ctx"] | undefined;
   /** Runs inside the connect fn after the connector exists but before it is returned. */
   let onConnect: ((options: ConnectOptions) => void) | undefined;
   const make =
@@ -256,8 +257,14 @@ function setup() {
     },
     tool: () => fake.tools.get("sidekick")!,
     statuses: () => lastStatuses,
+    /** The ctx the last s.run() handed to /fusion (fusion keeps it as uiCtx). */
+    runCtx: () => {
+      if (!lastCtx) throw new Error("no run yet");
+      return lastCtx;
+    },
     run: (args: string, selections: string[]) => {
       const { ctx, notes, statuses } = makeCtx(selections);
+      lastCtx = ctx;
       lastStatuses = statuses;
       return fake.commands
         .get("fusion")!
@@ -1139,6 +1146,96 @@ describe("connector drop and early close", () => {
     await flush();
     current.finish("fine");
     expect(text(await p)).toContain("fine");
+  });
+
+  // pi invalidates the extension ctx during /reload while detached work can
+  // still be in flight; every ctx-bound call then throws (crash class of
+  // 2026-11-02 — an unhandled rejection kills the whole TUI, since pi
+  // installs no unhandledRejection handler).
+  const staleCtxError = () =>
+    new Error(
+      "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().",
+    );
+
+  function trackUnhandledRejections(): {
+    caught: unknown[];
+    stop: () => void;
+  } {
+    const caught: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      caught.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    return {
+      caught,
+      stop: () => process.off("unhandledRejection", onUnhandled),
+    };
+  }
+
+  test("a late onClosed on a stale ctx is logged, never an unhandled rejection", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    s.runCtx().ui.setStatus = () => {
+      throw staleCtxError();
+    };
+    const unhandled = trackUnhandledRejections();
+    try {
+      s.calls[0]!.onClosed!(new Error("late death"));
+      await flush();
+      await flush();
+      expect(
+        s.events.some((e) => e.event === "sidekick.connector_dropped"),
+      ).toBe(true);
+      expect(
+        s.events.some(
+          (e) =>
+            e.event === "sidekick.detached_failed" &&
+            e.data?.what === "drop_connector",
+        ),
+      ).toBe(true);
+      expect(unhandled.caught).toEqual([]);
+    } finally {
+      unhandled.stop();
+    }
+  });
+
+  test("a handoff report delivered after /reload does not reject detached", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    await s
+      .tool()
+      .execute(
+        "t",
+        { message: "job", block: false },
+        undefined,
+        undefined,
+        cwd,
+      );
+    await flush();
+    // /reload lands: every pi-bound call in the delivery chain now throws.
+    const pi = s.pi as unknown as {
+      sendMessage: (message: unknown, options: unknown) => void;
+    };
+    pi.sendMessage = () => {
+      throw staleCtxError();
+    };
+    const unhandled = trackUnhandledRejections();
+    try {
+      s.made[0]!.finish("late report");
+      await flush();
+      await flush();
+      expect(
+        s.events.some(
+          (e) =>
+            e.event === "sidekick.detached_failed" &&
+            e.data?.what === "handoff_delivery",
+        ),
+      ).toBe(true);
+      expect(s.sent).toHaveLength(0);
+      expect(unhandled.caught).toEqual([]);
+    } finally {
+      unhandled.stop();
+    }
   });
 
   test("a connector whose transport dies during connect is disposed and never installed", async () => {

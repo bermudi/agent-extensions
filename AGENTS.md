@@ -102,6 +102,19 @@ pi-packages/
                          # claude-code uses the sentinel, so all sessions share one entry — correct while
                          # one ambient Claude Code login exists per machine, and the next turn_end refresh
                          # rewrites it after an account switch.
+                         # Crash class 2026-11-02 (fixed 0.31.1, against pi 1.5.0): /reload invalidates the old
+                         # extension runner ~700ms before the session swaps to the new one, so events in that
+                         # window (observed: model_select) dispatch into a dead runner where every ctx/pi-bound
+                         # call throws "This extension ctx is stale…". A detached promise that touches such a
+                         # call must never reject — pi installs no unhandledRejection handler, so it kills the
+                         # whole TUI (the crash: refreshBalance's catch reported via stale pi.events.emit out of
+                         # a `void refreshForModel`). Invariants: refreshForModel is the never-reject choke
+                         # point for all fire-and-forget refresh triggers; refreshBalance's catch early-returns
+                         # on stale errors; the identity-watchdog timer callback catches (an in-flight tick
+                         # resumes on a stale ctx after session_shutdown); fusion's detached chains
+                         # (dropConnector, handoff delivery/briefing) end in onDetachedFailure(...). Regression
+                         # tests: provider-balance.test.ts "stale extension ctx" describe + fusion.test.ts
+                         # "after /reload" tests — they fail against the unfixed source (verified).
   critique/               # ACTIVE (opt-in): launch the Bun-only Critique TUI from Pi
   council/                # DEVELOPMENT (not linked in .pi/extensions or ~/.pi/agent/extensions as of
                          # 2026-09-29): read-only multi-model design council — /council snapshots the

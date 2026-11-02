@@ -126,6 +126,19 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     pi.appendEntry<FusionState>(STATE_ENTRY, { ...state });
   };
 
+  /** Terminal catch for fire-and-forget chains that touch the extension ctx
+   *  (setStatus, sendMessage): after /reload invalidates this instance's ctx,
+   *  those calls throw, and a detached rejection is fatal to the host TUI (pi
+   *  installs no unhandledRejection handler). */
+  const onDetachedFailure =
+    (what: string) =>
+    (error: unknown): void => {
+      log.warn("sidekick.detached_failed", {
+        what,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    };
+
   const setToolActive = (active: boolean) => {
     const tools = new Set(pi.getActiveTools());
     if (active) tools.add(TOOL_NAME);
@@ -185,7 +198,9 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
           holder.closedReason = error;
           return;
         }
-        void dropConnector(holder.self, error);
+        void dropConnector(holder.self, error).catch(
+          onDetachedFailure("drop_connector"),
+        );
       },
     });
     holder.self = created;
@@ -370,7 +385,8 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
       .finally(() => {
         if (running === handoff) running = undefined;
         setStatus();
-      });
+      })
+      .catch(onDetachedFailure("handoff_delivery"));
     return handoff;
   };
 
@@ -499,19 +515,21 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
         // Mark briefed only once the sidekick actually took the handoff; a
         // rejected first delivery must not strand the sidekick without doctrine.
         const briefedSession = sidekick.sessionId;
-        void handoff.promise.then(
-          () => {
-            if (
-              handoff.epoch === epoch &&
-              state.sidekickSessionId === briefedSession &&
-              !state.sidekickBriefed
-            ) {
-              state.sidekickBriefed = true;
-              persist();
-            }
-          },
-          () => undefined,
-        );
+        void handoff.promise
+          .then(
+            () => {
+              if (
+                handoff.epoch === epoch &&
+                state.sidekickSessionId === briefedSession &&
+                !state.sidekickBriefed
+              ) {
+                state.sidekickBriefed = true;
+                persist();
+              }
+            },
+            () => undefined,
+          )
+          .catch(onDetachedFailure("briefing_commit"));
       }
       if (!block) {
         return {

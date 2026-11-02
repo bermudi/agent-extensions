@@ -143,6 +143,345 @@ describe("event latency", () => {
   });
 });
 
+describe("stale extension ctx (crash 2026-11-02: model_select raced /reload)", () => {
+  // pi invalidates the old extension runner early in /reload while the session
+  // can still dispatch events into it; every ctx- or pi-bound call then throws.
+  // A detached promise that touches one of those calls must never reject —
+  // pi installs no unhandledRejection handler, so it would kill the TUI.
+  const STALE_MESSAGE =
+    "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
+
+  function trackUnhandledRejections(): {
+    caught: unknown[];
+    stop: () => void;
+  } {
+    const caught: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      caught.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    return {
+      caught,
+      stop: () => process.off("unhandledRejection", onUnhandled),
+    };
+  }
+
+  const readLogEvents = (path: string): Array<Record<string, unknown>> => {
+    let text: string;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      // The log file is created on first write; absence means no events.
+      return [];
+    }
+    return text
+      .trim()
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  };
+
+  interface StaleHarness {
+    handlers: Map<string, (event: unknown, ctx: unknown) => unknown>;
+    ctx: ExtensionContext;
+    scratchLog: string;
+    scheduled: Array<{ callback: () => void; delay: number }>;
+    emitted: string[];
+    flipStale: () => void;
+    flipRenderStale: () => void;
+    setEmitFailure: (error: Error | undefined) => void;
+    armGatedRegistryRead: () => void;
+    releaseGatedRegistryRead: (token: string | undefined) => void;
+    cleanup: () => Promise<void>;
+  }
+
+  function staleHarness(
+    adapters: Record<string, BalanceAdapter>,
+  ): StaleHarness {
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: unknown) => unknown
+    >();
+    const scheduled: Array<{ callback: () => void; delay: number }> = [];
+    const setTimeout = ((callback: () => void, delay: number) => {
+      scheduled.push({ callback, delay });
+      return scheduled.length as unknown as ReturnType<
+        typeof globalThis.setTimeout
+      >;
+    }) as typeof globalThis.setTimeout;
+    const clearTimeout = (() => {}) as typeof globalThis.clearTimeout;
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    const scratchLog = join(directory, "goodies.log");
+    setGoodiesLogPathForTesting(scratchLog);
+    const emitted: string[] = [];
+    let stale = false;
+    let staleRender = false;
+    let emitFailure: Error | undefined;
+    let gateArmed = false;
+    let gatedResolve: (token: string | undefined) => void = () => undefined;
+    const registryRead = (): Promise<string | undefined> => {
+      if (!gateArmed) return Promise.resolve("active-token");
+      gateArmed = false;
+      return new Promise((r) => {
+        gatedResolve = r;
+      });
+    };
+    providerBalance(
+      {
+        on(event, handler) {
+          handlers.set(
+            event,
+            handler as (event: unknown, ctx: unknown) => unknown,
+          );
+        },
+        events: {
+          emit(channel: string) {
+            emitted.push(channel);
+            if (emitFailure) throw emitFailure;
+          },
+          on() {
+            return () => {};
+          },
+        },
+      } as unknown as ExtensionAPI,
+      {
+        adapters,
+        cacheDir: directory,
+        random: () => 0.5,
+        setTimeout,
+        clearTimeout,
+      },
+    );
+    // Like pi, the fake ui hands the footer factory a live tui/theme/
+    // footerData triple, so installing the footer captures requestRender.
+    // The tui render request is ctx-bound: once stale flips, it throws.
+    const tui = {
+      requestRender() {
+        if (staleRender) throw new Error(STALE_MESSAGE);
+      },
+    };
+    const theme = {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    const footerData = {
+      getGitBranch: () => undefined,
+      getExtensionStatuses: () => new Map<string, string>(),
+      getAvailableProviderCount: () => 1,
+      onBranchChange: () => () => {},
+    };
+    initTheme("dark");
+    const ctx = {
+      mode: "tui",
+      get model() {
+        if (stale) throw new Error(STALE_MESSAGE);
+        return { provider: "openai" };
+      },
+      isIdle: () => false,
+      ui: {
+        setFooter(
+          factory?:
+            | ((t: unknown, theme: unknown, footerData: unknown) => unknown)
+            | undefined,
+        ) {
+          factory?.(tui, theme, footerData);
+        },
+      },
+      sessionManager: { getBranch: () => [] },
+      modelRegistry: {
+        isUsingOAuth: () => {
+          if (stale) throw new Error(STALE_MESSAGE);
+          return true;
+        },
+        getApiKeyForProvider: () => registryRead(),
+        getProviderAuth: async () => undefined,
+      },
+    } as unknown as ExtensionContext;
+    return {
+      handlers,
+      ctx,
+      scratchLog,
+      scheduled,
+      emitted,
+      flipStale: () => {
+        stale = true;
+      },
+      flipRenderStale: () => {
+        staleRender = true;
+      },
+      setEmitFailure: (error: Error | undefined) => {
+        emitFailure = error;
+      },
+      armGatedRegistryRead: () => {
+        gateArmed = true;
+      },
+      releaseGatedRegistryRead: (token) => {
+        gatedResolve(token);
+      },
+      cleanup: async () => {
+        setGoodiesLogPathForTesting(undefined);
+        await rm(directory, { recursive: true, force: true });
+      },
+    };
+  }
+
+  const settle = async () => {
+    for (let i = 0; i < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  };
+
+  test("a stale-ctx throw in a model_select refresh is contained, logged once, never emitted", async () => {
+    const h = staleHarness({
+      openai: { requiresOAuth: true, fetch: async () => [{ credits: 1 }] },
+    });
+    // The runner's event bus is dead too — emitting on it must throw the same
+    // stale error (this is the exact double-throw that crashed pi 1.5.0).
+    h.setEmitFailure(new Error(STALE_MESSAGE));
+    const unhandled = trackUnhandledRejections();
+    try {
+      const modelSelect = h.handlers.get("model_select");
+      if (!modelSelect) throw new Error("missing model_select handler");
+      h.flipStale();
+      modelSelect({ model: { provider: "openai" } }, h.ctx);
+      await settle();
+
+      expect(unhandled.caught).toEqual([]);
+      const failures = readLogEvents(h.scratchLog).filter(
+        (event) => event.type === "provider_balance_refresh_failed",
+      );
+      expect(failures).toHaveLength(1);
+      expect(String(failures[0]?.message)).toContain("extension ctx is stale");
+      expect(h.emitted).toEqual([]);
+    } finally {
+      unhandled.stop();
+      await h.cleanup();
+    }
+  });
+
+  test("a refresh-error listener that throws neither crashes nor double-logs", async () => {
+    const h = staleHarness({
+      openai: {
+        requiresOAuth: true,
+        fetch: async () => {
+          throw new Error("usage endpoint down");
+        },
+      },
+    });
+    h.setEmitFailure(new Error("listener exploded"));
+    const unhandled = trackUnhandledRejections();
+    try {
+      const modelSelect = h.handlers.get("model_select");
+      if (!modelSelect) throw new Error("missing model_select handler");
+      modelSelect({ model: { provider: "openai" } }, h.ctx);
+      await settle();
+
+      expect(unhandled.caught).toEqual([]);
+      expect(h.emitted).toEqual(["provider-balance:refresh-error"]);
+      const failures = readLogEvents(h.scratchLog).filter(
+        (event) => event.type === "provider_balance_refresh_failed",
+      );
+      // One line from refreshBalance's own reporting; the throwing listener
+      // must not re-reject the refresh into the refreshForModel net.
+      expect(failures).toHaveLength(1);
+      expect(String(failures[0]?.message)).toContain("usage endpoint down");
+    } finally {
+      unhandled.stop();
+      await h.cleanup();
+    }
+  });
+
+  test("an identity-watchdog tick that resumes on a stale ctx is abandoned, not crashed", async () => {
+    const h = staleHarness({
+      openai: { requiresOAuth: true, fetch: async () => [{ credits: 1 }] },
+    });
+    const unhandled = trackUnhandledRejections();
+    try {
+      const start = h.handlers.get("session_start");
+      const shutdown = h.handlers.get("session_shutdown");
+      if (!start || !shutdown) throw new Error("missing handlers");
+      start({}, h.ctx);
+      await settle();
+      expect(
+        readLogEvents(h.scratchLog).some(
+          (event) => event.type === "provider_balance_refresh_failed",
+        ),
+      ).toBe(false);
+
+      const timersBefore = h.scheduled.length;
+      const watchdog = h.scheduled.find(
+        (entry) => entry.delay === IDENTITY_WATCHDOG_INTERVAL_MS,
+      );
+      if (!watchdog) throw new Error("identity watchdog was not scheduled");
+      // Park the tick on its registry read, then reload the session out from
+      // under it: the teardown clears timers, the resume hits a stale ctx.
+      h.armGatedRegistryRead();
+      watchdog.callback();
+      await settle();
+      shutdown({ reason: "reload" }, h.ctx);
+      h.flipStale();
+      h.releaseGatedRegistryRead("active-token");
+      await settle();
+
+      expect(unhandled.caught).toEqual([]);
+      expect(
+        readLogEvents(h.scratchLog).some(
+          (event) =>
+            event.type === "provider_balance_warning" &&
+            String(event.message).includes("identity watchdog tick abandoned"),
+        ),
+      ).toBe(true);
+      // session_shutdown tore the session down: the tick must not reschedule.
+      expect(h.scheduled.length).toBe(timersBefore);
+    } finally {
+      unhandled.stop();
+      await h.cleanup();
+    }
+  });
+
+  test("a stale throw from before refreshBalance's try is netted by refreshForModel", async () => {
+    const h = staleHarness({
+      openai: { requiresOAuth: true, fetch: async () => [{ credits: 1 }] },
+      zai: { requiresOAuth: true, fetch: async () => [{ credits: 1 }] },
+    });
+    const unhandled = trackUnhandledRejections();
+    try {
+      const start = h.handlers.get("session_start");
+      const modelSelect = h.handlers.get("model_select");
+      if (!start || !modelSelect) throw new Error("missing handlers");
+      start({}, h.ctx); // installs the footer; requestRender goes live
+      await settle();
+      expect(
+        readLogEvents(h.scratchLog).some(
+          (event) => event.type === "provider_balance_refresh_failed",
+        ),
+      ).toBe(false);
+
+      // A provider switch reaches clearBalance() BEFORE the try block; its
+      // requestRender is the one ctx-bound call there. Only the render path
+      // is stale here — the ctx reads stay live — so this throw cannot be
+      // caught by anything inside refreshBalance: the refreshForModel net
+      // is the only containment. (If the footer wiring above ever breaks,
+      // requestRender stays undefined, nothing throws, and this test fails
+      // on the log assertion instead of silently passing via another path.)
+      h.flipRenderStale();
+      modelSelect({ model: { provider: "zai" } }, h.ctx);
+      await settle();
+
+      expect(unhandled.caught).toEqual([]);
+      const failures = readLogEvents(h.scratchLog).filter(
+        (event) => event.type === "provider_balance_refresh_failed",
+      );
+      expect(failures).toHaveLength(1);
+      expect(String(failures[0]?.message)).toContain("extension ctx is stale");
+      expect(failures[0]?.provider).toBe("zai");
+    } finally {
+      unhandled.stop();
+      await h.cleanup();
+    }
+  });
+});
+
 describe("delegate:usage", () => {
   test("routes a subagent settlement into the same throttled refresh as turn_end", async () => {
     // Issue #60: pi-delegate emits `delegate:usage` on the shared event

@@ -1904,7 +1904,18 @@ export default function providerBalance(
     if (identityWatchdogTimer !== undefined) clearTimer(identityWatchdogTimer);
     identityWatchdogTimer = setTimer(async () => {
       identityWatchdogTimer = undefined;
-      await checkDisplayedIdentity();
+      try {
+        await checkDisplayedIdentity();
+      } catch (error) {
+        // A tick that was mid-await when /reload invalidated the ctx resumes
+        // on a stale ctx (its post-await reads throw), and a rejection here
+        // escapes the timer callback unhandled. Abandon the tick; the
+        // replacement session schedules its own watchdog.
+        logGoodiesEvent({
+          type: "provider_balance_warning",
+          message: `identity watchdog tick abandoned: ${describeError(error)}`,
+        });
+      }
       if (activeContext !== undefined) scheduleIdentityWatchdog();
     }, IDENTITY_WATCHDOG_INTERVAL_MS);
   }
@@ -1968,6 +1979,16 @@ export default function providerBalance(
     void refreshForModel(ctx, model);
   }
 
+  /** pi throws this from every ctx- and pi-bound call after /reload or session
+   *  replacement invalidates the extension runner. It exports no sentinel, so
+   *  recognize the message; if the wording ever drifts, matching falls through
+   *  to the generic failure path, which is still crash-safe. */
+  function isStaleExtensionCtxError(error: unknown): boolean {
+    return (
+      error instanceof Error && error.message.includes("extension ctx is stale")
+    );
+  }
+
   /** Refresh the balance for whatever model is active. Provider-agnostic: the
    *  adapter registry in refreshBalance decides whether there is anything to
    *  fetch, so this is a no-op for providers without a balance adapter. */
@@ -1976,7 +1997,20 @@ export default function providerBalance(
     model: ExtensionContext["model"],
     opts?: RefreshOptions,
   ): Promise<void> {
-    return refreshBalance(ctx, model?.provider, model, opts);
+    return refreshBalance(ctx, model?.provider, model, opts).catch((error) => {
+      // Every caller runs this fire-and-forget, so a rejection here is
+      // unhandled — and pi installs no unhandledRejection handler, so Node's
+      // default kills the whole TUI (crash 2026-11-02: a model_select that
+      // raced /reload threw stale-ctx out of refreshBalance's own catch).
+      // refreshBalance reports expected failures itself; this net exists for
+      // what escapes it (throws before its try, or from its catch body).
+      // logGoodiesEvent never throws and touches no pi object.
+      logGoodiesEvent({
+        type: "provider_balance_refresh_failed",
+        provider: model?.provider,
+        message: describeError(error),
+      });
+    });
   }
 
   async function refreshBalance(
@@ -2246,6 +2280,19 @@ export default function providerBalance(
       if (generation !== refreshGeneration || controller.signal.aborted) {
         return;
       }
+      if (isStaleExtensionCtxError(error)) {
+        // The session that launched this refresh was reloaded or replaced
+        // while it ran: its footer is gone, and every pi-bound call below
+        // (render, events.emit) would throw the same stale-ctx error back
+        // out of this async function. Log once and stop here; the
+        // replacement session's session_start runs its own refresh.
+        logGoodiesEvent({
+          type: "provider_balance_refresh_failed",
+          provider: providerId,
+          message: describeError(error),
+        });
+        return;
+      }
       identityPending = false;
       // A failed fetch does not make the displayed value wrong — it stays
       // TTL-gated at render time. Keep a same-account reading on screen
@@ -2272,10 +2319,16 @@ export default function providerBalance(
       // This is a best-effort background refresh. Writing to stdout/stderr while
       // Pi owns the terminal corrupts the TUI (the text appears in the editor),
       // so expose failures to other extensions without producing terminal output.
-      pi.events.emit("provider-balance:refresh-error", {
-        provider: providerId,
-        message: describeError(error),
-      });
+      try {
+        pi.events.emit("provider-balance:refresh-error", {
+          provider: providerId,
+          message: describeError(error),
+        });
+      } catch {
+        // The failure reporter must not be able to fail: a throwing listener
+        // would re-reject this otherwise-settled refresh, and the
+        // refreshForModel net would double-log its failure.
+      }
     } finally {
       if (generation === refreshGeneration) {
         refreshInFlight = false;
