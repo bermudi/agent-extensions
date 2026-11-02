@@ -14,12 +14,12 @@
 // - The core asks the client session/requestRuntimePreferences; answer it.
 // - compactContextWindow (piz fork, 158a31d2) caps the auto-compact window.
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { RpcError, RpcPeer } from "./rpc.ts";
+import { RpcError, RpcPeer, stopChild, withDeadline } from "./rpc.ts";
 import {
   SIDEKICK_CONTEXT_WINDOW,
   type ConnectOptions,
@@ -29,6 +29,7 @@ import {
 } from "./types.ts";
 
 const PIZ_PROVIDER_ID = "account:zai-individual-coding-plan";
+const START_TIMEOUT_MS = 60_000;
 const CORE_START_TIMEOUT_MS = 60_000;
 
 export function pizCoreBinary(): string {
@@ -125,14 +126,24 @@ export async function connectPiz(
   });
   options.log.info("piz.core.spawned", { pid: child.pid, socketPath, binary });
 
+  let connector: PizConnector | undefined;
   try {
     await waitForSocket(socketPath, child);
     const socket = await openSocket(socketPath);
-    const connector = new PizConnector(child, socket, options);
-    await connector.start(options.resumeSessionId);
+    connector = new PizConnector(child, socket, options, socketDir);
+    // A core that accepts the connection but never answers must not wedge /fusion.
+    await withDeadline(
+      connector.start(options.resumeSessionId),
+      START_TIMEOUT_MS,
+      "piz session start",
+    );
     return connector;
   } catch (error) {
-    child.kill("SIGTERM");
+    if (connector) await connector.dispose();
+    else {
+      await stopChild(child);
+      rmSync(socketDir, { recursive: true, force: true });
+    }
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
       `piz sidekick failed to start: ${message}${stderrTail ? `\ncore stderr: ${stderrTail.slice(-800)}` : ""}`,
@@ -176,6 +187,7 @@ class PizConnector implements SidekickConnector {
     private readonly child: ChildProcess,
     private readonly socket: Socket,
     private readonly options: ConnectOptions,
+    private readonly socketDir: string,
   ) {
     this.model = options.model;
     this.peer = new RpcPeer({
@@ -280,6 +292,8 @@ class PizConnector implements SidekickConnector {
       return Promise.reject(
         new Error("piz sidekick already has a running turn"),
       );
+    if (signal.aborted)
+      return Promise.reject(new Error("handoff aborted before it started"));
     const inputId = `fusion-${Date.now()}-${++this.inputCounter}`;
     return new Promise<TurnOutcome>((resolve, reject) => {
       const turn: ActiveTurn = {
@@ -332,12 +346,16 @@ class PizConnector implements SidekickConnector {
             delivery: "steer",
           }),
         );
-      // Without steerQueued the core treated it as a fresh prompt (the turn had
-      // just ended); it will run as its own turn, which our active-turn routing
-      // would misattribute. Report honestly either way.
-      if (!result.steerQueued)
-        this.options.log.warn("piz.steer.not_queued", {});
-      return Boolean(result.steerQueued);
+      if (result.steerQueued) return true;
+      // Without steerQueued the core treated the text as a fresh prompt (the
+      // turn had just ended). That orphan turn would run unattended and its
+      // events would be misattributed to the next handoff, so stop it before
+      // reporting failure; the caller retries as a normal handoff.
+      this.options.log.warn("piz.steer.not_queued_stopping_orphan", {});
+      await this.peer
+        .request("session/stop", { sessionId: this.sessionId })
+        .catch(() => undefined);
+      return false;
     } catch (error) {
       this.options.log.warn("piz.steer.rejected", {
         error: error instanceof Error ? error.message : String(error),
@@ -360,29 +378,19 @@ class PizConnector implements SidekickConnector {
     this.active = undefined;
     this.peer.close();
     this.socket.destroy();
-    if (this.child.exitCode === null) {
-      this.child.kill("SIGTERM");
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => {
-          this.child.kill("SIGKILL");
-          resolve();
-        }, 3000);
-        this.child.once("exit", () => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
-    }
+    await stopChild(this.child);
+    rmSync(this.socketDir, { recursive: true, force: true });
     this.options.log.info("piz.core.stopped", { sessionId: this.sessionId });
   }
 
   private onTransportClosed(error: Error): void {
-    if (this.disposed) return;
+    if (this.disposed || this.peer.isClosed) return;
     this.peer.close(error);
     const turn = this.active;
     this.active = undefined;
     turn?.reject(error);
     this.options.log.error("piz.transport.closed", { error: error.message });
+    this.options.onClosed?.(error);
   }
 
   private onNotification(method: string, params: unknown): void {

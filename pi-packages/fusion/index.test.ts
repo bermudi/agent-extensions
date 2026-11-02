@@ -115,7 +115,14 @@ class FakeConnector implements SidekickConnector {
   injected: string[] = [];
   disposed = false;
   private pending:
-    { resolve: (o: TurnOutcome) => void; callbacks: TurnCallbacks } | undefined;
+    | {
+        resolve: (o: TurnOutcome) => void;
+        reject: (e: Error) => void;
+        callbacks: TurnCallbacks;
+      }
+    | undefined;
+  /** What inject() answers while a turn runs. */
+  injectResult = true;
   constructor(
     readonly harness: HarnessId,
     readonly model: string,
@@ -123,8 +130,8 @@ class FakeConnector implements SidekickConnector {
   ) {}
   prompt(text: string, callbacks: TurnCallbacks): Promise<TurnOutcome> {
     this.prompts.push(text);
-    return new Promise((resolve) => {
-      this.pending = { resolve, callbacks };
+    return new Promise((resolve, reject) => {
+      this.pending = { resolve, reject, callbacks };
     });
   }
   get running() {
@@ -138,10 +145,15 @@ class FakeConnector implements SidekickConnector {
     this.pending = undefined;
     p?.resolve({ report, stopReason: "end_turn", contextUsed });
   }
+  fail(error: Error) {
+    const p = this.pending;
+    this.pending = undefined;
+    p?.reject(error);
+  }
   async inject(text: string) {
     if (!this.pending) return false;
     this.injected.push(text);
-    return true;
+    return this.injectResult;
   }
   async cancel() {}
   async dispose() {
@@ -160,10 +172,12 @@ function setup() {
   const calls: ConnectOptions[] = [];
   let counter = 0;
   let failResume = false;
+  let gate: Promise<void> | undefined;
   const make =
     (harness: HarnessId): ConnectFn =>
     async (options) => {
       calls.push(options);
+      if (gate) await gate;
       if (options.resumeSessionId && failResume) throw new Error("gone");
       const c = new FakeConnector(
         harness,
@@ -184,6 +198,17 @@ function setup() {
     calls,
     setFailResume: (v: boolean) => {
       failResume = v;
+    },
+    /** Hold every connect until the returned function is called. */
+    holdConnects: () => {
+      let open!: () => void;
+      gate = new Promise<void>((r) => {
+        open = () => {
+          gate = undefined;
+          r();
+        };
+      });
+      return open;
     },
     tool: () => fake.tools.get("sidekick")!,
     run: (args: string, selections: string[]) => {
@@ -518,5 +543,158 @@ describe("direct-edit nudge", () => {
         {},
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("review fixes", () => {
+  const cwd = { cwd: "/tmp" };
+
+  test("a connector that dies on its own is dropped; the next call reattaches to the recorded session", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const first = s.made[0]!;
+    s.calls[0]!.onClosed!(new Error("devin acp exited (1)"));
+    const p = s
+      .tool()
+      .execute("t", { message: "again" }, undefined, undefined, cwd);
+    await flush();
+    expect(s.made).toHaveLength(2);
+    expect(s.calls.at(-1)!.resumeSessionId).toBe(first.sessionId);
+    s.made[1]!.finish("ok");
+    await p;
+  });
+
+  test("/fusion off during a pending start disposes the late connector and installs nothing", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const open = s.holdConnects();
+    s.calls[0]!.onClosed!(new Error("dead")); // force a reconnect on next use
+    const p = s
+      .tool()
+      .execute("t", { message: "go" }, undefined, undefined, cwd);
+    p.catch(() => undefined);
+    await flush();
+    await s.run("off", []);
+    open();
+    await expect(p).rejects.toThrow(
+      /Fusion changed while the sidekick was starting/,
+    );
+    expect(s.made.at(-1)!.disposed).toBe(true);
+    expect(s.active()).not.toContain("sidekick");
+    expect(s.entries.at(-1)!.data).toEqual({ enabled: false });
+  });
+
+  test("a rejected first handoff does not mark the sidekick briefed", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const sk = s.made[0]!;
+    const p = s
+      .tool()
+      .execute("t1", { message: "A" }, undefined, undefined, cwd);
+    await flush();
+    sk.fail(new Error("send failed"));
+    await expect(p).rejects.toThrow("send failed");
+    await flush();
+    const p2 = s
+      .tool()
+      .execute("t2", { message: "B" }, undefined, undefined, cwd);
+    await flush();
+    expect(sk.prompts[1]).toContain(SIDEKICK_DOCTRINE.slice(0, 40));
+    sk.finish("ok");
+    await p2;
+    await flush();
+    const last = s.entries
+      .filter((e) => e.customType === "fusion-state")
+      .at(-1)!;
+    expect((last.data as { sidekickBriefed?: boolean }).sidekickBriefed).toBe(
+      true,
+    );
+  });
+
+  test("an already-aborted signal never starts the handoff", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const ac = new AbortController();
+    ac.abort();
+    await expect(
+      s.tool().execute("t", { message: "x" }, ac.signal, undefined, cwd),
+    ).rejects.toThrow(/Cancelled/);
+    expect(s.made[0]!.prompts).toHaveLength(0);
+  });
+
+  test("a blocking takeover claims the report before the inject round-trip (no double delivery)", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const sk = s.made[0]!;
+    await s
+      .tool()
+      .execute(
+        "t1",
+        { message: "job", block: false },
+        undefined,
+        undefined,
+        cwd,
+      );
+    const realInject = sk.inject.bind(sk);
+    sk.inject = async (t: string) => {
+      const answer = await realInject(t);
+      sk.finish("done during inject"); // the handoff ends while the inject is in flight
+      await flush();
+      return answer;
+    };
+    const r = await s
+      .tool()
+      .execute("t2", { message: "wrap up" }, undefined, undefined, cwd);
+    await flush();
+    expect(text(r)).toContain("done during inject");
+    expect(s.sent).toHaveLength(0);
+  });
+
+  test("an update the sidekick could not take is reported as not delivered", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const sk = s.made[0]!;
+    await s
+      .tool()
+      .execute(
+        "t1",
+        { message: "job", block: false },
+        undefined,
+        undefined,
+        cwd,
+      );
+    sk.injectResult = false;
+    const p = s
+      .tool()
+      .execute("t2", { message: "late" }, undefined, undefined, cwd);
+    await flush();
+    sk.finish("job done");
+    const out = text(await p);
+    expect(out).toMatch(/update was NOT delivered/);
+    expect(out).toContain("job done");
+  });
+
+  test("an oversized report survives a failed save", async () => {
+    const fs = await import("node:fs/promises");
+    const dir = await fs.mkdtemp("/tmp/fusion-probe/ro-");
+    const file = `${dir}/not-a-dir`;
+    await Bun.write(file, "x");
+    const previous = process.env.FUSION_LOG_DIR;
+    process.env.FUSION_LOG_DIR = file; // mkdir under a regular file -> ENOTDIR
+    try {
+      const s = setup();
+      await s.run("", ["Devin (SWE-2)"]);
+      const p = s
+        .tool()
+        .execute("t", { message: "big" }, undefined, undefined, cwd);
+      await flush();
+      s.made[0]!.finish("y".repeat(41_000));
+      const out = text(await p);
+      expect(out).toMatch(/the full text could not be saved/);
+      expect(out.length).toBeGreaterThan(40_000);
+    } finally {
+      if (previous === undefined) delete process.env.FUSION_LOG_DIR;
+      else process.env.FUSION_LOG_DIR = previous;
+    }
   });
 });

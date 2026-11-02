@@ -46,6 +46,8 @@ export interface TurnOutcome {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  /** Delivery problems the lead must know about (e.g. a rejected mid-turn update). */
+  warnings?: string[];
 }
 
 export interface TurnCallbacks {
@@ -81,6 +83,11 @@ export interface ConnectOptions {
   /** Reattach to this harness session instead of creating a new one. */
   resumeSessionId?: string;
   log: Logger;
+  /**
+   * Called once when the harness process/transport dies on its own (not via
+   * dispose). The owner should drop the connector so the next use reattaches.
+   */
+  onClosed?: (error: Error) => void;
 }
 
 export interface Logger {

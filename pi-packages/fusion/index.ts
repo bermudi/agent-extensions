@@ -80,6 +80,12 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
   let connecting:
     Promise<{ connector: SidekickConnector; replaced: boolean }> | undefined;
   let running: RunningHandoff | undefined;
+  /**
+   * Bumped whenever the attached sidekick is torn down or replaced. A connect
+   * that finishes under an older epoch belongs to a choice that no longer
+   * exists (fusion off, swap, shutdown) and must be discarded, not installed.
+   */
+  let epoch = 0;
   let handoffCounter = 0;
   /** Note attached to the next lead run (sidekick attached/replaced). */
   let pendingNote: string | undefined;
@@ -113,6 +119,7 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
 
   const disposeConnector = async () => {
     const current = connector;
+    epoch++;
     connector = undefined;
     connecting = undefined;
     running = undefined;
@@ -125,12 +132,26 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     cwd: string,
     resumeSessionId?: string,
   ): Promise<SidekickConnector> => {
-    return deps.connectors[choice.harness]({
+    // The connector learns it died only after it exists, so hand onClosed a
+    // holder; a close before assignment is caught by the epoch/closed checks.
+    const holder: { self?: SidekickConnector } = {};
+    const created = await deps.connectors[choice.harness]({
       cwd,
       model: choice.model,
       resumeSessionId,
       log,
+      onClosed: (error) => {
+        // Drop the dead connector; state keeps the session id so the next
+        // handoff reattaches (or falls back to a fresh, re-briefed sidekick).
+        if (holder.self && connector === holder.self) {
+          connector = undefined;
+          log.warn("sidekick.connector_dropped", { error: error.message });
+          setStatus();
+        }
+      },
     });
+    holder.self = created;
+    return created;
   };
 
   /** The attached sidekick, connecting (or reattaching) on first use. */
@@ -145,9 +166,11 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
       throw new Error(
         "Fusion is enabled but no sidekick is configured; run /fusion.",
       );
-    if (!connecting) {
+    const myEpoch = epoch;
+    let attempt = connecting;
+    if (!attempt) {
       const resumeId = state.sidekickSessionId;
-      connecting = (async () => {
+      attempt = connecting = (async () => {
         if (resumeId) {
           try {
             return {
@@ -169,9 +192,16 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     }
     let result: { connector: SidekickConnector; replaced: boolean };
     try {
-      result = await connecting;
+      result = await attempt;
     } finally {
-      connecting = undefined;
+      if (connecting === attempt) connecting = undefined;
+    }
+    if (myEpoch !== epoch) {
+      // Fusion was turned off / the sidekick swapped while this was starting.
+      await result.connector.dispose().catch(() => undefined);
+      throw new Error(
+        "Fusion changed while the sidekick was starting; the start was discarded. Retry if fusion is still on.",
+      );
     }
     connector = result.connector;
     if (state.sidekickSessionId !== connector.sessionId) {
@@ -193,10 +223,20 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     let report =
       outcome.report.trim() || "(the sidekick ended without a final message)";
     if (report.length > MAX_REPORT_CHARS) {
-      const path = saveReport(handoffId, report);
-      report = `${report.slice(0, MAX_REPORT_CHARS)}\n\n[report truncated; full text: ${path}]`;
+      let where: string;
+      try {
+        where = `full text: ${saveReport(handoffId, report)}`;
+      } catch (error) {
+        // Saving the rest is auxiliary; never lose the report itself over it.
+        log.warn("report.save_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        where = "the full text could not be saved";
+      }
+      report = `${report.slice(0, MAX_REPORT_CHARS)}\n\n[report truncated; ${where}]`;
     }
-    return `${report}\n\n[sidekick handoff #${handoffId} · ${stats.join(" · ")}]`;
+    const warnings = (outcome.warnings ?? []).map((w) => `\n[warning: ${w}]`);
+    return `${report}${warnings.join("")}\n\n[sidekick handoff #${handoffId} · ${stats.join(" · ")}]`;
   };
 
   const startHandoff = (
@@ -317,22 +357,32 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
       }
       const block = params.block !== false;
       const { connector: sidekick, replaced } = await ensureConnector(ctx.cwd);
+      // Esc during a slow connect must not start the very handoff it cancelled
+      // (an already-aborted signal never fires its listener).
+      if (signal?.aborted)
+        throw new Error("Cancelled before the handoff started.");
       const replacedNote = replaced
         ? "Note: the previous sidekick session could not be reattached; this is a NEW sidekick with no memory of earlier handoffs.\n\n"
         : "";
 
       if (running) {
         const current = running;
+        // A blocking caller takes over the report. Flip the flag BEFORE the
+        // inject round-trip: the handoff may finish during it, and its report
+        // must go to exactly one place.
+        if (block) current.deliverAsMessage = false;
         const injected = await sidekick.inject(leadUpdate(params.message));
-        if (!injected) {
+        if (!injected && !block) {
           throw new Error(
             "The running handoff could not take the update (it may have just finished). Retry the call.",
           );
         }
-        log.info("handoff.update_injected", {
-          id: current.id,
-          chars: params.message.length,
-        });
+        if (injected) {
+          log.info("handoff.update_injected", {
+            id: current.id,
+            chars: params.message.length,
+          });
+        }
         if (!block) {
           return {
             content: [
@@ -345,31 +395,31 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
           };
         }
         // Wait for the running handoff; its report comes back here instead of as a message.
-        current.deliverAsMessage = false;
         const outcome = await current.promise;
+        const undelivered = injected
+          ? ""
+          : "Note: your update was NOT delivered (the handoff had just ended). This is that handoff's report; send the update as a new handoff.\n\n";
         return {
           content: [
             {
               type: "text",
-              text: replacedNote + formatReport(outcome, current.id),
+              text:
+                replacedNote + undelivered + formatReport(outcome, current.id),
             },
           ],
           details: {
             handoffId: current.id,
-            injected: true,
+            injected,
             stopReason: outcome.stopReason,
           },
         };
       }
 
       // The doctrine rides on the first handoff of each sidekick session only.
-      const text = state.sidekickBriefed
-        ? params.message
-        : firstHandoff(params.message);
-      if (!state.sidekickBriefed) {
-        state.sidekickBriefed = true;
-        persist();
-      }
+      const needsBriefing = !state.sidekickBriefed;
+      const text = needsBriefing
+        ? firstHandoff(params.message)
+        : params.message;
       const controller = new AbortController();
       if (block)
         signal?.addEventListener("abort", () => controller.abort(), {
@@ -389,6 +439,23 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
           }
         },
       );
+      if (needsBriefing) {
+        // Mark briefed only once the sidekick actually took the handoff; a
+        // rejected first delivery must not strand the sidekick without doctrine.
+        const briefedSession = sidekick.sessionId;
+        void handoff.promise.then(
+          () => {
+            if (
+              state.sidekickSessionId === briefedSession &&
+              !state.sidekickBriefed
+            ) {
+              state.sidekickBriefed = true;
+              persist();
+            }
+          },
+          () => undefined,
+        );
+      }
       if (!block) {
         return {
           content: [
@@ -499,6 +566,7 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
 
     const wasEnabled = state.enabled;
     await disposeConnector();
+    const myEpoch = epoch;
     ctx.ui.notify(`Starting sidekick: ${choice.label}…`, "info");
     let attached: SidekickConnector;
     try {
@@ -520,6 +588,11 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
         state.sidekickBriefed = false;
         persist();
       }
+      return;
+    }
+    if (myEpoch !== epoch) {
+      // Fusion was turned off or swapped again while this was starting.
+      await attached.dispose().catch(() => undefined);
       return;
     }
     connector = attached;

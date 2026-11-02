@@ -2,6 +2,7 @@
 // Devin speaks ACP (JSON-RPC 2.0 over stdio); the piz core speaks ZCode Protocol
 // (same envelope minus the "jsonrpc" field, over a Unix socket). Both carry
 // server→client requests (id + method) that we must answer.
+import type { ChildProcess } from "node:child_process";
 import { z } from "zod";
 
 const messageSchema = z
@@ -188,4 +189,39 @@ export class RpcPeer {
       this.send({ id, error: { code, message } });
     }
   }
+}
+
+/** Reject if `promise` has not settled within `ms` (startup handshakes only). */
+export function withDeadline<T>(
+  promise: Promise<T>,
+  ms: number,
+  what: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${what} timed out after ${ms / 1000}s`)),
+      ms,
+    );
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * SIGTERM then SIGKILL after 3s. A child that already died (including by
+ * signal: exitCode is null then, and 'exit' will not fire again) returns at once.
+ */
+export async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      resolve();
+    }, 3000);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 }

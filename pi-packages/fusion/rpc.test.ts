@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { RpcError, RpcPeer } from "./rpc.ts";
+import { spawn } from "node:child_process";
+import { RpcError, RpcPeer, stopChild, withDeadline } from "./rpc.ts";
 
 function pair(jsonrpc: boolean) {
   const out: Record<string, unknown>[] = [];
@@ -84,5 +85,34 @@ describe("RpcPeer", () => {
     peer.close(new Error("gone"));
     await expect(p).rejects.toThrow("gone");
     await expect(peer.request("y")).rejects.toThrow(/rpc closed/);
+  });
+});
+
+describe("withDeadline", () => {
+  test("rejects a handshake that never answers", async () => {
+    await expect(
+      withDeadline(new Promise(() => undefined), 20, "start"),
+    ).rejects.toThrow(/start timed out/);
+  });
+  test("passes the value through when in time", async () => {
+    expect(await withDeadline(Promise.resolve(5), 1000, "x")).toBe(5);
+  });
+});
+
+describe("stopChild", () => {
+  test("returns at once for a child already killed by a signal (no 3s SIGKILL wait)", async () => {
+    const child = spawn("sleep", ["30"]);
+    child.kill("SIGKILL");
+    await new Promise((r) => child.once("exit", r));
+    expect(child.exitCode).toBeNull();
+    expect(child.signalCode).toBe("SIGKILL");
+    const t0 = Date.now();
+    await stopChild(child);
+    expect(Date.now() - t0).toBeLessThan(500);
+  });
+  test("terminates a live child", async () => {
+    const child = spawn("sleep", ["30"]);
+    await stopChild(child);
+    expect(child.signalCode ?? child.exitCode).not.toBeNull();
   });
 });

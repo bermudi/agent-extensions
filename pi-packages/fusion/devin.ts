@@ -14,7 +14,7 @@
 //   "swe-2-medium" is rejected by session/set_config_option.
 import { spawn, type ChildProcess } from "node:child_process";
 import { z } from "zod";
-import { RpcError, RpcPeer } from "./rpc.ts";
+import { RpcError, RpcPeer, stopChild, withDeadline } from "./rpc.ts";
 import type {
   ConnectOptions,
   SidekickConnector,
@@ -62,9 +62,15 @@ const sessionUpdateSchema = z
   })
   .passthrough();
 
+const START_TIMEOUT_MS = 60_000;
+const INJECT_SETTLE_MS = 1500;
+
 interface ActiveTurn {
   callbacks: TurnCallbacks;
   text: string;
+  /** Mid-turn session/prompt requests still awaiting Devin's answer. */
+  injects: Set<Promise<void>>;
+  warnings: string[];
   contextUsed?: number;
 }
 
@@ -90,7 +96,11 @@ export async function connectDevin(
   });
   const connector = new DevinConnector(child, options);
   try {
-    await connector.start(options.resumeSessionId);
+    await withDeadline(
+      connector.start(options.resumeSessionId),
+      START_TIMEOUT_MS,
+      "devin session start",
+    );
     return connector;
   } catch (error) {
     await connector.dispose();
@@ -208,7 +218,13 @@ class DevinConnector implements SidekickConnector {
   ): Promise<TurnOutcome> {
     if (this.active)
       throw new Error("devin sidekick already has a running turn");
-    const turn: ActiveTurn = { callbacks, text: "" };
+    if (signal.aborted) throw new Error("handoff aborted before it started");
+    const turn: ActiveTurn = {
+      callbacks,
+      text: "",
+      injects: new Set(),
+      warnings: [],
+    };
     this.active = turn;
     const onAbort = () => {
       void this.cancel();
@@ -221,7 +237,19 @@ class DevinConnector implements SidekickConnector {
           prompt: [{ type: "text", text }],
         }),
       );
+      if (turn.injects.size > 0) {
+        await Promise.race([
+          Promise.all([...turn.injects]),
+          new Promise((r) => setTimeout(r, INJECT_SETTLE_MS)),
+        ]);
+        if (turn.injects.size > 0) {
+          turn.warnings.push(
+            "A lead update was still unanswered when the turn ended; it may have run as a separate turn whose output is not in this report.",
+          );
+        }
+      }
       return {
+        warnings: turn.warnings.length ? turn.warnings : undefined,
         report: turn.text.trim(),
         stopReason: result.stopReason,
         contextUsed: turn.contextUsed,
@@ -236,19 +264,27 @@ class DevinConnector implements SidekickConnector {
   }
 
   async inject(text: string): Promise<boolean> {
-    if (!this.active) return false;
+    const turn = this.active;
+    if (!turn) return false;
     // Devin merges a mid-turn prompt into the running turn; this request
     // resolves when that merged turn ends, which the main prompt() also awaits.
-    this.peer
+    // Track it so a rejection reaches the lead instead of only the log.
+    const request: Promise<void> = this.peer
       .request("session/prompt", {
         sessionId: this.sessionId,
         prompt: [{ type: "text", text }],
       })
-      .catch((error: unknown) => {
-        this.options.log.warn("devin.inject.failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.options.log.warn("devin.inject.failed", { error: message });
+          turn.warnings.push(`A lead update was rejected by devin: ${message}`);
+        },
+      )
+      .finally(() => turn.injects.delete(request));
+    turn.injects.add(request);
     return true;
   }
 
@@ -262,28 +298,17 @@ class DevinConnector implements SidekickConnector {
     this.disposed = true;
     this.peer.close(new Error("sidekick shut down"));
     this.child.stdin?.end();
-    if (this.child.exitCode === null) {
-      this.child.kill("SIGTERM");
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => {
-          this.child.kill("SIGKILL");
-          resolve();
-        }, 3000);
-        this.child.once("exit", () => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
-    }
+    await stopChild(this.child);
     this.options.log.info("devin.acp.stopped", { sessionId: this.sessionId });
   }
 
   private onExit(code: number | null, error?: Error): void {
-    if (this.disposed) return;
+    if (this.disposed || this.peer.isClosed) return;
     const reason = error ?? new Error(`devin acp exited (${code})`);
     this.peer.close(reason);
     this.active = undefined;
     this.options.log.error("devin.transport.closed", { error: reason.message });
+    this.options.onClosed?.(reason);
   }
 
   private async onRequest(method: string, params: unknown): Promise<unknown> {
@@ -299,9 +324,8 @@ class DevinConnector implements SidekickConnector {
         })
         .passthrough()
         .parse(params);
-      const allow =
-        parsed.options.find((o) => o.kind === "allow_once") ??
-        parsed.options.find((o) => o.kind.startsWith("allow"));
+      // Never allow_always: that would outlive the fusion session.
+      const allow = parsed.options.find((o) => o.kind === "allow_once");
       this.options.log.warn("devin.permission.auto_allowed", {
         kinds: parsed.options.map((o) => o.kind),
       });
