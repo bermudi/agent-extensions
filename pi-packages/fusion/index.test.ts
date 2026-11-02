@@ -176,19 +176,25 @@ function setup() {
   };
   let counter = 0;
   let failResume = false;
+  let failHarness: HarnessId | undefined;
+  let remapResume = false;
   let gate: Promise<void> | undefined;
+  let gateFilter: ((options: ConnectOptions) => boolean) | undefined;
   /** Runs inside the connect fn after the connector exists but before it is returned. */
   let onConnect: ((options: ConnectOptions) => void) | undefined;
   const make =
     (harness: HarnessId): ConnectFn =>
     async (options) => {
       calls.push(options);
-      if (gate) await gate;
+      if (gate && (!gateFilter || gateFilter(options))) await gate;
       if (options.resumeSessionId && failResume) throw new Error("gone");
+      if (harness === failHarness) throw new Error("connect refused");
       const c = new FakeConnector(
         harness,
         options.model,
-        options.resumeSessionId ?? `${harness}-s${++counter}`,
+        options.resumeSessionId && !remapResume
+          ? options.resumeSessionId
+          : `${harness}-s${++counter}`,
       );
       made.push(c);
       onConnect?.(options);
@@ -207,15 +213,23 @@ function setup() {
     setFailResume: (v: boolean) => {
       failResume = v;
     },
+    setFailHarness: (h: HarnessId | undefined) => {
+      failHarness = h;
+    },
+    setResumeRemap: (v: boolean) => {
+      remapResume = v;
+    },
     setOnConnect: (fn: ((options: ConnectOptions) => void) | undefined) => {
       onConnect = fn;
     },
     /** Hold every connect until the returned function is called. */
-    holdConnects: () => {
+    holdConnects: (filter?: (options: ConnectOptions) => boolean) => {
       let open!: () => void;
+      gateFilter = filter;
       gate = new Promise<void>((r) => {
         open = () => {
           gate = undefined;
+          gateFilter = undefined;
           r();
         };
       });
@@ -688,7 +702,9 @@ describe("review fixes", () => {
 
   test("an oversized report survives a failed save", async () => {
     const fs = await import("node:fs/promises");
-    const dir = await fs.mkdtemp("/tmp/fusion-probe/ro-");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await fs.mkdtemp(join(tmpdir(), "fusion-ro-"));
     const file = `${dir}/not-a-dir`;
     await Bun.write(file, "x");
     const previous = process.env.FUSION_LOG_DIR;
@@ -960,5 +976,254 @@ describe("context status", () => {
     await p3;
     notes = await s.run("status", []);
     expect(notes.at(-1)!.msg).toContain("context 5K/262K");
+  });
+});
+
+describe("shared startup transaction", () => {
+  const cwd = { cwd: "/tmp" };
+
+  test("off during a gated initial attach keeps fusion off and disposes the late connector", async () => {
+    const s = setup();
+    const open = s.holdConnects();
+    const p = s.run("", ["Devin (SWE-2)"]);
+    await flush();
+    const offNotes = await s.run("off", []);
+    open();
+    const notes = await p;
+    expect(s.made).toHaveLength(1);
+    expect(s.made[0]!.disposed).toBe(true);
+    expect(s.active()).not.toContain("sidekick");
+    const status = await s.run("status", []);
+    expect(status.at(-1)!.msg).toBe("Fusion is off.");
+    expect(offNotes.at(-1)!.msg).toMatch(/already off/);
+    expect(notes.some((n) => n.msg.includes("ready"))).toBe(false);
+    expect(notes.some((n) => n.level === "error")).toBe(false);
+  });
+
+  test("a tool call during a picker swap waits for the new sidekick instead of resuming the old", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const first = s.made[0]!;
+    const open = s.holdConnects();
+    const swap = s.run("", ["piz (GLM coding plan)", "GLM-5.3"]);
+    await flush();
+    await flush();
+    const tp = s
+      .tool()
+      .execute("t", { message: "go" }, undefined, undefined, cwd);
+    await flush();
+    expect(s.calls).toHaveLength(2);
+    expect(s.calls[1]!.model).toBe("GLM-5.3");
+    expect(s.calls[1]!.resumeSessionId).toBeUndefined();
+    open();
+    await swap;
+    await flush();
+    const picked = s.made[1]!;
+    expect(picked.prompts[0]).toContain(SIDEKICK_DOCTRINE.slice(0, 40));
+    expect(picked.prompts[0]).toContain("go");
+    for (const c of s.made) c.finish("did it");
+    const r = await tp;
+    expect(text(r)).toContain("did it");
+    expect(text(r)).toMatch(/NEW sidekick with no memory/);
+    expect(first.disposed).toBe(true);
+    await s.run("off", []);
+    expect(picked.disposed).toBe(true);
+    expect(s.made).toHaveLength(2);
+  });
+
+  for (const block of [true, false]) {
+    test(`a failed swap keeps the prior model; the next call is a fresh NEW sidekick (block:${block})`, async () => {
+      const s = setup();
+      await s.run("", ["Devin (SWE-2)"]);
+      await s.emit("before_agent_start", {}, {});
+      const first = s.made[0]!;
+      const hp = s
+        .tool()
+        .execute("t0", { message: "job" }, undefined, undefined, cwd);
+      await flush();
+      first.finish("done");
+      await hp;
+      s.setFailHarness("piz");
+      const notes = await s.run("", ["piz (GLM coding plan)", "GLM-5.3"]);
+      expect(notes.at(-1)!.msg).toMatch(/could not start GLM-5\.3/);
+      expect(first.disposed).toBe(true);
+      const tp = s
+        .tool()
+        .execute("t1", { message: "again", block }, undefined, undefined, cwd);
+      await flush();
+      const fresh = s.made[1]!;
+      expect(fresh.harness).toBe("devin");
+      expect(fresh.prompts[0]).toContain(SIDEKICK_DOCTRINE.slice(0, 40));
+      fresh.finish("back");
+      const r = await tp;
+      expect(text(r)).toMatch(/NEW sidekick with no memory/);
+    });
+  }
+
+  test("a resume that lands on a different session id is a NEW sidekick for both waiters", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const first = s.made[0]!;
+    const h1 = s
+      .tool()
+      .execute("t0", { message: "a" }, undefined, undefined, cwd);
+    await flush();
+    first.finish("done", 88_000);
+    await h1;
+    s.calls[0]!.onClosed!(new Error("devin acp exited (1)"));
+    s.setResumeRemap(true);
+    const open = s.holdConnects();
+    const p1 = s
+      .tool()
+      .execute("t1", { message: "b" }, undefined, undefined, cwd);
+    const p2 = s
+      .tool()
+      .execute("t2", { message: "c" }, undefined, undefined, cwd);
+    await flush();
+    open();
+    await flush();
+    const resumed = s.made[1]!;
+    expect(s.made).toHaveLength(2);
+    expect(resumed.sessionId).not.toBe(first.sessionId);
+    expect(resumed.prompts[0]).toContain(SIDEKICK_DOCTRINE.slice(0, 40));
+    const notes = await s.run("status", []);
+    expect(notes.at(-1)!.msg).toContain("context unknown");
+    resumed.finish("ok");
+    const r1 = await p1;
+    const r2 = await p2;
+    expect(text(r1)).toMatch(/NEW sidekick with no memory/);
+    expect(text(r2)).toMatch(/NEW sidekick with no memory/);
+  });
+
+  test("a stale swap failure settling after off + reattach does not clobber the new sidekick", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const openOld = s.holdConnects((o) => o.model === "GLM-5.3");
+    const swap = s.run("", ["piz (GLM coding plan)", "GLM-5.3"]);
+    await flush();
+    await flush();
+    expect(s.calls).toHaveLength(2);
+    await s.run("off", []);
+    const p2 = s.run("", ["Devin (SWE-2)"]);
+    await flush();
+    expect(s.made).toHaveLength(2);
+    const current = s.made[1]!;
+    expect(current.harness).toBe("devin");
+    const hp = s
+      .tool()
+      .execute("t0", { message: "job" }, undefined, undefined, cwd);
+    await flush();
+    current.finish("done");
+    await hp;
+    await flush();
+    const states = () =>
+      s.entries.filter((e) => e.customType === "fusion-state");
+    const saved = states().at(-1)!.data;
+    expect(saved).toMatchObject({
+      enabled: true,
+      harness: "devin",
+      sidekickSessionId: current.sessionId,
+      sidekickBriefed: true,
+    });
+    s.setFailHarness("piz");
+    openOld();
+    const staleNotes = await swap;
+    await p2;
+    await flush();
+    await flush();
+    expect(staleNotes.at(-1)!.msg).toContain("Starting sidekick");
+    expect(staleNotes.some((n) => n.level === "error")).toBe(false);
+    expect(states().at(-1)!.data).toEqual(saved);
+    expect(s.active()).toContain("sidekick");
+    expect(current.disposed).toBe(false);
+    const tp = s
+      .tool()
+      .execute("t1", { message: "more" }, undefined, undefined, cwd);
+    await flush();
+    current.finish("more done");
+    expect(text(await tp)).toContain("more done");
+    expect(s.made).toHaveLength(2);
+  });
+
+  test("a tool call waiting on a failed swap rejects once; the next call lazily reconnects the prior model", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const first = s.made[0]!;
+    const open = s.holdConnects();
+    const swap = s.run("", ["piz (GLM coding plan)", "GLM-5.3"]);
+    await flush();
+    await flush();
+    const tp = s
+      .tool()
+      .execute("t", { message: "go" }, undefined, undefined, cwd);
+    tp.catch(() => undefined);
+    await flush();
+    expect(s.calls).toHaveLength(2);
+    expect(s.calls[1]!.model).toBe("GLM-5.3");
+    expect(s.calls[1]!.resumeSessionId).toBeUndefined();
+    s.setFailHarness("piz");
+    open();
+    const swapNotes = await swap;
+    await expect(tp).rejects.toThrow(/connect refused/);
+    expect(swapNotes.some((n) => n.level === "error")).toBe(true);
+    expect(first.disposed).toBe(true);
+    expect(s.active()).toContain("sidekick");
+    const latest = s.entries
+      .filter((e) => e.customType === "fusion-state")
+      .at(-1)!.data as {
+      enabled: boolean;
+      harness?: string;
+      model?: string;
+      sidekickSessionId?: string;
+      sidekickBriefed?: boolean;
+    };
+    expect(latest.enabled).toBe(true);
+    expect(latest.harness).toBe("devin");
+    expect(latest.model).toBe("swe-2-medium");
+    expect(latest.sidekickSessionId).toBeUndefined();
+    expect(latest.sidekickBriefed).toBe(false);
+    expect(s.calls).toHaveLength(2);
+    const tp2 = s
+      .tool()
+      .execute("t2", { message: "again" }, undefined, undefined, cwd);
+    await flush();
+    expect(s.calls).toHaveLength(3);
+    expect(s.calls[2]!.model).toBe("swe-2-medium");
+    expect(s.calls[2]!.resumeSessionId).toBeUndefined();
+    const fresh = s.made[1]!;
+    expect(fresh.prompts[0]).toContain(SIDEKICK_DOCTRINE.slice(0, 40));
+    fresh.finish("back");
+    expect(text(await tp2)).toMatch(/NEW sidekick with no memory/);
+    expect(s.made).toHaveLength(2);
+  });
+
+  test("off before a deferred swap disposal resolves admits no startup through the teardown window", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const first = s.made[0]!;
+    let release!: () => void;
+    const disposed = new Promise<void>((r) => {
+      release = r;
+    });
+    first.dispose = () => disposed;
+    const swap = s.run("", ["piz (GLM coding plan)", "GLM-5.3"]);
+    await flush();
+    await flush();
+    const tp = s
+      .tool()
+      .execute("t", { message: "go" }, undefined, undefined, cwd);
+    tp.catch(() => undefined);
+    await flush();
+    const offNotes = await s.run("off", []);
+    release();
+    await swap;
+    for (const c of s.made) c.finish("stale");
+    await expect(tp).rejects.toThrow(
+      /Fusion changed while the sidekick was starting/,
+    );
+    expect(s.calls).toHaveLength(1);
+    expect(offNotes.at(-1)!.msg).toMatch(/Fusion off/);
+    expect(s.entries.at(-1)!.data).toEqual({ enabled: false });
+    expect(s.active()).not.toContain("sidekick");
   });
 });

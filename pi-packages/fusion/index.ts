@@ -37,6 +37,8 @@ const STATE_ENTRY = "fusion-state";
 const REPORT_MESSAGE = "fusion-report";
 const NOTE_MESSAGE = "fusion-note";
 const MAX_REPORT_CHARS = 40_000;
+const STALE_START_MESSAGE =
+  "Fusion changed while the sidekick was starting; the start was discarded. Retry if fusion is still on.";
 const EDIT_TOOLS = new Set(["edit", "write", "apply_patch"]);
 
 interface FusionState {
@@ -186,10 +188,22 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     return created;
   };
 
+  const trackConnecting = (
+    attempt: Promise<{ connector: SidekickConnector; replaced: boolean }>,
+  ) => {
+    connecting = attempt;
+    const clear = () => {
+      if (connecting === attempt) connecting = undefined;
+    };
+    void attempt.then(clear, clear);
+    return attempt;
+  };
+
   /** The attached sidekick, connecting (or reattaching) on first use. */
   const ensureConnector = async (
     cwd: string,
   ): Promise<{ connector: SidekickConnector; replaced: boolean }> => {
+    if (connecting) return connecting;
     if (connector) return { connector, replaced: false };
     const choice = MODEL_CHOICES.find(
       (c) => c.harness === state.harness && c.model === state.model,
@@ -199,52 +213,43 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
         "Fusion is enabled but no sidekick is configured; run /fusion.",
       );
     const myEpoch = epoch;
-    let attempt = connecting;
-    if (!attempt) {
-      const resumeId = state.sidekickSessionId;
-      attempt = connecting = (async () => {
-        if (resumeId) {
-          try {
-            return {
-              connector: await connect(choice, cwd, resumeId),
-              replaced: false,
-            };
-          } catch (error) {
-            log.warn("sidekick.reattach_failed", {
-              sessionId: resumeId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
+    const previousSessionId = state.sidekickSessionId;
+    const attempt = (async () => {
+      let attached: SidekickConnector;
+      if (previousSessionId) {
+        try {
+          attached = await connect(choice, cwd, previousSessionId);
+        } catch (error) {
+          log.warn("sidekick.reattach_failed", {
+            sessionId: previousSessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (myEpoch !== epoch) throw new Error(STALE_START_MESSAGE);
+          attached = await connect(choice, cwd);
         }
-        return {
-          connector: await connect(choice, cwd),
-          replaced: resumeId !== undefined,
-        };
-      })();
-    }
-    let result: { connector: SidekickConnector; replaced: boolean };
-    try {
-      result = await attempt;
-    } finally {
-      if (connecting === attempt) connecting = undefined;
-    }
-    if (myEpoch !== epoch) {
-      // Fusion was turned off / the sidekick swapped while this was starting.
-      await result.connector.dispose().catch(() => undefined);
-      throw new Error(
-        "Fusion changed while the sidekick was starting; the start was discarded. Retry if fusion is still on.",
-      );
-    }
-    connector = result.connector;
-    if (state.sidekickSessionId !== connector.sessionId) {
-      // A different harness session than the one on record: it has never been
-      // briefed, and nothing was ever measured on it.
-      state.sidekickSessionId = connector.sessionId;
-      state.sidekickBriefed = false;
-      lastContextUsed = undefined;
-      persist();
-    }
-    return result;
+      } else {
+        attached = await connect(choice, cwd);
+      }
+      if (myEpoch !== epoch) {
+        // Fusion was turned off / the sidekick swapped while this was starting.
+        await attached.dispose().catch(() => undefined);
+        throw new Error(STALE_START_MESSAGE);
+      }
+      connector = attached;
+      if (state.sidekickSessionId !== attached.sessionId) {
+        // A different harness session than the one on record: it has never been
+        // briefed, and nothing was ever measured on it.
+        state.sidekickSessionId = attached.sessionId;
+        state.sidekickBriefed = false;
+        lastContextUsed = undefined;
+        persist();
+      }
+      return {
+        connector: attached,
+        replaced: previousSessionId !== attached.sessionId,
+      };
+    })();
+    return trackConnecting(attempt);
   };
 
   const formatReport = (outcome: TurnOutcome, handoffId: number): string => {
@@ -565,17 +570,23 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
   });
 
   const turnOff = async (ctx: ExtensionCommandContext) => {
-    if (!state.enabled) {
-      ctx.ui.notify("Fusion is already off.", "info");
-      return;
-    }
-    await disposeConnector();
+    const wasEnabled = state.enabled;
+    const disposal = disposeConnector();
     state = { enabled: false };
-    persist();
+    pendingNote = undefined;
     setToolActive(false);
     setStatus();
-    log.info("fusion.off", {});
-    ctx.ui.notify("Fusion off: sidekick stopped and tool removed.", "info");
+    if (wasEnabled) {
+      persist();
+      log.info("fusion.off", {});
+    }
+    await disposal;
+    ctx.ui.notify(
+      wasEnabled
+        ? "Fusion off: sidekick stopped and tool removed."
+        : "Fusion is already off.",
+      "info",
+    );
   };
 
   const pickAndAttach = async (ctx: ExtensionCommandContext) => {
@@ -611,57 +622,71 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     }
 
     const wasEnabled = state.enabled;
-    await disposeConnector();
+    const previousSessionId = state.sidekickSessionId;
+    const disposal = disposeConnector();
     const myEpoch = epoch;
     ctx.ui.notify(`Starting sidekick: ${choice.label}…`, "info");
-    let attached: SidekickConnector;
-    try {
-      attached = await connect(choice, ctx.cwd);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log.error("fusion.attach_failed", {
+    const attempt = (async () => {
+      await disposal;
+      if (myEpoch !== epoch) throw new Error(STALE_START_MESSAGE);
+      let attached: SidekickConnector;
+      try {
+        attached = await connect(choice, ctx.cwd);
+      } catch (error) {
+        if (myEpoch === epoch) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          log.error("fusion.attach_failed", {
+            harness: choice.harness,
+            model: choice.model,
+            error: message,
+          });
+          ctx.ui.notify(
+            `Fusion: could not start ${choice.label}: ${message}`,
+            "error",
+          );
+          if (wasEnabled) {
+            // The previous sidekick is gone; keep the tool but force a fresh connect on next use.
+            state.sidekickSessionId = undefined;
+            state.sidekickBriefed = false;
+            persist();
+          }
+        }
+        throw error;
+      }
+      if (myEpoch !== epoch) {
+        // Fusion was turned off or swapped again while this was starting.
+        await attached.dispose().catch(() => undefined);
+        throw new Error(STALE_START_MESSAGE);
+      }
+      connector = attached;
+      state = {
+        enabled: true,
         harness: choice.harness,
         model: choice.model,
-        error: message,
-      });
-      ctx.ui.notify(
-        `Fusion: could not start ${choice.label}: ${message}`,
-        "error",
+        sidekickSessionId: attached.sessionId,
+        sidekickBriefed: false,
+      };
+      persist();
+      setToolActive(true);
+      pendingNote = sidekickAttachedNote(
+        `${HARNESS_LABELS[choice.harness]} · ${choice.label}`,
+        false,
       );
-      if (wasEnabled) {
-        // The previous sidekick is gone; keep the tool but force a fresh connect on next use.
-        state.sidekickSessionId = undefined;
-        state.sidekickBriefed = false;
-        persist();
-      }
-      return;
-    }
-    if (myEpoch !== epoch) {
-      // Fusion was turned off or swapped again while this was starting.
-      await attached.dispose().catch(() => undefined);
-      return;
-    }
-    connector = attached;
-    state = {
-      enabled: true,
-      harness: choice.harness,
-      model: choice.model,
-      sidekickSessionId: attached.sessionId,
-      sidekickBriefed: false,
-    };
-    persist();
-    setToolActive(true);
-    pendingNote = sidekickAttachedNote(
-      `${HARNESS_LABELS[choice.harness]} · ${choice.label}`,
-      false,
-    );
-    setStatus();
-    log.info("fusion.on", {
-      harness: choice.harness,
-      model: choice.model,
-      sessionId: attached.sessionId,
-    });
-    ctx.ui.notify(`Fusion on: sidekick ${choice.label} ready.`, "info");
+      setStatus();
+      log.info("fusion.on", {
+        harness: choice.harness,
+        model: choice.model,
+        sessionId: attached.sessionId,
+      });
+      ctx.ui.notify(`Fusion on: sidekick ${choice.label} ready.`, "info");
+      return {
+        connector: attached,
+        replaced: previousSessionId !== attached.sessionId,
+      };
+    })();
+    trackConnecting(attempt);
+    await attempt.catch(() => undefined);
   };
 
   pi.on("session_start", async (event, ctx) => {
