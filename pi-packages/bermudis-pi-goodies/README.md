@@ -471,6 +471,11 @@ How it works:
   is dropped first when the line gets tight. The readout tracks mid-side
   ctrl+l switches, and the badge clears on exit or when switching to a
   session that is not in a side consultation.
+  The `side:` slot doubles as a cross-extension contract: any extension
+  status whose text starts with `side:` is folded into the model readout the
+  same way (`side: <text>/<model>`) instead of taking a status line —
+  pi-fusion's sidekick badge uses it. An open /side session keeps precedence
+  for the slot.
 - **Entry**: `/side` opens pi's own model selector (falls back to a plain
   selector when pi's internal runtime is not reachable; in headless modes pass
   the model explicitly as `/side provider/model-id[:level]`). The main agent's

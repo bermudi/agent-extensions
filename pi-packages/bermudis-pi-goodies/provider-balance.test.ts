@@ -3638,3 +3638,140 @@ describe("footer side badge", () => {
     }
   });
 });
+
+describe("footer side: status hoist", () => {
+  test("a 'side:'-prefixed status folds into the model readout and leaves the status line", async () => {
+    resetSideBadgeState();
+    const statuses = new Map<string, string>();
+    /** Stand-in for pi's footer container; statuses map is shared and live
+     *  like FooterDataProvider's. */
+    let mounted: { render(width: number): string[] } | undefined;
+    const tui = { requestRender() {} };
+    const theme = {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    const footerData = {
+      getGitBranch: () => undefined,
+      getExtensionStatuses: () => statuses,
+      getAvailableProviderCount: () => 1,
+      onBranchChange: () => () => {},
+    };
+    const host = {
+      renderMounted: () => mounted?.render(100),
+      ui: {
+        setFooter(
+          factory?:
+            | ((
+                tui: unknown,
+                theme: unknown,
+                footerData: unknown,
+              ) => { render(width: number): string[]; dispose(): void })
+            | undefined,
+        ) {
+          mounted = factory ? factory(tui, theme, footerData) : undefined;
+        },
+      },
+    };
+
+    const directory = mkdtempSync(join(tmpdir(), "provider-balance-test-"));
+    const handlers = new Map<
+      string,
+      (event: unknown, ctx: ExtensionContext) => unknown
+    >();
+    try {
+      providerBalance(
+        {
+          on(event, handler) {
+            handlers.set(
+              event,
+              handler as (event: unknown, ctx: ExtensionContext) => unknown,
+            );
+          },
+          events: {
+            emit() {},
+            on() {
+              return () => {};
+            },
+          },
+        } as unknown as ExtensionAPI,
+        {
+          adapters: { kilo: { fetch: async () => [{ credits: 42 }] } },
+          cacheDir: directory,
+          random: () => 0.5,
+        },
+      );
+
+      const ctx = {
+        mode: "tui",
+        model: {
+          provider: "kilo",
+          id: "kilo-model",
+          reasoning: false,
+          contextWindow: 128_000,
+        },
+        isIdle: () => false,
+        ui: host.ui,
+        sessionManager: {
+          getBranch: () => [],
+          getEntries: () => [],
+          getCwd: () => "/work",
+          getSessionName: () => undefined,
+          getEntryCount: () => 0,
+          getSessionId: () => "test-session",
+          getLeafId: () => "test-leaf",
+        },
+        getContextUsage: () => null,
+        modelRegistry: {
+          isUsingOAuth: () => false,
+          getApiKeyForProvider: async () => "token",
+        },
+      } as unknown as ExtensionContext;
+
+      const start = handlers.get("session_start");
+      if (!start) throw new Error("missing session_start");
+      start({}, ctx);
+
+      // pi-fusion publishes "side: <label>" once its sidekick is attached.
+      statuses.set("fusion", "side: SWE-2 Medium");
+      let lines = host.renderMounted()!;
+      expect(lines[1]).toContain("side: SWE-2 Medium/kilo-model");
+      // The status line is gone entirely — the badge was the only status.
+      expect(lines).toHaveLength(2);
+      // The suppression is render-scoped: the status map keeps the entry.
+      expect(statuses.get("fusion")).toBe("side: SWE-2 Medium");
+
+      // Other statuses keep their own line while the badge is hoisted.
+      statuses.set("other", "other-status");
+      lines = host.renderMounted()!;
+      expect(lines[1]).toContain("side: SWE-2 Medium/kilo-model");
+      expect(lines[2]).toBe("other-status");
+      statuses.delete("other");
+
+      // A status that merely mentions "side" is not hoisted.
+      statuses.set("odd", "sides: not-a-badge");
+      lines = host.renderMounted()!;
+      expect(lines[1]).toContain("side: SWE-2 Medium/kilo-model");
+      expect(lines[2]).toBe("sides: not-a-badge");
+      statuses.delete("odd");
+
+      // A /side session owns the "side:" slot: fusion's badge falls back to
+      // the status line and the session model readout gets the /side badge.
+      setSideSessionModel({ provider: "zai", id: "glm-5.3" });
+      lines = host.renderMounted()!;
+      expect(lines[1]).toContain("side: kilo-model");
+      expect(lines[1]).not.toContain("SWE-2 Medium");
+      expect(lines[2]).toBe("side: SWE-2 Medium");
+      setSideSessionModel(undefined);
+
+      // Status cleared: footer back to two lines with no badge anywhere.
+      statuses.clear();
+      lines = host.renderMounted()!;
+      expect(lines.join("\n")).not.toContain("side:");
+      expect(lines).toHaveLength(2);
+    } finally {
+      resetSideBadgeState();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});

@@ -93,9 +93,11 @@ function makePi() {
 
 function makeCtx(selections: string[], entries: Entry[] = []) {
   const notes: { msg: string; level?: string }[] = [];
+  const statuses = new Map<string, string>();
   const queue = [...selections];
   return {
     notes,
+    statuses,
     ctx: {
       cwd: "/tmp/fusion-test",
       hasUI: true,
@@ -103,7 +105,10 @@ function makeCtx(selections: string[], entries: Entry[] = []) {
         select: async () => queue.shift(),
         confirm: async () => true,
         notify: (msg: string, level?: string) => notes.push({ msg, level }),
-        setStatus: () => undefined,
+        setStatus: (key: string, text?: string) => {
+          if (text === undefined) statuses.delete(key);
+          else statuses.set(key, text);
+        },
       },
       sessionManager: { getBranch: () => entries },
     },
@@ -180,6 +185,7 @@ function setup() {
   let remapResume = false;
   let gate: Promise<void> | undefined;
   let gateFilter: ((options: ConnectOptions) => boolean) | undefined;
+  let lastStatuses = new Map<string, string>();
   /** Runs inside the connect fn after the connector exists but before it is returned. */
   let onConnect: ((options: ConnectOptions) => void) | undefined;
   const make =
@@ -236,8 +242,10 @@ function setup() {
       return open;
     },
     tool: () => fake.tools.get("sidekick")!,
+    statuses: () => lastStatuses,
     run: (args: string, selections: string[]) => {
-      const { ctx, notes } = makeCtx(selections);
+      const { ctx, notes, statuses } = makeCtx(selections);
+      lastStatuses = statuses;
       return fake.commands
         .get("fusion")!
         .handler(args, ctx)
@@ -286,6 +294,16 @@ describe("activation", () => {
     expect(s.active()).not.toContain("sidekick");
     expect(s.made[0]!.disposed).toBe(true);
     expect(s.entries.at(-1)!.data).toEqual({ enabled: false });
+  });
+
+  test("the status publishes the 'side:' badge contract for the footer", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    // provider-balance's footer folds "side:"-prefixed statuses into the
+    // stats-line model readout; the plain status line is the fallback.
+    expect(s.statuses().get("fusion")).toBe("side: SWE-2 Medium");
+    await s.run("off", []);
+    expect(s.statuses().get("fusion")).toBeUndefined();
   });
 
   test("attaching queues a one-off 'new sidekick, re-brief fully' note for the lead", async () => {

@@ -108,8 +108,13 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
       uiCtx.ui.setStatus("fusion", undefined);
       return;
     }
+    // The "side:" prefix is a footer contract: provider-balance's custom
+    // footer folds "side:"-prefixed extension statuses into the stats line's
+    // right-aligned model readout ("side: SWE-2 Medium/(openai) gpt-6.1-terra
+    // • high") and drops the status line; without that footer this stays a
+    // plain status line.
     const busy = running ? " ⏳" : "";
-    uiCtx.ui.setStatus("fusion", `⚡ ${choiceLabel(state)}${busy}`);
+    uiCtx.ui.setStatus("fusion", `side: ${choiceLabel(state)}${busy}`);
   };
 
   const persist = () => {

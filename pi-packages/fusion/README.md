@@ -45,6 +45,12 @@ persisted.
   `session/send` with `delivery: "steer"`). It never starts a second handoff.
 - **Direct-edit nudge**: when the lead itself uses edit/write/apply_patch, the
   tool result gets one reminder per run to delegate instead.
+- **Footer badge**: an attached sidekick publishes `side: <label>` as its
+  extension status (`⏳` appended while a handoff runs). The provider-balance
+  footer (bermudis-pi-goodies) folds `side:`-prefixed statuses into the
+  stats line's right-aligned model readout —
+  `side: SWE-2 Medium/(openai) gpt-6.1-terra • high` — and drops the status
+  line; without that footer the badge stays a plain status line.
 - **Context**: both sidekicks are capped at 262K and compact themselves. piz
   gets the cap through `compactContextWindow` on create/resume (fork patch
   in `~/build/piz`, promoted to `dist-runtime`).

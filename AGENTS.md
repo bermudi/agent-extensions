@@ -99,6 +99,10 @@ pi-packages/
                          # devin acp swe-2-medium. Tool is defaultActive:false + refuses when off. README has the
                          # observed protocol facts (Devin ACP: swe-2-medium = model swe-2-high + thought_level medium).
                          # Live check: scripts/live-smoke.ts (real model turns); unit tests use fake connectors.
+                         # Badge contract: fusion's status text is `side: <label>` — provider-balance's custom
+                         # footer folds "side:"-prefixed extension statuses into the stats line's model readout
+                         # (`side: X/<model>`, status line suppressed for that render); without that footer the
+                         # status line is the fallback, and a /side session owns the slot (hoist yields).
   ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
   pi-harness/             # ACTIVE (dev-only): test harness for TUI extensions; faithful ToolExecutionComponent render semantics
   session-summarizer/     # INACTIVE (source kept; not linked in .pi/extensions — verify install state before claiming it runs)

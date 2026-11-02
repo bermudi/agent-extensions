@@ -1754,6 +1754,33 @@ export function mergeSideBadgeIntoStatsLine(
   return `${head}${theme.fg("dim", padding + right)}`;
 }
 
+const SIDE_BADGE_STATUS = /^side:\s*\S/;
+
+/**
+ * The first status — in pi's alphabetical key order, matching how
+ * FooterComponent sorts the status line — whose text opens with "side:".
+ * That prefix is the cross-extension contract for folding a second-model
+ * badge into the stats line's model readout (`side: <label>/<model>`):
+ * pi-fusion publishes "side: <sidekick label>" for its attached sidekick,
+ * and the /side fallback status line has the same shape. The text is
+ * normalized the way pi's FooterComponent sanitizes status lines so a
+ * multi-line status can never break the footer.
+ */
+function findSideBadgeStatus(
+  statuses: ReadonlyMap<string, string>,
+): { key: string; text: string } | undefined {
+  for (const [key, raw] of [...statuses].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    const text = raw
+      .replace(/[\r\n\t]/g, " ")
+      .replace(/ +/g, " ")
+      .trim();
+    if (SIDE_BADGE_STATUS.test(text)) return { key, text };
+  }
+  return undefined;
+}
+
 // --- Kilo catalog badge ------------------------------------------------------
 // kilo.ts serves a fallback catalog when its refresh fails (see
 // getKiloCatalogStatus in kilo.ts). The balance footer is the only
@@ -1831,6 +1858,8 @@ export default function providerBalance(
   /** Logged once per footer install: the /side badge merge stopped matching
    *  pi's stats-line shape and the badge fell back to a status line. */
   let sideBadgeDriftLogged = false;
+  /** Same one-shot log for the "side:"-status hoist (pi-fusion's badge). */
+  let sideStatusDriftLogged = false;
 
   function clearBalance(): void {
     balance = undefined;
@@ -2318,18 +2347,43 @@ export default function providerBalance(
             kiloBadge && balanceText
               ? `${kiloBadge} · ${balanceText}`
               : (kiloBadge ?? balanceText);
-          const lines = addBalanceToWorkingDirectoryLine(
-            footer.render(width),
-            width,
-            theme,
-            rightText,
-          );
+          const renderWithBalance = () =>
+            addBalanceToWorkingDirectoryLine(
+              footer.render(width),
+              width,
+              theme,
+              rightText,
+            );
+          // A "side:"-prefixed extension status (pi-fusion's sidekick badge)
+          // asks to be folded into the stats line's model readout instead of
+          // occupying a status line. The status map is the only
+          // extension→footer channel pi exposes: behind the ReadonlyMap type
+          // it is the provider's live Map, and deleting the entry for one
+          // synchronous render is how the status leaves the status line when
+          // the merge lands. A /side session already owns the "side:" slot,
+          // so its badge merge takes precedence and the hoist sits out.
+          const sideModel = getSideSessionModel();
+          const statuses = footerData.getExtensionStatuses();
+          const sideStatus = sideModel
+            ? undefined
+            : findSideBadgeStatus(statuses);
+          let lines: FooterLines;
+          if (sideStatus === undefined) {
+            lines = renderWithBalance();
+          } else {
+            const mutable = statuses as Map<string, string>;
+            mutable.delete(sideStatus.key);
+            try {
+              lines = renderWithBalance();
+            } finally {
+              mutable.set(sideStatus.key, sideStatus.text);
+            }
+          }
           // Side-session badge: prepend "side: " to the stats line's
           // right-aligned model readout (the session model IS the side model
           // while a side session is open). Report whether the merge landed so
           // side.ts can drop the separate status line — or fall back to it
           // when a pi update changes the stats-line shape.
-          const sideModel = getSideSessionModel();
           let merged = false;
           if (sideModel && typeof lines[1] === "string") {
             const statsLine = mergeSideBadgeIntoStatsLine(
@@ -2349,6 +2403,30 @@ export default function providerBalance(
             sideBadgeDriftLogged = true;
             logGoodiesEvent({ type: "side_badge_merge_failed" });
           }
+          if (sideStatus !== undefined) {
+            const statsLine =
+              typeof lines[1] === "string"
+                ? mergeSideBadgeIntoStatsLine(
+                    lines[1],
+                    width,
+                    theme,
+                    `${sideStatus.text}/`,
+                  )
+                : undefined;
+            if (statsLine !== undefined) {
+              lines[1] = statsLine;
+            } else {
+              // The merge couldn't land (stats-line drift): the status
+              // belongs back on its classic line — re-render without the
+              // suppression. The /side merge cannot apply here (it implies
+              // no sideStatus), so only the balance needs redoing.
+              if (!sideStatusDriftLogged) {
+                sideStatusDriftLogged = true;
+                logGoodiesEvent({ type: "side_status_hoist_failed" });
+              }
+              lines = renderWithBalance();
+            }
+          }
           return lines;
         },
         dispose: () => {
@@ -2358,6 +2436,7 @@ export default function providerBalance(
           requestRender = undefined;
           footerInstalled = false;
           sideBadgeDriftLogged = false;
+          sideStatusDriftLogged = false;
           setMergedSideBadgeInstalled(false);
         },
       };
