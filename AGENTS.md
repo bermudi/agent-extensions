@@ -194,7 +194,7 @@ price of true isolation and is intentional.
 
 ## Conventions
 
-- All extensions track the current pi release via per-package devDependencies (pi 1.4.0 since 2026-11-02). After a pi upgrade: bump the `@earendil-works/*` pins in lockstep per package (bun add, never hand-edit), typecheck, test, then smoke with `pi -ne -e <abs entry>` from a scratch cwd. Stale pins here are how a package ends up typechecking against 0.99 while running on 1.4 — keep the date current.
+- Pi-version pins are per-package and are NOT yet uniform. As of 2026-11-02, `bermudis-pi-goodies` and `fusion` pin pi 1.4.0 (and `pi-logfare` pins `pi-ai` 1.4.0); `critique`, `diff`, `external-changes`, `ketamine`, and `council` still pin 0.99.0 (as do INACTIVE `session-summarizer` and archived `experiments/`). Do not assume a 0.99-pinned package typechecks against the 1.4 host — it has not been bumped or verified yet. After a pi upgrade: bump the `@earendil-works/*` pins in lockstep per package (bun add, never hand-edit), typecheck, test, then smoke with `pi -ne -e <abs entry>` from a scratch cwd. Stale pins here are how a package ends up typechecking against 0.99 while running on 1.4 — keep this inventory current when a package is bumped.
 
 - `pi-packages/experiments/` — archive of unused/exploratory extensions. Excluded from typecheck; tests run via `bun run test` inside `pi-packages/experiments/` but the dir is not gated as maintained code.
 - Active extensions live at `pi-packages/<name>/`. New keepers go there; experiments go in `pi-packages/experiments/`.
