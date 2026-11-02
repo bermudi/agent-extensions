@@ -161,18 +161,24 @@ class FakeConnector implements SidekickConnector {
   }
 }
 
-const silent: Logger = {
-  info: () => undefined,
-  warn: () => undefined,
-  error: () => undefined,
-};
-
 function setup() {
   const made: FakeConnector[] = [];
   const calls: ConnectOptions[] = [];
+  const events: {
+    level: string;
+    event: string;
+    data?: Record<string, unknown>;
+  }[] = [];
+  const log: Logger = {
+    info: (event, data) => events.push({ level: "info", event, data }),
+    warn: (event, data) => events.push({ level: "warn", event, data }),
+    error: (event, data) => events.push({ level: "error", event, data }),
+  };
   let counter = 0;
   let failResume = false;
   let gate: Promise<void> | undefined;
+  /** Runs inside the connect fn after the connector exists but before it is returned. */
+  let onConnect: ((options: ConnectOptions) => void) | undefined;
   const make =
     (harness: HarnessId): ConnectFn =>
     async (options) => {
@@ -185,19 +191,24 @@ function setup() {
         options.resumeSessionId ?? `${harness}-s${++counter}`,
       );
       made.push(c);
+      onConnect?.(options);
       return c;
     };
   const fake = makePi();
   createFusion(fake.pi as never, {
     connectors: { piz: make("piz"), devin: make("devin") },
-    log: silent,
+    log,
   });
   return {
     ...fake,
     made,
     calls,
+    events,
     setFailResume: (v: boolean) => {
       failResume = v;
+    },
+    setOnConnect: (fn: ((options: ConnectOptions) => void) | undefined) => {
+      onConnect = fn;
     },
     /** Hold every connect until the returned function is called. */
     holdConnects: () => {
@@ -554,6 +565,7 @@ describe("review fixes", () => {
     await s.run("", ["Devin (SWE-2)"]);
     const first = s.made[0]!;
     s.calls[0]!.onClosed!(new Error("devin acp exited (1)"));
+    expect(first.disposed).toBe(true); // dropConnector disposes the dead object
     const p = s
       .tool()
       .execute("t", { message: "again" }, undefined, undefined, cwd);
@@ -696,5 +708,257 @@ describe("review fixes", () => {
       if (previous === undefined) delete process.env.FUSION_LOG_DIR;
       else process.env.FUSION_LOG_DIR = previous;
     }
+  });
+});
+
+describe("teardown invalidation", () => {
+  const cwd = { cwd: "/tmp" };
+  const teardowns: [string, (s: ReturnType<typeof setup>) => Promise<void>][] =
+    [
+      ["off", async (s) => void (await s.run("off", []))],
+      [
+        "swap",
+        async (s) =>
+          void (await s.run("", ["piz (GLM coding plan)", "GLM-5.3"])),
+      ],
+      [
+        "shutdown",
+        async (s) => void (await s.emit("session_shutdown", {}, {})),
+      ],
+      [
+        "session_start",
+        async (s) =>
+          void (await s.emit(
+            "session_start",
+            { reason: "new" },
+            makeCtx([]).ctx,
+          )),
+      ],
+    ];
+
+  for (const [name, teardown] of teardowns) {
+    test(`a late report after ${name} is not delivered`, async () => {
+      const s = setup();
+      await s.run("", ["Devin (SWE-2)"]);
+      await s
+        .tool()
+        .execute(
+          "t",
+          { message: "bg", block: false },
+          undefined,
+          undefined,
+          cwd,
+        );
+      await teardown(s);
+      s.made[0]!.finish("stale report");
+      await flush();
+      await flush();
+      expect(s.sent).toHaveLength(0);
+    });
+
+    test(`a turn rejection raised during ${name} teardown is not delivered`, async () => {
+      const s = setup();
+      await s.run("", ["Devin (SWE-2)"]);
+      await s
+        .tool()
+        .execute(
+          "t",
+          { message: "bg", block: false },
+          undefined,
+          undefined,
+          cwd,
+        );
+      const sk = s.made[0]!;
+      // Real connectors reject the running turn while tearing down; the
+      // rejection arrives inside dispose(), under the already-bumped epoch.
+      const realDispose = sk.dispose.bind(sk);
+      sk.dispose = async () => {
+        sk.fail(new Error("sidekick shut down"));
+        await realDispose();
+      };
+      await teardown(s);
+      expect(s.sent).toHaveLength(0);
+      await flush();
+      await flush();
+      expect(s.sent).toHaveLength(0);
+    });
+  }
+
+  test("an old session's completion after new state is restored delivers nothing and marks nothing briefed", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const old = s.made[0]!;
+    await s
+      .tool()
+      .execute("t", { message: "bg", block: false }, undefined, undefined, cwd);
+    const entriesBefore = s.entries.length;
+    const restored: Entry[] = [
+      {
+        type: "custom",
+        customType: "fusion-state",
+        data: {
+          enabled: true,
+          harness: "devin",
+          model: "swe-2-medium",
+          // Same session id as the stale connector: only the epoch can tell
+          // this outcome belongs to the previous session.
+          sidekickSessionId: old.sessionId,
+          sidekickBriefed: false,
+        },
+      },
+    ];
+    await s.emit(
+      "session_start",
+      { reason: "resume" },
+      makeCtx([], restored).ctx,
+    );
+    old.finish("stale report");
+    await flush();
+    await flush();
+    expect(s.sent).toHaveLength(0);
+    // A stale success must not mark the restored sidekick briefed.
+    expect(s.entries.length).toBe(entriesBefore);
+  });
+
+  test("a genuine background failure (no teardown) still delivers its error", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    await s
+      .tool()
+      .execute("t", { message: "bg", block: false }, undefined, undefined, cwd);
+    // The transport drops the connector and rejects the pending turn.
+    s.calls[0]!.onClosed!(new Error("devin acp exited (1)"));
+    s.made[0]!.fail(new Error("transport gone"));
+    await flush();
+    await flush();
+    expect(s.sent).toHaveLength(1);
+    expect(s.sent[0]!.message.content).toContain(
+      "Sidekick handoff #1 failed: transport gone",
+    );
+  });
+});
+
+describe("connector drop and early close", () => {
+  const cwd = { cwd: "/tmp" };
+
+  test("a stale connector's late onClosed disposes it (cleanup failures logged) without touching the current one", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const old = s.made[0]!;
+    await s.run("", ["piz (GLM coding plan)", "GLM-5.3"]); // swap: old no longer current
+    const current = s.made[1]!;
+    old.dispose = () => Promise.reject(new Error("cleanup broke"));
+    s.calls[0]!.onClosed!(new Error("late death"));
+    await flush();
+    await flush();
+    expect(s.events.some((e) => e.event === "sidekick.connector_dropped")).toBe(
+      true,
+    );
+    expect(
+      s.events.some((e) => e.event === "sidekick.drop_cleanup_failed"),
+    ).toBe(true);
+    // The current connector is untouched and still serves handoffs.
+    const p = s
+      .tool()
+      .execute("t", { message: "ok" }, undefined, undefined, cwd);
+    await flush();
+    current.finish("fine");
+    expect(text(await p)).toContain("fine");
+  });
+
+  test("a connector whose transport dies during connect is disposed and never installed", async () => {
+    const s = setup();
+    s.setOnConnect((opts) => opts.onClosed?.(new Error("died during connect")));
+    const notes = await s.run("", ["Devin (SWE-2)"]);
+    expect(notes.at(-1)!.msg).toMatch(
+      /could not start.*transport closed during startup/,
+    );
+    expect(s.made[0]!.disposed).toBe(true);
+    expect(s.active()).not.toContain("sidekick");
+  });
+});
+
+describe("context status", () => {
+  const cwd = { cwd: "/tmp" };
+
+  test("status shows last reported context; unknown before any measurement, zero counts, reset on swap, stale cannot restore", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    let notes = await s.run("status", []);
+    expect(notes.at(-1)!.msg).toContain("context unknown");
+
+    const p1 = s
+      .tool()
+      .execute("t1", { message: "a" }, undefined, undefined, cwd);
+    await flush();
+    s.made[0]!.finish("done", 0);
+    await p1;
+    notes = await s.run("status", []);
+    expect(notes.at(-1)!.msg).toContain("context 0K/262K");
+
+    const p2 = s
+      .tool()
+      .execute("t2", { message: "b" }, undefined, undefined, cwd);
+    await flush();
+    s.made[0]!.finish("done", 120_000);
+    await p2;
+    notes = await s.run("status", []);
+    expect(notes.at(-1)!.msg).toContain("context 120K/262K");
+
+    // A handoff still in flight across a swap cannot leave its measurement.
+    await s
+      .tool()
+      .execute(
+        "t3",
+        { message: "bg", block: false },
+        undefined,
+        undefined,
+        cwd,
+      );
+    await s.run("", ["piz (GLM coding plan)", "GLM-5.3"]);
+    s.made[0]!.finish("stale", 200_000);
+    await flush();
+    await flush();
+    notes = await s.run("status", []);
+    expect(notes.at(-1)!.msg).toContain("context unknown");
+  });
+
+  test("a reattach to the same session id keeps the last measurement; a fresh replacement resets it", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]);
+    const p1 = s
+      .tool()
+      .execute("t1", { message: "a" }, undefined, undefined, cwd);
+    await flush();
+    s.made[0]!.finish("done", 88_000);
+    await p1;
+
+    // Transport dies; the next handoff reattaches to the same session id and
+    // the measurement survives.
+    s.calls[0]!.onClosed!(new Error("devin acp exited (1)"));
+    const p2 = s
+      .tool()
+      .execute("t2", { message: "b" }, undefined, undefined, cwd);
+    await flush();
+    expect(s.calls.at(-1)!.resumeSessionId).toBe(s.made[0]!.sessionId);
+    let notes = await s.run("status", []);
+    expect(notes.at(-1)!.msg).toContain("context 88K/262K");
+    s.made[1]!.finish("done2", 10_000);
+    await p2;
+
+    // A failed reattach lands on a NEW session id: nothing was measured there.
+    s.calls.at(-1)!.onClosed!(new Error("dead again"));
+    s.setFailResume(true);
+    const p3 = s
+      .tool()
+      .execute("t3", { message: "c" }, undefined, undefined, cwd);
+    await flush();
+    await flush();
+    notes = await s.run("status", []);
+    expect(notes.at(-1)!.msg).toContain("context unknown");
+    s.made[2]!.finish("done3", 5_000);
+    await p3;
+    notes = await s.run("status", []);
+    expect(notes.at(-1)!.msg).toContain("context 5K/262K");
   });
 });

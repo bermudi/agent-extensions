@@ -51,6 +51,8 @@ interface FusionState {
 
 interface RunningHandoff {
   id: number;
+  /** Epoch at start; a late settlement under a newer epoch must not deliver or mutate. */
+  epoch: number;
   promise: Promise<TurnOutcome>;
   /** Report goes to the lead as a message when the handoff ends (block:false). */
   deliverAsMessage: boolean;
@@ -87,6 +89,8 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
    */
   let epoch = 0;
   let handoffCounter = 0;
+  /** Last context use a handoff reported; reset when the sidekick session is gone. */
+  let lastContextUsed: number | undefined;
   /** Note attached to the next lead run (sidekick attached/replaced). */
   let pendingNote: string | undefined;
   let nudgedThisRun = false;
@@ -123,7 +127,30 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     connector = undefined;
     connecting = undefined;
     running = undefined;
+    lastContextUsed = undefined;
     if (current) await current.dispose().catch(() => undefined);
+    setStatus();
+  };
+
+  /**
+   * Drop a connector whose transport died on its own. The dead object is
+   * disposed even when it is no longer the installed connector (a swap may
+   * have replaced it already); the recorded session id is kept so the next
+   * handoff can reattach.
+   */
+  const dropConnector = async (dead: SidekickConnector, error: Error) => {
+    if (connector === dead) connector = undefined;
+    log.warn("sidekick.connector_dropped", { error: error.message });
+    try {
+      await dead.dispose();
+    } catch (disposeError) {
+      log.warn("sidekick.drop_cleanup_failed", {
+        error:
+          disposeError instanceof Error
+            ? disposeError.message
+            : String(disposeError),
+      });
+    }
     setStatus();
   };
 
@@ -133,24 +160,29 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     resumeSessionId?: string,
   ): Promise<SidekickConnector> => {
     // The connector learns it died only after it exists, so hand onClosed a
-    // holder; a close before assignment is caught by the epoch/closed checks.
-    const holder: { self?: SidekickConnector } = {};
+    // holder; a close before assignment is recorded and answered with a
+    // dispose + rejection below rather than installing a dead connector.
+    const holder: { self?: SidekickConnector; closedReason?: Error } = {};
     const created = await deps.connectors[choice.harness]({
       cwd,
       model: choice.model,
       resumeSessionId,
       log,
       onClosed: (error) => {
-        // Drop the dead connector; state keeps the session id so the next
-        // handoff reattaches (or falls back to a fresh, re-briefed sidekick).
-        if (holder.self && connector === holder.self) {
-          connector = undefined;
-          log.warn("sidekick.connector_dropped", { error: error.message });
-          setStatus();
+        if (!holder.self) {
+          holder.closedReason = error;
+          return;
         }
+        void dropConnector(holder.self, error);
       },
     });
     holder.self = created;
+    if (holder.closedReason) {
+      await dropConnector(created, holder.closedReason);
+      throw new Error(
+        `sidekick transport closed during startup: ${holder.closedReason.message}`,
+      );
+    }
     return created;
   };
 
@@ -205,9 +237,11 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     }
     connector = result.connector;
     if (state.sidekickSessionId !== connector.sessionId) {
-      // A different harness session than the one on record: it has never been briefed.
+      // A different harness session than the one on record: it has never been
+      // briefed, and nothing was ever measured on it.
       state.sidekickSessionId = connector.sessionId;
       state.sidekickBriefed = false;
+      lastContextUsed = undefined;
       persist();
     }
     return result;
@@ -250,6 +284,7 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     const activity: SidekickActivity[] = [];
     const handoff: RunningHandoff = {
       id,
+      epoch,
       deliverAsMessage,
       activity,
       promise: sidekick.prompt(
@@ -282,6 +317,11 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
             inputTokens: outcome.inputTokens,
             outputTokens: outcome.outputTokens,
           });
+          // Teardown/swap/session change since the start makes this outcome
+          // stale: it must neither deliver nor mutate current state.
+          if (handoff.epoch !== epoch) return;
+          if (outcome.contextUsed !== undefined)
+            lastContextUsed = outcome.contextUsed;
           if (handoff.deliverAsMessage) {
             pi.sendMessage(
               {
@@ -298,6 +338,7 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
           const message =
             error instanceof Error ? error.message : String(error);
           log.error("handoff.failed", { id, error: message });
+          if (handoff.epoch !== epoch) return;
           if (handoff.deliverAsMessage) {
             pi.sendMessage(
               {
@@ -446,6 +487,7 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
         void handoff.promise.then(
           () => {
             if (
+              handoff.epoch === epoch &&
               state.sidekickSessionId === briefedSession &&
               !state.sidekickBriefed
             ) {
@@ -495,9 +537,13 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
       uiCtx = ctx;
       const arg = args.trim();
       if (arg === "status") {
+        const context =
+          lastContextUsed === undefined
+            ? "context unknown"
+            : `context ${Math.round(lastContextUsed / 1000)}K/${SIDEKICK_CONTEXT_WINDOW / 1000}K`;
         ctx.ui.notify(
           state.enabled
-            ? `Fusion on: ${choiceLabel(state)}${running ? ` (handoff #${running.id} running)` : ""}${state.sidekickSessionId ? ` · session ${state.sidekickSessionId}` : ""}`
+            ? `Fusion on: ${choiceLabel(state)}${running ? ` (handoff #${running.id} running)` : ""}${state.sidekickSessionId ? ` · session ${state.sidekickSessionId}` : ""} · ${context}`
             : "Fusion is off.",
           "info",
         );
