@@ -46,6 +46,12 @@ export interface RpcPeerOptions {
   idPrefix: string;
   write: (line: string) => void;
   onDiagnostic?: (message: string, data?: Record<string, unknown>) => void;
+  /**
+   * Called exactly once when the peer closes, after it is marked closed, its
+   * buffer is cleared, and pending requests are rejected. The peer already
+   * reports isClosed inside this callback.
+   */
+  onClose?: (reason: Error) => void;
 }
 
 /** One line can be large (piz snapshots) but must not grow without bound on a broken stream. */
@@ -89,16 +95,25 @@ export class RpcPeer {
 
   /** Feed raw transport bytes (already decoded to text). */
   feed(chunk: string): void {
+    if (this.closed) return;
     this.buffer += chunk;
-    if (this.buffer.length > MAX_LINE_CHARS && !this.buffer.includes("\n")) {
-      this.close(new Error("rpc stream sent an oversized line"));
-      return;
-    }
     let newline: number;
     while ((newline = this.buffer.indexOf("\n")) >= 0) {
+      // Each line is bounded individually: a newline does not rescue a line
+      // that already exceeds the cap.
+      if (newline > MAX_LINE_CHARS) {
+        this.close(new Error("rpc stream sent an oversized line"));
+        return;
+      }
       const line = this.buffer.slice(0, newline).trim();
       this.buffer = this.buffer.slice(newline + 1);
       if (line) this.dispatch(line);
+      // A handler may have closed the peer; never dispatch buffered frames
+      // after close.
+      if (this.closed) return;
+    }
+    if (this.buffer.length > MAX_LINE_CHARS) {
+      this.close(new Error("rpc stream sent an oversized line"));
     }
   }
 
@@ -106,8 +121,10 @@ export class RpcPeer {
     if (this.closed) return;
     this.closed = true;
     const error = reason ?? new Error("rpc closed");
+    this.buffer = "";
     for (const entry of this.pending.values()) entry.reject(error);
     this.pending.clear();
+    this.options.onClose?.(error);
   }
 
   get isClosed(): boolean {
@@ -209,10 +226,16 @@ export function withDeadline<T>(
 
 /**
  * SIGTERM then SIGKILL after 3s. A child that already died (including by
- * signal: exitCode is null then, and 'exit' will not fire again) returns at once.
+ * signal: exitCode is null then, and 'exit' will not fire again) or that
+ * never spawned (pid undefined after a failed spawn) returns at once.
  */
 export async function stopChild(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (
+    child.pid === undefined ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  )
+    return;
   child.kill("SIGTERM");
   await new Promise<void>((resolve) => {
     const timer = setTimeout(() => {

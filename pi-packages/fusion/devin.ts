@@ -63,7 +63,6 @@ const sessionUpdateSchema = z
   .passthrough();
 
 const START_TIMEOUT_MS = 60_000;
-const INJECT_SETTLE_MS = 1500;
 
 interface ActiveTurn {
   callbacks: TurnCallbacks;
@@ -111,13 +110,15 @@ export async function connectDevin(
   }
 }
 
-class DevinConnector implements SidekickConnector {
+export class DevinConnector implements SidekickConnector {
   readonly harness = "devin" as const;
   readonly model: string;
   sessionId = "";
   private readonly peer: RpcPeer;
   private active: ActiveTurn | undefined;
   private disposed = false;
+  /** One-shot guard: onClosed necessarily sees an already-closed peer. */
+  private transportClosed = false;
 
   constructor(
     private readonly child: ChildProcess,
@@ -132,11 +133,14 @@ class DevinConnector implements SidekickConnector {
       },
       onDiagnostic: (message, data) =>
         options.log.warn(`devin.rpc.${message}`, data),
+      onClose: (reason) => this.onTransportClosed(reason),
     });
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => this.peer.feed(chunk));
-    child.on("exit", (code) => this.onExit(code));
-    child.on("error", (error) => this.onExit(null, error));
+    child.on("exit", (code) =>
+      this.onTransportClosed(new Error(`devin acp exited (${code})`)),
+    );
+    child.on("error", (error) => this.onTransportClosed(error));
     this.peer.setRequestHandler(async (method, params) =>
       this.onRequest(method, params),
     );
@@ -231,21 +235,23 @@ class DevinConnector implements SidekickConnector {
     };
     signal.addEventListener("abort", onAbort, { once: true });
     try {
-      const result = promptResultSchema.parse(
-        await this.peer.request("session/prompt", {
-          sessionId: this.sessionId,
-          prompt: [{ type: "text", text }],
-        }),
-      );
-      if (turn.injects.size > 0) {
-        await Promise.race([
-          Promise.all([...turn.injects]),
-          new Promise((r) => setTimeout(r, INJECT_SETTLE_MS)),
-        ]);
-        if (turn.injects.size > 0) {
-          turn.warnings.push(
-            "A lead update was still unanswered when the turn ended; it may have run as a separate turn whose output is not in this report.",
-          );
+      let result: z.infer<typeof promptResultSchema>;
+      try {
+        result = promptResultSchema.parse(
+          await this.peer.request("session/prompt", {
+            sessionId: this.sessionId,
+            prompt: [{ type: "text", text }],
+          }),
+        );
+      } finally {
+        // Keep the connector busy until every injected session/prompt has
+        // settled — a main request that ended (or failed) proves nothing
+        // about injected ones, and an unanswered inject may be running as a
+        // separate turn that must not be orphaned. Injects arriving while
+        // draining join turn.injects and are drained too, and the report is
+        // only collected once nothing is in flight.
+        while (turn.injects.size > 0) {
+          await Promise.all([...turn.injects]);
         }
       }
       return {
@@ -302,9 +308,10 @@ class DevinConnector implements SidekickConnector {
     this.options.log.info("devin.acp.stopped", { sessionId: this.sessionId });
   }
 
-  private onExit(code: number | null, error?: Error): void {
-    if (this.disposed || this.peer.isClosed) return;
-    const reason = error ?? new Error(`devin acp exited (${code})`);
+  private onTransportClosed(reason: Error): void {
+    // Marked before peer.close: close() fires onClose, which lands back here.
+    if (this.disposed || this.transportClosed) return;
+    this.transportClosed = true;
     this.peer.close(reason);
     this.active = undefined;
     this.options.log.error("devin.transport.closed", { error: reason.message });
@@ -324,12 +331,14 @@ class DevinConnector implements SidekickConnector {
         })
         .passthrough()
         .parse(params);
+      const kinds = parsed.options.map((o) => o.kind);
       // Never allow_always: that would outlive the fusion session.
       const allow = parsed.options.find((o) => o.kind === "allow_once");
-      this.options.log.warn("devin.permission.auto_allowed", {
-        kinds: parsed.options.map((o) => o.kind),
-      });
-      if (!allow) return { outcome: { outcome: "cancelled" } };
+      if (!allow) {
+        this.options.log.warn("devin.permission.cancelled", { kinds });
+        return { outcome: { outcome: "cancelled" } };
+      }
+      this.options.log.warn("devin.permission.auto_allowed", { kinds });
       return { outcome: { outcome: "selected", optionId: allow.optionId } };
     }
     throw new RpcError(-32601, `fusion does not handle ${method}`);

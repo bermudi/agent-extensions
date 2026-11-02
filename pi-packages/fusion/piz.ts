@@ -109,16 +109,32 @@ export async function connectPiz(
     if (key.startsWith("HERDR_")) delete env[key];
   delete env.ZCODE_WORKSPACE_IDENTITY;
 
-  const child = spawn(
-    "node",
-    [binary, "app-server", "--socket", socketPath, "--no-plugins"],
-    {
-      cwd: options.cwd,
-      env,
-      stdio: ["ignore", "ignore", "pipe"],
-      detached: false,
-    },
-  );
+  let child: ChildProcess;
+  try {
+    child = spawn(
+      "node",
+      [binary, "app-server", "--socket", socketPath, "--no-plugins"],
+      {
+        cwd: options.cwd,
+        env,
+        stdio: ["ignore", "ignore", "pipe"],
+        detached: false,
+      },
+    );
+  } catch (error) {
+    rmSync(socketDir, { recursive: true, force: true });
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`piz sidekick failed to start: ${message}`);
+  }
+  // A spawn that fails asynchronously (bad cwd, missing node) surfaces through
+  // the child's 'error' event — which would otherwise be an unhandled EventEmitter
+  // error — until the connector installs its own listener. Record it so
+  // waitForSocket fails fast instead of polling 60s.
+  let startupError: Error | undefined;
+  const onStartupError = (error: Error) => {
+    startupError = error;
+  };
+  child.on("error", onStartupError);
   let stderrTail = "";
   child.stderr?.setEncoding("utf8");
   child.stderr?.on("data", (chunk: string) => {
@@ -128,9 +144,14 @@ export async function connectPiz(
 
   let connector: PizConnector | undefined;
   try {
-    await waitForSocket(socketPath, child);
+    await waitForSocket(socketPath, child, () => startupError);
     const socket = await openSocket(socketPath);
     connector = new PizConnector(child, socket, options, socketDir);
+    // The connector has its own 'error' listener now.
+    child.removeListener("error", onStartupError);
+    // A spawn error in the window between socket connect and the connector's
+    // listener going up is still fatal.
+    if (startupError) throw startupError;
     // A core that accepts the connection but never answers must not wedge /fusion.
     await withDeadline(
       connector.start(options.resumeSessionId),
@@ -141,6 +162,7 @@ export async function connectPiz(
   } catch (error) {
     if (connector) await connector.dispose();
     else {
+      child.removeListener("error", onStartupError);
       await stopChild(child);
       rmSync(socketDir, { recursive: true, force: true });
     }
@@ -151,11 +173,19 @@ export async function connectPiz(
   }
 }
 
-async function waitForSocket(path: string, child: ChildProcess): Promise<void> {
+async function waitForSocket(
+  path: string,
+  child: ChildProcess,
+  spawnError: () => Error | undefined,
+): Promise<void> {
   const deadline = Date.now() + CORE_START_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    const error = spawnError();
+    if (error) throw error;
     if (child.exitCode !== null)
       throw new Error(`core exited with code ${child.exitCode}`);
+    if (child.signalCode !== null)
+      throw new Error(`core killed by signal ${child.signalCode}`);
     if (existsSync(path)) return;
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -174,7 +204,7 @@ function openSocket(path: string): Promise<Socket> {
   });
 }
 
-class PizConnector implements SidekickConnector {
+export class PizConnector implements SidekickConnector {
   readonly harness = "piz" as const;
   readonly model: string;
   sessionId = "";
@@ -182,6 +212,8 @@ class PizConnector implements SidekickConnector {
   private active: ActiveTurn | undefined;
   private inputCounter = 0;
   private disposed = false;
+  /** One-shot guard: onClosed necessarily sees an already-closed peer. */
+  private transportClosed = false;
 
   constructor(
     private readonly child: ChildProcess,
@@ -196,6 +228,7 @@ class PizConnector implements SidekickConnector {
       write: (line) => socket.write(line),
       onDiagnostic: (message, data) =>
         options.log.warn(`piz.rpc.${message}`, data),
+      onClose: (reason) => this.onTransportClosed(reason),
     });
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => this.peer.feed(chunk));
@@ -206,6 +239,7 @@ class PizConnector implements SidekickConnector {
     child.on("exit", (code) =>
       this.onTransportClosed(new Error(`piz core exited (${code})`)),
     );
+    child.on("error", (error) => this.onTransportClosed(error));
     this.peer.setRequestHandler(async (method) => {
       if (method === "session/requestRuntimePreferences") {
         // Same local defaults the desktop host answers with; no memory, no extras.
@@ -384,7 +418,9 @@ class PizConnector implements SidekickConnector {
   }
 
   private onTransportClosed(error: Error): void {
-    if (this.disposed || this.peer.isClosed) return;
+    // Marked before peer.close: close() fires onClose, which lands back here.
+    if (this.disposed || this.transportClosed) return;
+    this.transportClosed = true;
     this.peer.close(error);
     const turn = this.active;
     this.active = undefined;

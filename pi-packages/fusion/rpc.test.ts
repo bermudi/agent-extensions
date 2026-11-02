@@ -86,6 +86,97 @@ describe("RpcPeer", () => {
     await expect(p).rejects.toThrow("gone");
     await expect(peer.request("y")).rejects.toThrow(/rpc closed/);
   });
+
+  const OVER = 8 * 1024 * 1024 + 1;
+
+  test("an unterminated oversized fragment closes the peer once", async () => {
+    const closes: string[] = [];
+    const peer = new RpcPeer({
+      jsonrpc: false,
+      idPrefix: "t",
+      write: () => undefined,
+      onClose: (r) => closes.push(r.message),
+    });
+    const p = peer.request("x");
+    peer.feed("x".repeat(OVER));
+    expect(closes).toEqual(["rpc stream sent an oversized line"]);
+    await expect(p).rejects.toThrow(/oversized/);
+    peer.close(new Error("again")); // idempotent
+    expect(closes).toHaveLength(1);
+  });
+
+  test("a complete oversized line closes the peer without dispatching it", () => {
+    const seen: string[] = [];
+    const closes: string[] = [];
+    const peer = new RpcPeer({
+      jsonrpc: false,
+      idPrefix: "t",
+      write: () => undefined,
+      onClose: (r) => closes.push(r.message),
+    });
+    peer.onNotification((m) => seen.push(m));
+    peer.feed(
+      `${JSON.stringify({ method: "big", params: { d: "x".repeat(OVER) } })}\n`,
+    );
+    expect(seen).toHaveLength(0);
+    expect(closes).toEqual(["rpc stream sent an oversized line"]);
+  });
+
+  test("a normal frame followed by an oversized trailing fragment dispatches then closes", () => {
+    const seen: string[] = [];
+    const closes: string[] = [];
+    const peer = new RpcPeer({
+      jsonrpc: false,
+      idPrefix: "t",
+      write: () => undefined,
+      onClose: (r) => closes.push(r.message),
+    });
+    peer.onNotification((m) => seen.push(m));
+    peer.feed(
+      `${JSON.stringify({ method: "ok", params: {} })}\n${"y".repeat(OVER)}`,
+    );
+    expect(seen).toEqual(["ok"]);
+    expect(closes).toEqual(["rpc stream sent an oversized line"]);
+  });
+
+  test("after close: feed ignores everything, buffered frames are dropped, onClose fires once", () => {
+    const seen: string[] = [];
+    const closes: string[] = [];
+    const peer = new RpcPeer({
+      jsonrpc: false,
+      idPrefix: "t",
+      write: () => undefined,
+      onClose: (r) => closes.push(r.message),
+    });
+    peer.onNotification((m) => seen.push(m));
+    // Buffer a partial line, then close mid-stream.
+    peer.feed(JSON.stringify({ method: "late", params: {} }));
+    peer.close(new Error("shutdown"));
+    expect(closes).toEqual(["shutdown"]);
+    // The buffered frame is never dispatched, and new input is ignored.
+    peer.feed(`\n${JSON.stringify({ method: "later", params: {} })}\n`);
+    expect(seen).toHaveLength(0);
+    peer.close(new Error("twice"));
+    expect(closes).toHaveLength(1);
+    expect(peer.isClosed).toBe(true);
+  });
+
+  test("a handler that closes the peer stops dispatch of the remaining buffer", () => {
+    const seen: string[] = [];
+    const peer = new RpcPeer({
+      jsonrpc: false,
+      idPrefix: "t",
+      write: () => undefined,
+    });
+    peer.onNotification((m) => {
+      seen.push(m);
+      peer.close(new Error("stop"));
+    });
+    peer.feed(
+      `${JSON.stringify({ method: "first" })}\n${JSON.stringify({ method: "second" })}\n`,
+    );
+    expect(seen).toEqual(["first"]);
+  });
 });
 
 describe("withDeadline", () => {
