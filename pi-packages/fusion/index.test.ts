@@ -499,6 +499,12 @@ describe("persistence", () => {
       },
     ];
     await s.emit("session_start", { reason: "fork" }, makeCtx([], entries).ctx);
+    // The fork queues its own fresh-sidekick note (the session_start clear
+    // must not eat the note the fork branch itself queues).
+    const note = (await s.emit("before_agent_start", {}, {})) as {
+      message?: { content: string };
+    };
+    expect(note.message?.content).toMatch(/NEW sidekick with no memory/);
     const p = s
       .tool()
       .execute("t", { message: "go" }, undefined, undefined, { cwd: "/tmp" });
@@ -506,6 +512,63 @@ describe("persistence", () => {
     expect(s.calls.at(-1)!.resumeSessionId).toBeUndefined();
     s.made[0]!.finish("ok");
     await p;
+  });
+
+  test("a note queued before a session switch is not delivered in the resumed session", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]); // queues the "NEW sidekick" note
+    // Switch sessions before the next lead run consumes that note.
+    const entries: Entry[] = [
+      {
+        type: "custom",
+        customType: "fusion-state",
+        data: {
+          enabled: true,
+          harness: "devin",
+          model: "swe-2-medium",
+          sidekickSessionId: "old-1",
+          sidekickBriefed: true,
+        },
+      },
+    ];
+    await s.emit(
+      "session_start",
+      { reason: "resume" },
+      makeCtx([], entries).ctx,
+    );
+    // The resumed sidekick reattaches with its memory; the stale "NEW
+    // sidekick with no memory" note from the previous session must not fire.
+    expect(await s.emit("before_agent_start", {}, {})).toBeUndefined();
+  });
+
+  test("a note queued before switching into a disabled session is dropped, not held for the next enabled one", async () => {
+    const s = setup();
+    await s.run("", ["Devin (SWE-2)"]); // queues the "NEW sidekick" note
+    await s.emit("session_start", { reason: "resume" }, makeCtx([]).ctx);
+    expect(s.active()).not.toContain("sidekick");
+    expect(await s.emit("before_agent_start", {}, {})).toBeUndefined();
+    // Switch on into an enabled session: the note queued two sessions ago
+    // must not surface here either (before_agent_start's early return on a
+    // disabled session alone would have left it pending).
+    const entries: Entry[] = [
+      {
+        type: "custom",
+        customType: "fusion-state",
+        data: {
+          enabled: true,
+          harness: "devin",
+          model: "swe-2-medium",
+          sidekickSessionId: "old-1",
+          sidekickBriefed: true,
+        },
+      },
+    ];
+    await s.emit(
+      "session_start",
+      { reason: "resume" },
+      makeCtx([], entries).ctx,
+    );
+    expect(await s.emit("before_agent_start", {}, {})).toBeUndefined();
   });
 
   test("unknown harness/model in saved state is ignored (stays off)", async () => {

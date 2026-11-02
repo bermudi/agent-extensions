@@ -67,8 +67,13 @@ export interface SidekickConnector {
   ): Promise<TurnOutcome>;
   /**
    * Deliver a message into the turn that is currently running (steering).
-   * Returns false when the harness had no running turn to inject into; the
-   * caller then queues it as the next handoff.
+   * Returns false when the message was NOT delivered into a running turn:
+   * no running turn, or the harness rejected / did not queue the steer
+   * (e.g. the turn had just ended). The caller never queues it as the next
+   * handoff: a non-blocking (`block: false`) call throws so the lead
+   * retries the call, and a blocking call waits for the running handoff's
+   * report and returns it flagged as undelivered, instructing the lead to
+   * re-send the update as a new handoff.
    */
   inject(text: string): Promise<boolean>;
   /** Stop the running turn, keeping the session. */

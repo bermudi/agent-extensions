@@ -691,6 +691,10 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
 
   pi.on("session_start", async (event, ctx) => {
     uiCtx = ctx;
+    // A note queued in the previous session must never be delivered in this
+    // one (wrong harness/model, "NEW sidekick" for a reattached one). The
+    // fork branch below queues this session's own note after this clear.
+    pendingNote = undefined;
     await disposeConnector();
     state = { enabled: false };
     for (const entry of ctx.sessionManager.getBranch()) {

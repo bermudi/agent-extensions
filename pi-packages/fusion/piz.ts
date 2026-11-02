@@ -384,7 +384,9 @@ export class PizConnector implements SidekickConnector {
       // Without steerQueued the core treated the text as a fresh prompt (the
       // turn had just ended). That orphan turn would run unattended and its
       // events would be misattributed to the next handoff, so stop it before
-      // reporting failure; the caller retries as a normal handoff.
+      // reporting failure (see the inject() contract in types.ts: the caller
+      // throws for block:false / flags the report undelivered for blocking
+      // calls, and the lead re-sends the update).
       this.options.log.warn("piz.steer.not_queued_stopping_orphan", {});
       await this.peer
         .request("session/stop", { sessionId: this.sessionId })
