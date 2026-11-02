@@ -37,6 +37,7 @@ type FeatureName =
   | "prefer-tools"
   | "keep-model"
   | "model-thinking"
+  | "model-identity"
   | "clean-tui"
   | "review"
   | "kilo"
@@ -52,6 +53,7 @@ const FEATURES: FeatureName[] = [
   "prefer-tools",
   "keep-model",
   "model-thinking",
+  "model-identity",
   "clean-tui",
   "review",
   "kilo",

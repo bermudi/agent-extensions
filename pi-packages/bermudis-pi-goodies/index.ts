@@ -9,6 +9,7 @@
  *   - prefer-tools     hook              block legacy tools (trash; blocks rg's -r replace flag)
  *   - keep-model       hook              preserve the active model across /new
  *   - model-thinking   /model-thinking   per-model default thinking levels, applied on switch
+ *   - model-identity   hook              inject the active model's identity into the system prompt
  *   - clean-tui        tool overrides    collapse built-in tool output; keep a one-line call header, hide results/diffs until expanded
  *   - review           /review, /end-review  code review workflow (uncommitted, branch, commit, PR, folder)
  *   - kilo             provider          access Kilo Gateway models
@@ -30,6 +31,7 @@ import copyWithModel from "./copy-with-model.ts";
 import kilo from "./kilo.ts";
 import keepModelOnNew from "./keep-model-on-new.ts";
 import modelThinking from "./model-thinking.ts";
+import modelIdentity from "./model-identity.ts";
 import cleanTui from "./clean-tui.ts";
 import review from "./review.ts";
 import providerBalance from "./provider-balance.ts";
@@ -52,6 +54,7 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   if (isEnabled("prefer-tools")) preferTools(pi);
   if (isEnabled("keep-model")) keepModelOnNew(pi);
   if (isEnabled("model-thinking")) modelThinking(pi);
+  if (isEnabled("model-identity")) modelIdentity(pi);
   // clean-tui reads its config here, at load: when disabled, nothing is
   // registered and pi's own tools stay fully native; the flag is cleared so
   // pi-codex's integration renders natively too (a toggle needs /reload).
