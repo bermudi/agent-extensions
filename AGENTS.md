@@ -69,6 +69,11 @@ pi-packages/
                          # the slot (hoist yields). Protocol facts: Devin ACP swe-2-medium = model
                          # swe-2-high + thought_level medium. Live check:
                          # scripts/fusion-live-smoke.ts (real model turns); unit tests use fake connectors.
+                         # Fusion on/off and pairing are session-scoped: restore latest valid
+                         # fusion-state from getEntries, not getBranch; session_tree re-applies
+                         # tool activation after Pi restores the branch loadout without replacing
+                         # the live sidekick. Conversation navigation never rewinds sidekick
+                         # memory; forks clear the parent sidekick id.
                          # anthropic (Claude Pro/Max) subscription usage (added 2026-10-31). Two provider ids:
                          # `anthropic` (pi's own OAuth login, "Anthropic (Claude Pro/Max)") and
                          # `claude-code` (@earendil-works/pi-claude-code, the extension bermudi actually

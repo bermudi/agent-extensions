@@ -19,14 +19,17 @@ export const LEAD_GUIDELINES: string[] = [
 ];
 
 export const LEAD_SNIPPET =
-  "Hand hands-on work (implementation, environment, builds, tests, broad searches) to your persistent sidekick agent";
+  "Use Fusion's sidekick tool for hands-on work (implementation, environment, builds, tests, broad searches)";
 
 export const SIDEKICK_TOOL_DESCRIPTION = [
-  "Hand off work to your persistent sidekick: one coding agent for the whole session, on the same machine (shared filesystem and repos, its own shells).",
+  "Fusion sidekick tool: hand off work to your persistent sidekick, one coding agent for the whole session on the same machine (shared filesystem and repos, its own shells). The user configures it with /fusion.",
   "Its conversation and runtime persist across handoffs. With block=true (default) the call waits and returns its report.",
   "With block=false it returns at once and the report arrives later as a message; wait for it instead of polling or guessing.",
   "Calling this while a handoff is running injects the message into that running handoff instead of starting another.",
 ].join(" ");
+
+export const TREE_NAVIGATION_NOTE =
+  "Fusion remains enabled after conversation navigation. Use the `sidekick` tool for handoffs; /fusion is the command that configures it. The sidekick retains its existing session and memory: navigating the lead conversation does not rewind its work.";
 
 /** Prepended to the very first handoff of a sidekick session. */
 export const SIDEKICK_DOCTRINE = `You are a sidekick: a hands-on coding agent working for a lead agent across many handoffs in one session. The lead talks to the user; you never do. You share the machine and repos with the lead; your shell sessions are your own.

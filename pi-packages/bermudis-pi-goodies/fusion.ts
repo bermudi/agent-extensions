@@ -19,6 +19,7 @@ import {
   LEAD_GUIDELINES,
   LEAD_SNIPPET,
   SIDEKICK_TOOL_DESCRIPTION,
+  TREE_NAVIGATION_NOTE,
   firstHandoff,
   leadUpdate,
   sidekickAttachedNote,
@@ -706,7 +707,7 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     pendingNote = undefined;
     await disposeConnector();
     state = { enabled: false };
-    for (const entry of ctx.sessionManager.getBranch()) {
+    for (const entry of ctx.sessionManager.getEntries()) {
       if (
         entry.type === "custom" &&
         entry.customType === STATE_ENTRY &&
@@ -724,6 +725,24 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     }
     setToolActive(state.enabled);
     setStatus();
+  });
+
+  pi.on("session_tree", (_event, ctx) => {
+    uiCtx = ctx;
+    setToolActive(state.enabled);
+    persist();
+    if (state.enabled) {
+      pendingNote = pendingNote ?? TREE_NAVIGATION_NOTE;
+    } else {
+      pendingNote = undefined;
+    }
+    setStatus();
+    log.info("fusion.tree_synced", {
+      enabled: state.enabled,
+      harness: state.harness,
+      model: state.model,
+      sessionId: state.sidekickSessionId,
+    });
   });
 
   pi.on("session_shutdown", async () => {

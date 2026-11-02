@@ -549,10 +549,13 @@ in a separate harness, through a `sidekick(message, block?)` tool. Design:
 | piz | `GLM-5.3`, `GLM-5.3-Flash` | private `zcode.cjs app-server` core on a temp Unix socket (ZCode NDJSON) | mode `yolo` |
 | devin | `swe-2-medium` | `devin acp --model swe-2-medium` (ACP over stdio) | mode `bypass` |
 
-- **One sidekick per pi session.** Harness, model, and session id persist in a
-  `fusion-state` entry; resume reattaches to the same sidekick session. Fork →
-  fresh sidekick. Failed reattach → fresh sidekick plus a "NEW sidekick,
-  re-brief fully" note to the lead.
+- **One sidekick per pi session; the on/off choice is session-wide.** Harness,
+  model, and session id persist in a `fusion-state` entry; resume reattaches
+  to the same sidekick session. The latest explicit `/fusion` choice survives
+  conversation tree navigation and reloads — navigating the lead conversation
+  does not rewind the sidekick's work or memory. Fork → fresh sidekick. Failed
+  reattach → fresh sidekick plus a "NEW sidekick, re-brief fully" note to the
+  lead.
 - **Lead prompt stays fixed** (cache). Which sidekick is attached goes in an
   appended `fusion-note` message, never the system prompt. The doctrine rides
   the first handoff only.
