@@ -93,6 +93,11 @@ pi-packages/
                          # modules listed in dependencies).
   diff/                   # ACTIVE (project-local)
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
+  fusion/                 # DEVELOPMENT (dev-load only, never install): Devin-Fusion replica — lead model hands work to
+                         # one persistent sidekick via `sidekick` tool; /fusion picks piz-core GLM-5.3[-Flash] or
+                         # devin acp swe-2-medium. Tool is defaultActive:false + refuses when off. README has the
+                         # observed protocol facts (Devin ACP: swe-2-medium = model swe-2-high + thought_level medium).
+                         # Live check: scripts/live-smoke.ts (real model turns); unit tests use fake connectors.
   ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
   pi-harness/             # ACTIVE (dev-only): test harness for TUI extensions; faithful ToolExecutionComponent render semantics
   session-summarizer/     # INACTIVE (source kept; not linked in .pi/extensions — verify install state before claiming it runs)
