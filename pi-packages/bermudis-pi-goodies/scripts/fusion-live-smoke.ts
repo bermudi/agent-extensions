@@ -3,9 +3,9 @@
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { connectDevin } from "../devin.ts";
-import { connectPiz } from "../piz.ts";
-import type { HarnessId, Logger } from "../types.ts";
+import { connectDevin } from "../fusion-devin.ts";
+import { connectPiz } from "../fusion-piz.ts";
+import type { HarnessId, Logger } from "../fusion-types.ts";
 
 const USAGE =
   "Usage: bun run scripts/live-smoke.ts <piz|devin> <model> <scratch-cwd>";

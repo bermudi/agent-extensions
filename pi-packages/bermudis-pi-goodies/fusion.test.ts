@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { createFusion, type ConnectFn } from "./index.ts";
-import { DIRECT_EDIT_NUDGE, SIDEKICK_DOCTRINE } from "./prompts.ts";
+import { createFusion, type ConnectFn } from "./fusion.ts";
+import { DIRECT_EDIT_NUDGE, SIDEKICK_DOCTRINE } from "./fusion-prompts.ts";
 import type {
   ConnectOptions,
   HarnessId,
@@ -8,7 +8,7 @@ import type {
   SidekickConnector,
   TurnCallbacks,
   TurnOutcome,
-} from "./types.ts";
+} from "./fusion-types.ts";
 
 // ---------- fakes ----------
 

@@ -3,7 +3,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { Logger } from "./types.ts";
+import type { Logger } from "./fusion-types.ts";
 
 function fusionDir(): string {
   const dir = process.env.FUSION_LOG_DIR ?? join(getAgentDir(), "fusion");

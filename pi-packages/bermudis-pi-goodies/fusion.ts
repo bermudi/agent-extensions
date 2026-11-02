@@ -1,15 +1,19 @@
 // pi-fusion: a lead (the pi session's own model) + one persistent sidekick that
 // runs in a separate harness (piz core with GLM, or Devin with SWE-2).
 // Design: ~/reports/fusion-replica/DESIGN.md. Off until the user runs /fusion.
+// Lives in bermudis-pi-goodies as the "fusion" feature (was its own
+// pi-packages/fusion package until 2026-11-02 — moved in because pi grants a
+// single custom-footer slot, which provider-balance already owns; the same
+// package now owns both sides of the "side:"-status badge contract).
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { connectDevin } from "./devin.ts";
-import { createLogger, saveReport } from "./log.ts";
-import { connectPiz } from "./piz.ts";
+import { connectDevin } from "./fusion-devin.ts";
+import { createLogger, saveReport } from "./fusion-log.ts";
+import { connectPiz } from "./fusion-piz.ts";
 import {
   DIRECT_EDIT_NUDGE,
   LEAD_GUIDELINES,
@@ -18,7 +22,7 @@ import {
   firstHandoff,
   leadUpdate,
   sidekickAttachedNote,
-} from "./prompts.ts";
+} from "./fusion-prompts.ts";
 import {
   HARNESS_LABELS,
   MODEL_CHOICES,
@@ -30,7 +34,7 @@ import {
   type SidekickActivity,
   type SidekickConnector,
   type TurnOutcome,
-} from "./types.ts";
+} from "./fusion-types.ts";
 
 const TOOL_NAME = "sidekick";
 const STATE_ENTRY = "fusion-state";

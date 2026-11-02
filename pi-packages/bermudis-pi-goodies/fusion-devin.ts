@@ -14,13 +14,13 @@
 //   "swe-2-medium" is rejected by session/set_config_option.
 import { spawn, type ChildProcess } from "node:child_process";
 import { z } from "zod";
-import { RpcError, RpcPeer, stopChild, withDeadline } from "./rpc.ts";
+import { RpcError, RpcPeer, stopChild, withDeadline } from "./fusion-rpc.ts";
 import type {
   ConnectOptions,
   SidekickConnector,
   TurnCallbacks,
   TurnOutcome,
-} from "./types.ts";
+} from "./fusion-types.ts";
 
 /** CLI model name -> ACP (model value, thought level). */
 const ACP_MODEL: Record<string, { model: string; thoughtLevel: string }> = {

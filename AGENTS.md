@@ -58,6 +58,17 @@ pi-packages/
                          # watchdog comparing live credentials vs the displayed cache keys, and its
                          # post-fetch recheck reads the ACTIVE token LAST (commit after that is sync —
                          # never move an await between the final read and the cache commit).
+                         # fusion (moved in 2026-11-02 from its own package): /fusion picks a sidekick
+                         # (piz-core GLM-5.3[-Flash] yolo, or devin acp swe-2-medium bypass) that the lead
+                         # drives via the `sidekick` tool (defaultActive:false, refuses while off).
+                         # fusion.ts + fusion-{devin,piz,prompts,types,rpc,log}.ts + fusion*.test.ts.
+                         # Badge contract: fusion's status text is `side: <label>` — provider-balance's
+                         # custom footer folds "side:"-prefixed extension statuses into the stats line's
+                         # model readout (`side: X/<model>`, status line suppressed for that render);
+                         # without that footer the status line is the fallback, and a /side session owns
+                         # the slot (hoist yields). Protocol facts: Devin ACP swe-2-medium = model
+                         # swe-2-high + thought_level medium. Live check:
+                         # scripts/fusion-live-smoke.ts (real model turns); unit tests use fake connectors.
                          # anthropic (Claude Pro/Max) subscription usage (added 2026-10-31). Two provider ids:
                          # `anthropic` (pi's own OAuth login, "Anthropic (Claude Pro/Max)") and
                          # `claude-code` (@earendil-works/pi-claude-code, the extension bermudi actually
@@ -94,15 +105,6 @@ pi-packages/
                          # modules listed in dependencies).
   diff/                   # ACTIVE (project-local)
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
-  fusion/                 # DEVELOPMENT (dev-load only, never install): Devin-Fusion replica — lead model hands work to
-                         # one persistent sidekick via `sidekick` tool; /fusion picks piz-core GLM-5.3[-Flash] or
-                         # devin acp swe-2-medium. Tool is defaultActive:false + refuses when off. README has the
-                         # observed protocol facts (Devin ACP: swe-2-medium = model swe-2-high + thought_level medium).
-                         # Live check: scripts/live-smoke.ts (real model turns); unit tests use fake connectors.
-                         # Badge contract: fusion's status text is `side: <label>` — provider-balance's custom
-                         # footer folds "side:"-prefixed extension statuses into the stats line's model readout
-                         # (`side: X/<model>`, status line suppressed for that render); without that footer the
-                         # status line is the fallback, and a /side session owns the slot (hoist yields).
   ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
   pi-harness/             # ACTIVE (dev-only): test harness for TUI extensions; faithful ToolExecutionComponent render semantics
   session-summarizer/     # INACTIVE (source kept; not linked in .pi/extensions — verify install state before claiming it runs)
@@ -198,7 +200,7 @@ price of true isolation and is intentional.
 
 ## Conventions
 
-- Pi-version pins are per-package and are NOT yet uniform. As of 2026-11-02, `bermudis-pi-goodies` and `fusion` pin pi 1.4.0 (and `pi-logfare` pins `pi-ai` 1.4.0); `critique`, `diff`, `external-changes`, `ketamine`, and `council` still pin 0.99.0 (as do INACTIVE `session-summarizer` and archived `experiments/`). Do not assume a 0.99-pinned package typechecks against the 1.4 host — it has not been bumped or verified yet. After a pi upgrade: bump the `@earendil-works/*` pins in lockstep per package (bun add, never hand-edit), typecheck, test, then smoke with `pi -ne -e <abs entry>` from a scratch cwd. Stale pins here are how a package ends up typechecking against 0.99 while running on 1.4 — keep this inventory current when a package is bumped.
+- Pi-version pins are per-package and are NOT yet uniform. As of 2026-11-02, `bermudis-pi-goodies` pins pi 1.4.0 (and `pi-logfare` pins `pi-ai` 1.4.0); `critique`, `diff`, `external-changes`, `ketamine`, and `council` still pin 0.99.0 (as do INACTIVE `session-summarizer` and archived `experiments/`). Do not assume a 0.99-pinned package typechecks against the 1.4 host — it has not been bumped or verified yet. After a pi upgrade: bump the `@earendil-works/*` pins in lockstep per package (bun add, never hand-edit), typecheck, test, then smoke with `pi -ne -e <abs entry>` from a scratch cwd. Stale pins here are how a package ends up typechecking against 0.99 while running on 1.4 — keep this inventory current when a package is bumped.
 
 - `pi-packages/experiments/` — archive of unused/exploratory extensions. Excluded from typecheck; tests run via `bun run test` inside `pi-packages/experiments/` but the dir is not gated as maintained code.
 - Active extensions live at `pi-packages/<name>/`. New keepers go there; experiments go in `pi-packages/experiments/`.

@@ -9,9 +9,9 @@ import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { DevinConnector } from "./devin.ts";
-import { connectPiz, PizConnector } from "./piz.ts";
-import type { ConnectOptions, Logger } from "./types.ts";
+import { DevinConnector } from "./fusion-devin.ts";
+import { connectPiz, PizConnector } from "./fusion-piz.ts";
+import type { ConnectOptions, Logger } from "./fusion-types.ts";
 
 const OVER = 8 * 1024 * 1024 + 1;
 const flush = () => new Promise((r) => setTimeout(r, 0));

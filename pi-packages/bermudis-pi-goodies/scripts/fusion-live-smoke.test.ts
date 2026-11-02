@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { parseSmokeArgs } from "./live-smoke.ts";
+import { parseSmokeArgs } from "./fusion-live-smoke.ts";
 
 const scratch = await mkdtemp(join(tmpdir(), "fusion-smoke-"));
 
@@ -52,7 +52,7 @@ describe("live-smoke script", () => {
       cmd: [
         process.execPath,
         "run",
-        "scripts/live-smoke.ts",
+        "scripts/fusion-live-smoke.ts",
         "bogus",
         "m",
         scratch,

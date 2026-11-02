@@ -19,14 +19,14 @@ import { connect, type Socket } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { RpcError, RpcPeer, stopChild, withDeadline } from "./rpc.ts";
+import { RpcError, RpcPeer, stopChild, withDeadline } from "./fusion-rpc.ts";
 import {
   SIDEKICK_CONTEXT_WINDOW,
   type ConnectOptions,
   type SidekickConnector,
   type TurnCallbacks,
   type TurnOutcome,
-} from "./types.ts";
+} from "./fusion-types.ts";
 
 const PIZ_PROVIDER_ID = "account:zai-individual-coding-plan";
 const START_TIMEOUT_MS = 60_000;

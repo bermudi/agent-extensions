@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { RpcError, RpcPeer, stopChild, withDeadline } from "./rpc.ts";
+import { RpcError, RpcPeer, stopChild, withDeadline } from "./fusion-rpc.ts";
 
 function pair(jsonrpc: boolean) {
   const out: Record<string, unknown>[] = [];

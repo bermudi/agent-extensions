@@ -19,6 +19,7 @@ extensions. One entry point, fourteen independent features.
 | `tps`               | hook (no command)             | Notify tokens/sec and in/out/cache token usage at the end of each agent turn.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `vision`            | `vision` tool, `/vision`      | Ask a vision model targeted questions about an image file and get a text answer — for models that can't see images. Follow-ups via `followUp: true`. Self-hides when the active model has image input.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `side`              | `/side`, `/end-side-session`  | Consult a second model alongside the session. `/side [provider/model-id]` parks the main agent (branch tip + model recorded in a marker entry) and opens a side conversation on its own tree limb; the side model sees the main conversation as one attributed quote — “a transcript of a session you were not part of”, untrusted evidence, not its own history — via a per-request context lens. `/end-side-session [trajectory\|summary\|nothing]` picks the handoff at exit: full transcript quote, a summary written by the side model, or nothing; the main branch stays clean either way. Arguments tab-complete.                                                                                                                                                                                                                                                                                                                 |
+| `fusion`            | `/fusion`                     | Devin-Fusion replica: the pi session's model is the lead and hands hands-on work to one persistent sidekick in a separate harness through a `sidekick(message, block?)` tool. `/fusion` picks the harness — piz core (`GLM-5.3`, `GLM-5.3-Flash`, yolo mode) or `devin acp` (`swe-2-medium`, bypass mode); `/fusion status` shows the sidekick, session id, and last context use; `/fusion off` stops it. Off until `/fusion` runs; the `sidekick` tool stays inactive and refuses calls while off.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `goodies`           | `/goodies`                    | Toggle individual features on/off without losing the rest. Also supports `/goodies summary-model [provider/model]` to pick the model used for AI bash-command summaries, and `/goodies thinking-summaries <on\|off>` for live thinking summaries. State persists to `~/.pi/agent/goodies.json`. Arguments tab-complete.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 ## Install
@@ -535,3 +536,51 @@ Details worth knowing:
   the consultant's own history.
 - Both quote directions carry an explicit untrusted-evidence preamble:
   a transcript is framing, not a security boundary.
+
+## fusion
+
+`fusion` is a personal replica of Devin's Fusion: the pi session's own model
+is the **lead**; it hands hands-on work to one **persistent sidekick** running
+in a separate harness, through a `sidekick(message, block?)` tool. Design:
+`~/reports/fusion-replica/DESIGN.md`. Off until `/fusion` runs.
+
+| Harness | Model(s) | Transport | Permissions |
+|---|---|---|---|
+| piz | `GLM-5.3`, `GLM-5.3-Flash` | private `zcode.cjs app-server` core on a temp Unix socket (ZCode NDJSON) | mode `yolo` |
+| devin | `swe-2-medium` | `devin acp --model swe-2-medium` (ACP over stdio) | mode `bypass` |
+
+- **One sidekick per pi session.** Harness, model, and session id persist in a
+  `fusion-state` entry; resume reattaches to the same sidekick session. Fork →
+  fresh sidekick. Failed reattach → fresh sidekick plus a "NEW sidekick,
+  re-brief fully" note to the lead.
+- **Lead prompt stays fixed** (cache). Which sidekick is attached goes in an
+  appended `fusion-note` message, never the system prompt. The doctrine rides
+  the first handoff only.
+- **`block: false`** returns immediately; the report later arrives as a
+  `fusion-report` message that triggers a lead turn.
+- **Calling while a handoff is running** injects the message into that turn
+  (`<lead_update>`) instead of starting a second handoff.
+- **Footer badge**: an attached sidekick publishes `side: <label>` as its
+  extension status (`⏳` appended while a handoff runs). The provider-balance
+  footer folds `side:`-prefixed statuses into the stats line's model readout
+  (`side: SWE-2 Medium/(openai) gpt-6.1-terra • high`) — the status line is
+  the fallback when that footer is not mounted.
+- **Context**: both sidekicks cap at 262K and compact themselves.
+- Push and PR restrictions are prompt-only (the sidekick doctrine).
+  `fusion.log` records lifecycle and usage metadata only — never shell
+  commands, briefs, or tool inputs.
+
+Environment: `FUSION_PIZ_CORE` (path to `zcode.cjs`), `FUSION_LOG_DIR`
+(default `<agentDir>/fusion/`). Live check with real model turns:
+`bun run scripts/fusion-live-smoke.ts piz GLM-5.3-Flash <scratch-git-dir>` or
+`... devin swe-2-medium <scratch-git-dir>`.
+
+### Protocol facts (observed 2026-11-02)
+
+- **Devin ACP**: the CLI name `swe-2-medium` is not a valid ACP model value.
+  ACP shows model `swe-2-high` (label "SWE-2") plus `thought_level: medium`.
+  The connector sets both and refuses to start if either is not in effect
+  (Devin's default is a paid model).
+- **piz**: `model` inside `session/create` is ignored — call `session/setModel`
+  afterwards. `state.updated` carries no `contextUsed`, so context use comes
+  from the last `model_complete` usage `inputTokens`.
