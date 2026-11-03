@@ -236,6 +236,7 @@ describe("clean-tui load-time configuration", () => {
       "tps",
       "vision",
       "side",
+      "recap",
     ];
     writeFileSync(
       path,

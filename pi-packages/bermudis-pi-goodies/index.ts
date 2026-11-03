@@ -18,6 +18,7 @@
  *   - vision           tool              ask a vision model targeted questions about an image (self-hides for image-capable models)
  *   - side             /side, /end-side-session  consult a second model on an attributed quote of the session; deliver trajectory/summary/nothing at exit
  *   - fusion           /fusion           lead model + one persistent sidekick in another harness (piz GLM / Devin SWE-2), Devin-Fusion replica
+ *   - recap            /recap            one-line session recap on demand, on resume, and after idle
  *
  * Per-model thinking levels were previously provided by a `model-thinking`
  * module with a `/levels` command and an extension-owned sidecar, retired in
@@ -40,6 +41,7 @@ import tps from "./tps.ts";
 import vision from "./vision.ts";
 import side from "./side.ts";
 import fusion from "./fusion.ts";
+import recap from "./recap.ts";
 import nameWithAi from "./name-with-ai.ts";
 import preferTools from "./prefer-tools.ts";
 import goodies, { isEnabled } from "./goodies.ts";
@@ -69,4 +71,5 @@ export default function bermudisPiGoodies(pi: ExtensionAPI): void {
   if (isEnabled("vision")) vision(pi);
   if (isEnabled("side")) side(pi);
   if (isEnabled("fusion")) fusion(pi);
+  if (isEnabled("recap")) recap(pi);
 }

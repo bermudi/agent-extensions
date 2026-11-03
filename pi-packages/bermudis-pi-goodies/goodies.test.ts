@@ -7,6 +7,10 @@ import {
   setSummaryModel,
   getThinkingSummariesEnabled,
   setThinkingSummariesEnabled,
+  getRecapIdleMinutes,
+  setRecapIdleMinutes,
+  getRecapOnResume,
+  setRecapOnResume,
   completeGoodiesArguments,
   __setCompletionModelsForTesting,
   wrapGoodiesAutocomplete,
@@ -115,6 +119,18 @@ describe("goodies feature toggles", () => {
     expect(config["summary-model"]).toBe("other/session-model");
     expect(config.tps).toBe(false);
     expect(config["thinking-summaries"]).toBe(true);
+  });
+
+  test("recap auto settings default to 10 minutes and resume on", () => {
+    expect(getRecapIdleMinutes()).toBe(10);
+    expect(getRecapOnResume()).toBe(true);
+    setRecapIdleMinutes(0);
+    setRecapOnResume(false);
+    expect(getRecapIdleMinutes()).toBe(0);
+    expect(getRecapOnResume()).toBe(false);
+    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+    expect(raw["recap-idle-minutes"]).toBe(0);
+    expect(raw["recap-on-resume"]).toBe(false);
   });
 
   test("corrupt config logs a failure and falls back to defaults", () => {

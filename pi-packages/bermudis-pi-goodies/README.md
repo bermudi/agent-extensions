@@ -1,7 +1,7 @@
 # bermudis-pi-goodies
 
 A bundle of small, frequently-used [Pi](https://github.com/earendil-works/pi)
-extensions. One entry point, fourteen independent features.
+extensions. One entry point, sixteen independent features.
 
 | Feature             | Command / hook                | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | ------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -20,6 +20,7 @@ extensions. One entry point, fourteen independent features.
 | `vision`            | `vision` tool, `/vision`      | Ask a vision model targeted questions about an image file and get a text answer — for models that can't see images. Follow-ups via `followUp: true`. Self-hides when the active model has image input.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `side`              | `/side`, `/end-side-session`  | Consult a second model alongside the session. `/side [provider/model-id]` parks the main agent (branch tip + model recorded in a marker entry) and opens a side conversation on its own tree limb; the side model sees the main conversation as one attributed quote — “a transcript of a session you were not part of”, untrusted evidence, not its own history — via a per-request context lens. `/end-side-session [trajectory\|summary\|nothing]` picks the handoff at exit: full transcript quote, a summary written by the side model, or nothing; the main branch stays clean either way. Arguments tab-complete.                                                                                                                                                                                                                                                                                                                 |
 | `fusion`            | `/fusion`                     | Devin-Fusion replica: the pi session's model is the lead and hands hands-on work to one persistent sidekick in a separate harness through a `sidekick(message, block?)` tool. `/fusion` picks the harness — piz core (`GLM-5.3`, `GLM-5.3-Flash`, yolo mode) or `devin acp` (`swe-2-medium`, bypass mode); `/fusion status` shows the sidekick, session id, and last context use; `/fusion off` stops it. Off until `/fusion` runs; the `sidekick` tool stays inactive and refuses calls while off.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `recap`             | `/recap [provider/model]`     | One-line session recap: what the session is working on, the latest concrete progress, and what is next. Generated by the active model (or an explicit `/recap provider/model`) from a compact tail of the branch; it appears as a transcript entry that never enters model context. Also runs automatically after a resume and after 10 idle minutes (config keys below).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `goodies`           | `/goodies`                    | Toggle individual features on/off without losing the rest. Also supports `/goodies summary-model [provider/model]` to pick the model used for AI bash-command summaries, and `/goodies thinking-summaries <on\|off>` for live thinking summaries. State persists to `~/.pi/agent/goodies.json`. Arguments tab-complete.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 ## Install
@@ -453,6 +454,45 @@ Behavior notes:
   falls back to pi's default rendering.
 - Nested completion usage is reported back, so pi's session stats stay
   accurate.
+
+## Session recap
+
+`/recap` asks the session's current model for one line (≤400 characters)
+covering what you are working on, the latest concrete progress, and what is
+next. It reads a compact view of the active branch — user/assistant text, tool
+calls, failed tool results, the latest compaction summary — trimmed to the most
+recent ~24k characters, so long sessions stay cheap.
+
+The result is appended as a custom `recap` entry: visible and persisted in the
+transcript, but **not** part of LLM context (unlike `sendMessage`). Earlier
+recaps remain in the session and re-render when you resume.
+
+```text
+/recap                        # active model
+/recap kilo/glm-5             # one-off override (provider/id tab-completes)
+```
+
+Automatic recaps are real model calls, guarded by the same rules:
+
+- **On resume** — about a second after a session is restored.
+- **After 10 idle minutes** — measured from the last message; a long agent run
+  keeps resetting the clock, and nothing fires while pi is streaming.
+
+Both require at least three user turns and activity since the newest recap, so
+resuming an unchanged session costs nothing and recaps never stack. Auto
+failures go to `~/.pi/agent/goodies.log`; `/recap` reports errors as a
+notification.
+
+Settings live in `~/.pi/agent/goodies.json` and apply on `/reload` or a new
+session:
+
+```json
+{ "recap-idle-minutes": 10, "recap-on-resume": true }
+```
+
+`"recap-idle-minutes": 0` disables the idle timer; `"recap-on-resume": false`
+disables the resume recap. `/goodies disable recap` removes the command and the
+hooks entirely.
 
 ## Side consultations
 

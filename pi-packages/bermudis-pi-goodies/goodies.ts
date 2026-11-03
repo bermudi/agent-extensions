@@ -45,7 +45,8 @@ type FeatureName =
   | "tps"
   | "vision"
   | "side"
-  | "fusion";
+  | "fusion"
+  | "recap";
 
 const FEATURES: FeatureName[] = [
   "copy-with-model",
@@ -63,6 +64,7 @@ const FEATURES: FeatureName[] = [
   "vision",
   "side",
   "fusion",
+  "recap",
 ];
 
 type Config = Partial<Record<FeatureName, boolean>> & {
@@ -79,6 +81,15 @@ type Config = Partial<Record<FeatureName, boolean>> & {
    * reasoning run, not per command) is why the default stays off.
    */
   "thinking-summaries"?: boolean;
+  /**
+   * Minutes of no new messages before recap generates one automatically.
+   * 0 disables the idle timer. Unset means 10.
+   */
+  "recap-idle-minutes"?: number;
+  /**
+   * Whether resuming a session triggers an automatic recap. Unset means on.
+   */
+  "recap-on-resume"?: boolean;
 };
 
 function loadConfig(): Config {
@@ -187,6 +198,27 @@ export function getThinkingSummariesEnabled(): boolean {
 export function setThinkingSummariesEnabled(enabled: boolean): void {
   updateConfig((next) => {
     next["thinking-summaries"] = enabled;
+  });
+}
+
+export function getRecapIdleMinutes(): number {
+  const v = config["recap-idle-minutes"];
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 10;
+}
+
+export function setRecapIdleMinutes(minutes: number): void {
+  updateConfig((next) => {
+    next["recap-idle-minutes"] = minutes;
+  });
+}
+
+export function getRecapOnResume(): boolean {
+  return config["recap-on-resume"] !== false; // default on when unset
+}
+
+export function setRecapOnResume(enabled: boolean): void {
+  updateConfig((next) => {
+    next["recap-on-resume"] = enabled;
   });
 }
 
@@ -454,6 +486,12 @@ export default function goodies(pi: ExtensionAPI): void {
             (thinkingEnabled && !summaryModel
               ? " (no summary model set — run /goodies summary-model <provider/model>)"
               : ""),
+        );
+        const recapMinutes = getRecapIdleMinutes();
+        lines.push(
+          `  recap: ${
+            recapMinutes > 0 ? `${recapMinutes}m idle` : "idle off"
+          } · resume ${getRecapOnResume() ? "on" : "off"}`,
         );
         ctx.ui.notify(`goodies features:\n${lines.join("\n")}`, "info");
         return;
