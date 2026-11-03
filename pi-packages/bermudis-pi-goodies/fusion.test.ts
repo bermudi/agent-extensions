@@ -419,9 +419,11 @@ describe("handoffs", () => {
     await flush();
     expect(s.sent).toHaveLength(1);
     expect(s.sent[0]!.message.content).toContain("bg done");
+    // Idle lead (ctx.signal unset): start a turn. The mid-run path and pi's
+    // real queue behaviour are pinned in fusion-delivery.integration.test.ts.
     expect(s.sent[0]!.options).toEqual({
       triggerTurn: true,
-      deliverAs: "followUp",
+      deliverAs: "steer",
     });
   });
 
@@ -1350,6 +1352,11 @@ describe("teardown invalidation", () => {
     expect(s.sent[0]!.message.content).toContain(
       "Sidekick handoff #1 failed: transport gone",
     );
+    // Same delivery as a report: a failure must reach a working lead promptly.
+    expect(s.sent[0]!.options).toEqual({
+      triggerTurn: true,
+      deliverAs: "steer",
+    });
   });
 });
 

@@ -9,6 +9,7 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
@@ -49,6 +50,29 @@ const TOOL_NAME = "sidekick";
 const REPORT_MESSAGE = "fusion-report";
 const NOTE_MESSAGE = "fusion-note";
 const MAX_REPORT_CHARS = 40_000;
+/*
+ * How a finished background handoff (block:false) reaches the lead. Pinned
+ * against a real AgentSession in fusion-delivery.integration.test.ts.
+ *
+ * - Lead mid-run (ctx.signal set: streaming or executing tools): send with
+ *   triggerTurn:false. Pi parks it in its post-turn custom-message buffer,
+ *   appends it at the next turn_end, and the lead's very next request sees
+ *   it. That buffer is also flushed when a run is aborted, and Esc (or
+ *   dequeue) never clears it. If that turn was the lead's last one, the
+ *   agent_before_settle hook asks pi for one more request.
+ * - Lead idle: triggerTurn:true starts a turn. deliverAs:"steer" only matters
+ *   in the short gaps where a run is active but the agent loop is not
+ *   (pre-send compaction, retry backoff).
+ *
+ * Rejected: deliverAs "followUp" is drained only when the lead would stop. On
+ * first live use (2026-11-02) a report waited 14 min for a still-working
+ * lead, and a finished review went unseen and was asked for again. Queued
+ * "steer" fixes the latency, but interactive Esc/dequeue clears pi's
+ * steer/followUp queues, and a queued custom message is not restored to the
+ * editor: the report would be lost without a trace.
+ */
+const REPORT_WHEN_IDLE = { triggerTurn: true, deliverAs: "steer" } as const;
+const REPORT_MID_RUN = { triggerTurn: false } as const;
 const STALE_START_MESSAGE =
   "Fusion changed while the sidekick was starting; the start was discarded. Retry if fusion is still on.";
 const EDIT_TOOLS = new Set(["edit", "write", "apply_patch"]);
@@ -60,7 +84,21 @@ interface RunningHandoff {
   promise: Promise<TurnOutcome>;
   /** Report goes to the lead as a message when the handoff ends (block:false). */
   deliverAsMessage: boolean;
+  /** Ctx of the tool call that started it; tells at delivery time whether the lead is mid-run. */
+  leadCtx: ExtensionContext;
   activity: SidekickActivity[];
+}
+
+/** True when a fusion report sits after the lead's last assistant message: the lead has not answered it yet. */
+function reportAwaitingLead(branch: readonly SessionEntry[]): boolean {
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i]!;
+    if (entry.type === "message" && entry.message.role === "assistant")
+      return false;
+    if (entry.type === "custom_message" && entry.customType === REPORT_MESSAGE)
+      return true;
+  }
+  return false;
 }
 
 export type ConnectFn = (options: ConnectOptions) => Promise<SidekickConnector>;
@@ -300,11 +338,26 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     return `${report}${warnings.join("")}\n\n[sidekick handoff #${handoffId} · ${stats.join(" · ")}]`;
   };
 
+  /** See REPORT_WHEN_IDLE / REPORT_MID_RUN. */
+  const deliverReport = (
+    handoff: RunningHandoff,
+    content: string,
+    details: Record<string, unknown>,
+  ) => {
+    const midRun = handoff.leadCtx.signal !== undefined;
+    log.info("report.delivered", { id: handoff.id, midRun });
+    pi.sendMessage(
+      { customType: REPORT_MESSAGE, content, display: true, details },
+      midRun ? REPORT_MID_RUN : REPORT_WHEN_IDLE,
+    );
+  };
+
   const startHandoff = (
     sidekick: SidekickConnector,
     text: string,
     deliverAsMessage: boolean,
     signal: AbortSignal,
+    leadCtx: ExtensionContext,
     onActivity: (activity: SidekickActivity[]) => void,
   ): RunningHandoff => {
     const id = ++handoffCounter;
@@ -313,6 +366,7 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
       id,
       epoch,
       deliverAsMessage,
+      leadCtx,
       activity,
       promise: sidekick.prompt(
         text,
@@ -350,14 +404,10 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
           if (outcome.contextUsed !== undefined)
             lastContextUsed = outcome.contextUsed;
           if (handoff.deliverAsMessage) {
-            pi.sendMessage(
-              {
-                customType: REPORT_MESSAGE,
-                content: `Sidekick report (handoff #${id}):\n\n${formatReport(outcome, id)}`,
-                display: true,
-                details: { handoffId: id, stopReason: outcome.stopReason },
-              },
-              { triggerTurn: true, deliverAs: "followUp" },
+            deliverReport(
+              handoff,
+              `Sidekick report (handoff #${id}):\n\n${formatReport(outcome, id)}`,
+              { handoffId: id, stopReason: outcome.stopReason },
             );
           }
         },
@@ -367,14 +417,13 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
           log.error("handoff.failed", { id, error: message });
           if (handoff.epoch !== epoch) return;
           if (handoff.deliverAsMessage) {
-            pi.sendMessage(
+            deliverReport(
+              handoff,
+              `Sidekick handoff #${id} failed: ${message}`,
               {
-                customType: REPORT_MESSAGE,
-                content: `Sidekick handoff #${id} failed: ${message}`,
-                display: true,
-                details: { handoffId: id, error: message },
+                handoffId: id,
+                error: message,
               },
-              { triggerTurn: true, deliverAs: "followUp" },
             );
           }
         },
@@ -499,6 +548,7 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
         text,
         !block,
         controller.signal,
+        ctx,
         (activity) => {
           if (block) {
             onUpdate?.({
@@ -836,6 +886,17 @@ export function createFusion(pi: ExtensionAPI, deps: FusionDeps) {
     return {
       message: { customType: NOTE_MESSAGE, content: note, display: true },
     };
+  });
+
+  // A report parked mid-run (REPORT_MID_RUN) can land after the lead's final
+  // turn. Without this hook the run would settle with the report unread.
+  // Only after a completed turn: after an error, continuing would just hit
+  // the failing provider again. The report stays in the transcript either way.
+  pi.on("agent_before_settle", async (event, ctx) => {
+    if (event.outcome !== "completed") return;
+    if (!reportAwaitingLead(ctx.sessionManager.getBranch())) return;
+    log.info("report.continue_for_lead", {});
+    return { continue: true };
   });
 
   pi.on("tool_result", async (event) => {

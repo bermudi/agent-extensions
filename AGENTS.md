@@ -79,6 +79,16 @@ pi-packages/
                          # restores the branch loadout first, and a badge-on/tool-missing mismatch is
                          # the original bug (model searched for the tool, found nothing). Navigation
                          # never rewinds sidekick memory; forks clear the parent sidekick id.
+                         # Background-handoff reports (block:false), fixed 2026-11-02 after the first
+                         # live session. Lead mid-run (leadCtx.signal set) → sendMessage triggerTurn:false
+                         # (pi parks it and appends it at turn_end, so the next request sees it) plus an
+                         # agent_before_settle hook {continue:true} when a report sits after the last
+                         # assistant entry (it landed during the final turn). Lead idle → triggerTurn:true.
+                         # NEVER queue it as followUp (drained only when the lead would stop: a 14-min-late
+                         # report, a finished review re-requested, stale-report turns after the final
+                         # answer) or as a queued steer (interactive Esc/dequeue clears pi's queues and
+                         # drops custom messages silently). Pinned against a real AgentSession in
+                         # fusion-delivery.integration.test.ts, which fails on both old variants.
                          # anthropic (Claude Pro/Max) subscription usage (added 2026-10-31). Two provider ids:
                          # `anthropic` (pi's own OAuth login, "Anthropic (Claude Pro/Max)") and
                          # `claude-code` (@earendil-works/pi-claude-code, the extension bermudi actually
