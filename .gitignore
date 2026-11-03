@@ -6,6 +6,7 @@ __pycache__/
 !pi-packages/bermudis-pi-goodies/bun.lock
 !pi-packages/council/bun.lock
 !pi-packages/vision/bun.lock
+!pi-packages/model-picker/bun.lock
 *.bundle.mjs
 *.bundle.ts
 .agents/
