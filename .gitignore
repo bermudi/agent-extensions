@@ -9,6 +9,7 @@ __pycache__/
 *.bundle.mjs
 *.bundle.ts
 .agents/
+.claude/
 .pi/extensions/
 .pi/council/
 

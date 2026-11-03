@@ -255,6 +255,12 @@ Both are auto-discovered by pi at session start. Symlink source files into the d
 | `.pi/extensions/*.ts` | Project-local (only this repo) | `ln -s pi-packages/<ext>/<file>.ts .pi/extensions/<file>.ts` |
 | `~/.pi/agent/extensions/*.ts` | Global (all projects) | `ln -s pi-packages/<ext>/<file>.ts ~/.pi/agent/extensions/<file>.ts` |
 
+Skills install the same way, project-scoped: symlink a skill directory into
+`.agents/skills/` (every harness loads it) and again into `.claude/skills/`
+(Claude Code reads only its own dir). Both are gitignored — per-machine links,
+not repo content. Example: `pi-docs` lives in `~/build/skills/pi-docs` and is
+linked here as `.agents/skills/pi-docs` and `.claude/skills/pi-docs`.
+
 ## Personal global extensions (not part of this repo)
 
 Files in `~/.pi/agent/extensions/` that are *not* symlinked from this repo are bermudi's local
