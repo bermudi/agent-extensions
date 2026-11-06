@@ -11,6 +11,10 @@ import {
   setRecapIdleMinutes,
   getRecapOnResume,
   setRecapOnResume,
+  getRecapModel,
+  setRecapModel,
+  getRecapTurns,
+  setRecapTurns,
   completeGoodiesArguments,
   __setCompletionModelsForTesting,
   wrapGoodiesAutocomplete,
@@ -131,6 +135,33 @@ describe("goodies feature toggles", () => {
     const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
     expect(raw["recap-idle-minutes"]).toBe(0);
     expect(raw["recap-on-resume"]).toBe(false);
+  });
+
+  test("recap-model and recap-turns default, persist, and sanitize", () => {
+    expect(getRecapModel()).toBeUndefined();
+    expect(getRecapTurns()).toBe(2);
+    setRecapModel("kilo/glm-5");
+    setRecapTurns(4);
+    expect(getRecapModel()).toBe("kilo/glm-5");
+    expect(getRecapTurns()).toBe(4);
+    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+    expect(raw["recap-model"]).toBe("kilo/glm-5");
+    expect(raw["recap-turns"]).toBe(4);
+    setRecapModel(undefined);
+    setRecapTurns(undefined);
+    expect(getRecapModel()).toBeUndefined();
+    expect(getRecapTurns()).toBe(2);
+    // Hand-edited junk falls back to the default instead of breaking recaps.
+    writeFileSync(
+      CONFIG_PATH,
+      JSON.stringify({ "recap-turns": 0, "recap-model": "  " }),
+    );
+    __setConfigPathForTesting(CONFIG_PATH);
+    expect(getRecapTurns()).toBe(2);
+    expect(getRecapModel()).toBeUndefined();
+    writeFileSync(CONFIG_PATH, JSON.stringify({ "recap-turns": 500 }));
+    __setConfigPathForTesting(CONFIG_PATH);
+    expect(getRecapTurns()).toBe(20);
   });
 
   test("corrupt config logs a failure and falls back to defaults", () => {
@@ -385,6 +416,133 @@ describe("/goodies summary-model handler", () => {
   });
 });
 
+describe("/goodies recap-model and recap-turns handlers", () => {
+  function registerGoodies(): {
+    handler: (args: string, ctx: never) => Promise<void>;
+  } {
+    let captured!: { handler: (args: string, ctx: never) => Promise<void> };
+    goodiesDefault({
+      on: () => {},
+      registerCommand: (_name: string, opts: typeof captured) => {
+        captured = opts;
+      },
+    } as never);
+    return captured;
+  }
+
+  function fakeCtx(registry?: object) {
+    const notices: Array<{ msg: string; level: string }> = [];
+    const ctx = {
+      modelRegistry: registry,
+      ui: {
+        notify: (msg: string, level: string) => notices.push({ msg, level }),
+      },
+    };
+    return { ctx, notices };
+  }
+
+  beforeEach(() => {
+    const dir = mkdtempSync(join(tmpdir(), "goodies-recap-handler-"));
+    __setConfigPathForTesting(join(dir, "goodies.json"));
+  });
+
+  const catalog = [makeTestModel("kilo", "glm-5")];
+  const registry = {
+    find: (provider: string, id: string) =>
+      catalog.find((m) => m.provider === provider && m.id === id),
+    getAvailable: () => catalog,
+  };
+
+  test("stores a validated model canonically and clears it with off", async () => {
+    const cmd = registerGoodies();
+    const { ctx, notices } = fakeCtx(registry);
+    await cmd.handler("recap-model glm-5", ctx as never); // bare legacy id
+    expect(getRecapModel()).toBe("kilo/glm-5");
+    expect(notices[0].msg).toContain("Recaps will use kilo/glm-5");
+
+    await cmd.handler("recap-model off", ctx as never);
+    expect(getRecapModel()).toBeUndefined();
+    expect(notices[1].msg).toContain("session's active model");
+  });
+
+  test("rejects an unknown model and leaves the setting alone", async () => {
+    setRecapModel("kilo/glm-5");
+    const cmd = registerGoodies();
+    const { ctx, notices } = fakeCtx(registry);
+    await cmd.handler("recap-model kilo/glm-6", ctx as never);
+    expect(getRecapModel()).toBe("kilo/glm-5");
+    expect(notices[0].level).toBe("warning");
+    expect(notices[0].msg).toContain("Unknown model");
+  });
+
+  test("a bare verb without a UI reports the current setting; pick without a UI says so", async () => {
+    const cmd = registerGoodies();
+    const bare = fakeCtx(registry);
+    await cmd.handler("recap-model", bare.ctx as never);
+    expect(bare.notices[0].msg).toContain("active model (default)");
+
+    setRecapModel("kilo/glm-5");
+    const set = fakeCtx(registry);
+    await cmd.handler("recap-model", set.ctx as never);
+    expect(set.notices[0].msg).toContain("kilo/glm-5");
+
+    const pick = fakeCtx(registry);
+    await cmd.handler("recap-model pick", pick.ctx as never);
+    expect(pick.notices[0].level).toBe("error");
+    expect(pick.notices[0].msg).toContain("no UI available");
+    expect(getRecapModel()).toBe("kilo/glm-5"); // untouched
+  });
+
+  test("recap-turns validates, persists, and resets", async () => {
+    const cmd = registerGoodies();
+    const { ctx, notices } = fakeCtx(registry);
+    await cmd.handler("recap-turns 3", ctx as never);
+    expect(getRecapTurns()).toBe(3);
+    await cmd.handler("recap-turns 0", ctx as never);
+    await cmd.handler("recap-turns 2.5", ctx as never);
+    await cmd.handler("recap-turns lots", ctx as never);
+    expect(getRecapTurns()).toBe(3);
+    expect(notices.slice(1).every((n) => n.level === "warning")).toBe(true);
+    await cmd.handler("recap-turns default", ctx as never);
+    expect(getRecapTurns()).toBe(2);
+    const view = fakeCtx(registry);
+    await cmd.handler("recap-turns", view.ctx as never);
+    expect(view.notices[0].msg).toContain("last 2 user messages");
+  });
+
+  test("list shows the recap model and window", async () => {
+    setRecapModel("kilo/glm-5");
+    setRecapTurns(3);
+    const cmd = registerGoodies();
+    const { ctx, notices } = fakeCtx(registry);
+    await cmd.handler("list", ctx as never);
+    expect(notices[0].msg).toContain("model kilo/glm-5");
+    expect(notices[0].msg).toContain("last 3 user messages");
+  });
+
+  test("completions: recap-model offers pick/off/default then ranked models; recap-turns offers counts", () => {
+    __setCompletionModelsForTesting(["kilo/glm-5", "zai/glm-5.3-flash"]);
+    expect(
+      completeGoodiesArguments("recap-model ")!.map((i) => i.value),
+    ).toEqual([
+      "recap-model pick",
+      "recap-model off",
+      "recap-model default",
+      "recap-model kilo/glm-5",
+      "recap-model zai/glm-5.3-flash",
+    ]);
+    // Substring match, not just prefix: "flash" finds the zai model.
+    expect(
+      completeGoodiesArguments("recap-model flash")!.map((i) => i.value),
+    ).toEqual(["recap-model zai/glm-5.3-flash"]);
+    expect(
+      completeGoodiesArguments("recap-turns ")!.map((i) => i.value),
+    ).toContain("recap-turns 3");
+    expect(completeGoodiesArguments("recap-turns x")).toBeNull();
+    __setCompletionModelsForTesting([]);
+  });
+});
+
 describe("/goodies thinking-summaries handler", () => {
   /** Stub ExtensionAPI capturing the registered command options. */
   function registerGoodies(): {
@@ -507,6 +665,8 @@ describe("/goodies argument completion", () => {
       "disable ",
       "summary-model ",
       "thinking-summaries ",
+      "recap-model ",
+      "recap-turns ",
     ]);
     expect(completeGoodiesArguments("en")).toEqual([
       { value: "enable ", label: "enable" },

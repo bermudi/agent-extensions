@@ -48,7 +48,6 @@ import type {
   ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 import {
-  ModelSelectorComponent,
   calculateContextTokens,
   estimateTokens,
   sessionEntryToContextMessages,
@@ -62,6 +61,7 @@ import {
 import { describeError, extractTextParts } from "./json-file.ts";
 import { buildTrajectory, renderTrajectory } from "./copy-trajectory.ts";
 import { logGoodiesEvent } from "./goodies-log.ts";
+import { pickModel } from "./pick-model.ts";
 import {
   formatSideLensSuffix,
   getSideSessionModel,
@@ -560,66 +560,14 @@ export function parseModelArg(arg: string): ModelSpec | undefined {
 // Runtime pieces
 // ---------------------------------------------------------------------------
 
-type ModelRuntimeParam = ConstructorParameters<
-  typeof ModelSelectorComponent
->[2];
-
-/**
- * ModelRegistry is the sync facade extensions get; the model selector wants
- * the ModelRuntime it wraps. The field is private but stable — guard the poke
- * and fall back to a plain selector when it moves.
- */
-function extractModelRuntime(
-  registry: ExtensionContext["modelRegistry"],
-): ModelRuntimeParam | undefined {
-  const candidate = (registry as unknown as { runtime?: unknown }).runtime;
-  return typeof candidate === "object" && candidate !== null
-    ? (candidate as ModelRuntimeParam)
-    : undefined;
-}
-
-async function pickSideModel(
+function pickSideModel(
   ctx: ExtensionCommandContext,
 ): Promise<ActiveModel | undefined> {
-  if (ctx.mode === "tui") {
-    const runtime = extractModelRuntime(ctx.modelRegistry);
-    if (runtime) {
-      try {
-        return await ctx.ui.custom<ActiveModel | undefined>(
-          (tui, _theme, _kb, done) =>
-            new ModelSelectorComponent(
-              tui,
-              ctx.model,
-              runtime,
-              ctx.scopedModels,
-              (model) => done(model),
-              () => done(undefined),
-            ),
-        );
-      } catch (error) {
-        logGoodiesEvent({
-          type: "side_picker_fallback",
-          error: describeError(error),
-        });
-      }
-    }
-  }
-  if (ctx.hasUI) {
-    const models = ctx.modelRegistry.getAvailable();
-    if (models.length === 0) {
-      ctx.ui.notify("side: no models available", "error");
-      return undefined;
-    }
-    const labels = models.map((m) => `${m.provider}/${m.id}`);
-    const picked = await ctx.ui.select("Side model", labels);
-    if (picked === undefined) return undefined;
-    return models[labels.indexOf(picked)];
-  }
-  ctx.ui.notify(
-    "side: no UI available — pass the model as /side provider/model-id",
-    "error",
-  );
-  return undefined;
+  return pickModel(ctx, {
+    owner: "side",
+    title: "Side model",
+    noUiHint: "pass the model as /side provider/model-id",
+  });
 }
 
 function updateBadge(

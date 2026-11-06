@@ -11,7 +11,11 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setGoodiesLogPathForTesting } from "./goodies-log.ts";
-import { __setConfigPathForTesting } from "./goodies.ts";
+import {
+  __setConfigPathForTesting,
+  setRecapModel,
+  setRecapTurns,
+} from "./goodies.ts";
 import recapExtension, {
   RECAP_ENTRY_TYPE,
   RECAP_MAX_CHARS,
@@ -196,11 +200,122 @@ describe("buildRecapTranscript", () => {
     for (let i = 0; i < 50; i++) {
       entries.push(userEntry(`message number ${i} ${"x".repeat(40)}`));
     }
-    const transcript = buildRecapTranscript(entries, 500);
-    expect(transcript.startsWith("[earlier turns omitted]")).toBe(true);
+    const transcript = buildRecapTranscript(entries, {
+      maxChars: 500,
+      recentUserTurns: 50,
+    });
+    // User messages are pinned: the budget never drops them.
+    expect(transcript).toContain("message number 0");
     expect(transcript).toContain("message number 49");
-    expect(transcript).not.toContain("message number 0");
-    expect(transcript.length).toBeLessThanOrEqual(500 + 100);
+  });
+
+  test("windows to the newest user messages, pins the first, drops tool results", () => {
+    const entries: SessionEntry[] = [
+      userEntry("ORIGINAL GOAL: migrate the auth module"),
+      assistantEntry([{ type: "text", text: "OLD ASSISTANT" }]),
+      userEntry("OLD FOLLOWUP"),
+      assistantEntry([{ type: "text", text: "OLD ASSISTANT 2" }]),
+      userEntry("second to last"),
+      assistantEntry([
+        { type: "text", text: "On it." },
+        {
+          type: "toolCall",
+          id: "a",
+          name: "read",
+          arguments: { path: "a.ts" },
+        },
+      ]),
+      toolResultEntry("read", "RESULT BODY", false),
+      assistantEntry([
+        {
+          type: "toolCall",
+          id: "b",
+          name: "bash",
+          arguments: { command: "bun test" },
+        },
+      ]),
+      toolResultEntry("bash", "boom", true),
+      userEntry("latest: ok go"),
+      assistantEntry([{ type: "text", text: "Done." }]),
+    ];
+    const transcript = buildRecapTranscript(entries);
+    const lines = transcript.split("\n");
+    expect(lines[0]).toBe(
+      "User (session start): ORIGINAL GOAL: migrate the auth module",
+    );
+    expect(lines[1]).toBe("[earlier turns omitted]");
+    expect(lines[2]).toBe("User: second to last");
+    expect(transcript).toContain("[tool] read: a.ts");
+    expect(transcript).toContain("[tool] bash: bun test");
+    expect(transcript).toContain("[tool error] bash: boom");
+    expect(transcript).toContain("User: latest: ok go");
+    expect(transcript).toContain("Assistant: Done.");
+    expect(transcript).not.toContain("OLD FOLLOWUP");
+    expect(transcript).not.toContain("OLD ASSISTANT");
+    expect(transcript).not.toContain("RESULT BODY");
+  });
+
+  test("does not repeat the first message when it is already inside the window", () => {
+    const transcript = buildRecapTranscript([
+      userEntry("the only goal"),
+      assistantEntry([{ type: "text", text: "ok" }]),
+      userEntry("tweak it"),
+    ]);
+    expect(transcript).not.toContain("session start");
+    expect(transcript).not.toContain("earlier turns omitted");
+    expect(transcript.match(/the only goal/g)).toHaveLength(1);
+  });
+
+  test("recentUserTurns widens or narrows the window", () => {
+    const entries: SessionEntry[] = [
+      userEntry("first"),
+      userEntry("second"),
+      userEntry("third"),
+      userEntry("fourth"),
+    ];
+    const one = buildRecapTranscript(entries, { recentUserTurns: 1 });
+    expect(one).toContain("User (session start): first");
+    expect(one).toContain("User: fourth");
+    expect(one).not.toContain("second");
+    expect(one).not.toContain("third");
+    const three = buildRecapTranscript(entries, { recentUserTurns: 3 });
+    expect(three).toContain("User (session start): first");
+    expect(three).toContain("User: second");
+    expect(three).not.toContain("earlier turns omitted"); // nothing in between
+    const all = buildRecapTranscript(entries, { recentUserTurns: 4 });
+    expect(all).not.toContain("session start");
+    expect(all).toContain("User: first");
+  });
+
+  test("the budget trims the oldest assistant/tool lines, never user messages", () => {
+    const entries: SessionEntry[] = [
+      userEntry("start"),
+      userEntry("the question"),
+    ];
+    for (let i = 0; i < 40; i++) {
+      entries.push(
+        assistantEntry([{ type: "text", text: `step ${i} ${"y".repeat(60)}` }]),
+      );
+    }
+    entries.push(userEntry("the latest ask"));
+    entries.push(assistantEntry([{ type: "text", text: "final step" }]));
+    const transcript = buildRecapTranscript(entries, { maxChars: 400 });
+    expect(transcript).toContain("User: the question");
+    expect(transcript).toContain("User: the latest ask");
+    expect(transcript).toContain("final step");
+    expect(transcript).toContain("[steps omitted]");
+    expect(transcript).not.toContain("step 0 ");
+  });
+
+  test("a single oversized newest line is still kept", () => {
+    const transcript = buildRecapTranscript(
+      [
+        userEntry("go"),
+        assistantEntry([{ type: "text", text: "z".repeat(500) }]),
+      ],
+      { maxChars: 50 },
+    );
+    expect(transcript).toContain("zzzz");
   });
 
   test("returns an empty string for an empty branch", () => {
@@ -396,6 +511,7 @@ interface FakeCtx {
   ctx: ExtensionCommandContext;
   notices: Array<{ message: string; type?: string }>;
   completions: Array<{ model: Model<Api>; context: unknown }>;
+  wrappers: unknown[];
 }
 
 function makeCtx(options: {
@@ -409,6 +525,7 @@ function makeCtx(options: {
 }): FakeCtx {
   const notices: Array<{ message: string; type?: string }> = [];
   const completions: Array<{ model: Model<Api>; context: unknown }> = [];
+  const wrappers: unknown[] = [];
   const models = options.models ?? [makeModel("anthropic", "claude-x")];
   const branch = options.branch ?? [
     userEntry("one"),
@@ -470,10 +587,13 @@ function makeCtx(options: {
         notices.push({ message, type });
       },
       setStatus: () => {},
+      addAutocompleteProvider: (wrapper: unknown) => {
+        wrappers.push(wrapper);
+      },
     },
   } as unknown as ExtensionCommandContext;
 
-  return { ctx, notices, completions };
+  return { ctx, notices, completions, wrappers };
 }
 
 const sleep = (ms: number) =>
@@ -563,6 +683,78 @@ describe("/recap", () => {
       { value: "kilo/glm-5", label: "kilo/glm-5" },
     ]);
     expect(filterRecapModelCompletions("zzz", ctx.modelRegistry)).toBeNull();
+  });
+
+  test("completions match anywhere in provider/id, prefix hits first", () => {
+    const { ctx } = makeCtx({
+      models: [
+        makeModel("kilo", "glm-5"),
+        makeModel("zai", "glm-5.3-flash"),
+        makeModel("glm", "x"),
+      ],
+    });
+    expect(
+      filterRecapModelCompletions("glm", ctx.modelRegistry)?.map(
+        (c) => c.value,
+      ),
+    ).toEqual(["glm/x", "kilo/glm-5", "zai/glm-5.3-flash"]);
+    expect(filterRecapModelCompletions("", ctx.modelRegistry)?.length).toBe(3);
+  });
+
+  test("installs the forced-Tab wrapper once so Tab never lists cwd paths", async () => {
+    const pi = new PiHarness();
+    recapExtension(pi.api);
+    const { ctx, wrappers } = makeCtx({});
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await pi.emit("session_start", { reason: "new" }, ctx);
+    expect(wrappers).toHaveLength(1);
+  });
+
+  test("uses the configured recap-model; an explicit argument still wins", async () => {
+    const glm = makeModel("kilo", "glm-5");
+    const claude = makeModel("anthropic", "claude-x");
+    setRecapModel("kilo/glm-5");
+    const pi = new PiHarness();
+    recapExtension(pi.api);
+    const { ctx, completions } = makeCtx({
+      models: [claude, glm],
+      activeModel: claude,
+    });
+
+    await pi.commands.get("recap")?.handler("", ctx);
+    expect(completions[0]?.model).toBe(glm);
+    expect(parseRecapData(pi.entries[0]?.data)?.model).toBe("kilo/glm-5");
+
+    await pi.commands.get("recap")?.handler("anthropic/claude-x", ctx);
+    expect(completions[1]?.model).toBe(claude);
+  });
+
+  test("a configured recap-model that vanished is reported, not silently swapped", async () => {
+    setRecapModel("kilo/gone");
+    const pi = new PiHarness();
+    recapExtension(pi.api);
+    const { ctx, notices, completions } = makeCtx({});
+    await pi.commands.get("recap")?.handler("", ctx);
+    expect(completions).toHaveLength(0);
+    expect(notices[0]?.type).toBe("error");
+    expect(notices[0]?.message).toContain("kilo/gone");
+    expect(notices[0]?.message).toContain("/goodies recap-model");
+  });
+
+  test("recap-turns controls how much history the model sees", async () => {
+    setRecapTurns(1);
+    const pi = new PiHarness();
+    recapExtension(pi.api);
+    const { ctx, completions } = makeCtx({});
+    await pi.commands.get("recap")?.handler("", ctx);
+    const text = (
+      completions[0]?.context as {
+        messages: Array<{ content: Array<{ text: string }> }>;
+      }
+    ).messages[0]?.content[0]?.text;
+    expect(text).toContain("User (session start): one");
+    expect(text).toContain("User: three");
+    expect(text).not.toContain("two");
   });
 });
 

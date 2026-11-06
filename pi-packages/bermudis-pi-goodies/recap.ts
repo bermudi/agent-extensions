@@ -1,9 +1,12 @@
 /**
  * recap — /recap: a one-line recap of the session, on demand or after idle.
  *
- * The session's active model (or an explicit `/recap provider/model`) reads a
- * compact view of the current branch — user/assistant text, tool calls, tool
- * errors, the latest compaction summary — and writes one ≤400-character line:
+ * The configured recap-model (else the session's active model; an explicit
+ * `/recap provider/model` overrides both for one run) reads a compact window
+ * of the current branch — the newest `recap-turns` user messages (default 2)
+ * and everything after the first of them (assistant text, tool calls without
+ * results, tool errors), plus the session's first user message and the latest
+ * compaction summary — and writes one ≤400-character line:
  * what the session is working on, the latest concrete progress, and what is
  * next. The result is appended as a custom entry (`customType: "recap"`) with
  * a registered entry renderer: visible in the transcript, persisted with the
@@ -22,6 +25,10 @@
  * Config keys in ~/.pi/agent/goodies.json (read at extension load):
  *   "recap-idle-minutes": 0 disables the idle timer; default 10.
  *   "recap-on-resume": false disables the resume recap.
+ *   "recap-model": "provider/id" model that writes recaps; unset = active model.
+ *   "recap-turns": how many recent user messages anchor the window; default 2.
+ * `/goodies recap-model|recap-turns` edit the last two; recap-model with no
+ * value opens pi's ctrl+l selector.
  * Disabling the whole feature (`/goodies disable recap`) turns off both the
  * command and the hooks. Auto recap generation is cancelled on shutdown and
  * superseded by a newer recap; every background path is a never-reject choke
@@ -38,18 +45,22 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { describeError, extractTextParts, timeoutSignal } from "./json-file.ts";
+import { rankCandidates } from "./vision-core.ts";
 import { logGoodiesEvent, reportFailure } from "./goodies-log.ts";
 import {
   findSummaryModel,
+  wrapCommandAutocomplete,
   getRecapIdleMinutes,
+  getRecapModel,
   getRecapOnResume,
+  getRecapTurns,
   suggestSummaryModels,
 } from "./goodies.ts";
 
 export const RECAP_ENTRY_TYPE = "recap";
 /** Hard cap for the generated line, matching Claude Code's session recap. */
 export const RECAP_MAX_CHARS = 400;
-/** Tail budget for the transcript sent to the model (~6k tokens). */
+/** Backstop budget for the unpinned transcript lines (~6k tokens). */
 export const RECAP_TRANSCRIPT_MAX_CHARS = 24_000;
 /** Auto recaps need a real conversation, not one exchange. */
 export const RECAP_MIN_USER_TURNS = 3;
@@ -143,34 +154,92 @@ export function describeToolCall(name: string, args: unknown): string {
   return clipped ? `[tool] ${name}: ${clipped}` : `[tool] ${name}`;
 }
 
+export interface RecapTranscriptOptions {
+  /** Character budget for the unpinned (assistant/tool) lines. */
+  maxChars?: number;
+  /** How many of the newest user messages anchor the window. */
+  recentUserTurns?: number;
+}
+
+interface TranscriptLine {
+  text: string;
+  /** User messages are never dropped by the budget. */
+  pinned: boolean;
+}
+
+function userMessageText(entry: SessionEntry): string | undefined {
+  if (entry.type !== "message" || entry.message.role !== "user") {
+    return undefined;
+  }
+  const text = extractTextParts(entry.message.content).join("\n").trim();
+  return text || undefined;
+}
+
 /**
- * Build the compact transcript the recap model reads. Kept as the tail of the
- * branch (the latest work is what a recap is for) with the newest compaction
- * summary kept as a header so older context survives the truncation.
+ * Build the compact transcript the recap model reads: a window onto the
+ * branch, not its whole tail.
  *
- * Included: user/assistant text, tool calls (name + main argument), tool
- * errors, displayed extension injections (side handoffs, external-change
- * diffs), and the latest compaction summary. Excluded: thinking, successful
- * tool output, labels, model/usage bookkeeping.
+ * Window = the newest `recentUserTurns` user messages (default 2) and
+ * everything after the first of them — assistant text, tool calls (name + main
+ * argument, no results), tool errors, displayed extension injections. The
+ * session's first user message is pinned in front so the recap knows what the
+ * session is *for* even when the latest messages are "ok do it". The newest
+ * compaction summary heads the transcript so older context survives.
+ *
+ * `maxChars` is a backstop for a runaway window: it trims the oldest
+ * assistant/tool lines first and never drops a user message.
+ * Excluded: thinking, successful tool output, labels, usage bookkeeping.
  */
 export function buildRecapTranscript(
   entries: readonly SessionEntry[],
-  maxChars = RECAP_TRANSCRIPT_MAX_CHARS,
+  options: RecapTranscriptOptions = {},
 ): string {
-  const lines: string[] = [];
-  let latestCompaction: string | undefined;
+  const maxChars = options.maxChars ?? RECAP_TRANSCRIPT_MAX_CHARS;
+  const turns = Math.max(1, Math.floor(options.recentUserTurns ?? 2));
 
-  const add = (line: string) => {
+  let latestCompaction: string | undefined;
+  const userIndexes: number[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!;
+    if (entry.type === "compaction") {
+      // Only the newest one is useful: each compaction summarizes everything
+      // before it, so older ones are subsets of the newest.
+      latestCompaction = entry.summary;
+    }
+    if (userMessageText(entry) !== undefined) userIndexes.push(i);
+  }
+
+  const windowStart =
+    userIndexes.length > 0
+      ? userIndexes[Math.max(0, userIndexes.length - turns)]!
+      : 0;
+  const firstUserIndex = userIndexes[0];
+  const pinFirst = firstUserIndex !== undefined && firstUserIndex < windowStart;
+
+  const lines: TranscriptLine[] = [];
+  const add = (line: string, pinned = false) => {
     const body = line.trim();
-    if (body) lines.push(body);
+    if (body) lines.push({ text: body, pinned });
   };
 
-  for (const entry of entries) {
+  if (pinFirst) {
+    add(
+      `User (session start): ${clip(userMessageText(entries[firstUserIndex]!)!, 2000)}`,
+      true,
+    );
+    // Nothing sits between two adjacent user messages, so no gap to flag.
+    if (windowStart - firstUserIndex > 1) {
+      lines.push({ text: "[earlier turns omitted]", pinned: true });
+    }
+  }
+
+  for (let i = windowStart; i < entries.length; i++) {
+    const entry = entries[i]!;
     if (entry.type === "message") {
       const message = entry.message;
       if (message.role === "user") {
-        const text = extractTextParts(message.content).join("\n");
-        if (text.trim()) add(`User: ${clip(text, 4000)}`);
+        const text = userMessageText(entry);
+        if (text) add(`User: ${clip(text, 4000)}`, true);
       } else if (message.role === "assistant") {
         const text = extractTextParts(message.content).join("\n");
         if (text.trim()) add(`Assistant: ${clip(text, 4000)}`);
@@ -186,37 +255,55 @@ export function buildRecapTranscript(
         const text = extractTextParts(message.content).join(" ");
         add(`[tool error] ${message.toolName}: ${clip(text, 300)}`);
       }
-    } else if (entry.type === "compaction") {
-      // Only the newest one is useful: each compaction summarizes everything
-      // before it, so older ones are subsets of the newest.
-      latestCompaction = entry.summary;
     } else if (entry.type === "branch_summary") {
       add(`[abandoned branch] ${clip(entry.summary, 3000)}`);
     } else if (entry.type === "custom_message" && entry.display) {
       // Injected context the model answered (side handoffs, external-change
       // diffs, …). Keep it: later turns often refer to it.
       const text = extractTextParts(entry.content).join("\n");
-      if (text.trim())
+      if (text.trim()) {
         add(`[context: ${entry.customType}] ${clip(text, 3000)}`);
+      }
     }
   }
 
-  const budget = Math.max(maxChars, 0);
-  const tail: string[] = [];
-  let size = 0;
+  // Backstop budget: pinned lines are free; spend the rest newest-first.
+  let remaining =
+    Math.max(maxChars, 0) -
+    lines.reduce((n, l) => (l.pinned ? n + l.text.length + 1 : n), 0);
+  const keep = new Array<boolean>(lines.length).fill(true);
+  let overflowed = false;
+  let keptUnpinned = false;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
-    if (size + line.length + 1 > budget && tail.length > 0) break;
-    tail.unshift(line);
-    size += line.length + 1;
+    if (line.pinned) continue;
+    const cost = line.text.length + 1;
+    // Keep the newest unpinned line even if it alone is over budget; after the
+    // first overflow everything older goes, so the kept tail stays contiguous.
+    if (overflowed || (cost > remaining && keptUnpinned)) {
+      overflowed = true;
+      keep[i] = false;
+      continue;
+    }
+    remaining -= cost;
+    keptUnpinned = true;
   }
 
   const out: string[] = [];
   if (latestCompaction?.trim()) {
     out.push(`[earlier session summary] ${clip(latestCompaction, 4000)}`, "");
   }
-  if (tail.length < lines.length) out.push("[earlier turns omitted]");
-  out.push(...tail);
+  let gap = false;
+  lines.forEach((line, i) => {
+    if (!keep[i]) {
+      gap = true;
+      return;
+    }
+    if (gap) out.push("[steps omitted]");
+    gap = false;
+    out.push(line.text);
+  });
+  if (gap) out.push("[steps omitted]");
   return out.join("\n").trim();
 }
 
@@ -325,6 +412,18 @@ function resolveRecapModel(
   ctx: ExtensionContext,
   arg: string | undefined,
 ): Model<Api> {
+  // Precedence: explicit /recap argument, then the configured recap-model,
+  // then the session's active model.
+  const configured = arg ? undefined : getRecapModel();
+  if (configured) {
+    const model = findSummaryModel(ctx.modelRegistry, configured);
+    if (!model) {
+      throw new Error(
+        `configured recap-model "${configured}" is not available — fix it with /goodies recap-model`,
+      );
+    }
+    return model;
+  }
   if (!arg) {
     if (!ctx.model) {
       throw new Error("no model selected — switch to a model first");
@@ -363,7 +462,9 @@ async function generateRecap(
 ): Promise<RecapData> {
   const model = resolveRecapModel(ctx, options.modelArg);
   const branch = ctx.sessionManager.getBranch();
-  const transcript = buildRecapTranscript(branch);
+  const transcript = buildRecapTranscript(branch, {
+    recentUserTurns: getRecapTurns(),
+  });
   if (!transcript) {
     throw new Error("nothing to recap yet — this session has no conversation");
   }
@@ -440,6 +541,7 @@ let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let resumeTimer: ReturnType<typeof setTimeout> | undefined;
 let inFlight: AbortController | undefined;
 let modelRegistryRef: ModelRegistryLike | undefined;
+let autocompleteWrapped = false;
 
 function clearTimer(which: "idle" | "resume"): void {
   const handle = which === "idle" ? idleTimer : resumeTimer;
@@ -540,6 +642,22 @@ export default function recapExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", (event, ctx) => {
     modelRegistryRef = ctx.modelRegistry; // for /recap argument completions
+    if (!autocompleteWrapped) {
+      autocompleteWrapped = true;
+      // Tab after `/recap ` would otherwise list cwd paths (see goodies.ts).
+      try {
+        ctx.ui.addAutocompleteProvider(
+          wrapCommandAutocomplete("recap", (prefix) =>
+            filterRecapModelCompletions(prefix, modelRegistryRef),
+          ),
+        );
+      } catch (err) {
+        reportFailure(
+          "recap_error",
+          `recap autocomplete not installed: ${describeError(err)}`,
+        );
+      }
+    }
     clearTimer("idle");
     clearTimer("resume");
     if (event.reason !== "resume") return;
@@ -570,22 +688,20 @@ export default function recapExtension(pi: ExtensionAPI): void {
 
 /**
  * /recap argument completion: every chat model the registry can serve, as
- * "provider/id". Registry reads are sync; undefined just returns null.
+ * "provider/id", ranked like the /goodies model completions (prefix hits
+ * first, then substring hits — "glm" finds "kilo/glm-5"). Registry reads are
+ * sync; undefined just returns null.
  */
 export function filterRecapModelCompletions(
   prefix: string,
   registry?: ModelRegistryLike,
 ): { value: string; label: string }[] | null {
   if (!registry) return null;
-  const seen = new Set<string>();
-  const matches: string[] = [];
-  for (const model of registry.getAvailable()) {
-    const ref = `${model.provider}/${model.id}`;
-    if (!ref.startsWith(prefix) || seen.has(ref)) continue;
-    seen.add(ref);
-    matches.push(ref);
-  }
-  return matches.length > 0
-    ? matches.map((ref) => ({ value: ref, label: ref }))
+  const refs = [
+    ...new Set(registry.getAvailable().map((m) => `${m.provider}/${m.id}`)),
+  ];
+  const ranked = rankCandidates(refs, prefix.trim().toLowerCase());
+  return ranked.length > 0
+    ? ranked.slice(0, 30).map((ref) => ({ value: ref, label: ref }))
     : null;
 }

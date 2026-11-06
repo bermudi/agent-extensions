@@ -21,6 +21,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { reportFailure } from "./goodies-log.ts";
 import { writeJsonFileAtomic, describeError } from "./json-file.ts";
+import { pickModel } from "./pick-model.ts";
 import { rankCandidates } from "./vision-core.ts";
 
 let CONFIG_PATH = join(homedir(), ".pi", "agent", "goodies.json");
@@ -90,6 +91,16 @@ type Config = Partial<Record<FeatureName, boolean>> & {
    * Whether resuming a session triggers an automatic recap. Unset means on.
    */
   "recap-on-resume"?: boolean;
+  /**
+   * Model ("provider/id") that writes recaps. Unset means the session's
+   * active model. `/recap provider/id` still overrides it for one run.
+   */
+  "recap-model"?: string;
+  /**
+   * How many of the most recent user messages (and everything after the
+   * first of them) the recap model reads. Unset means 2.
+   */
+  "recap-turns"?: number;
 };
 
 function loadConfig(): Config {
@@ -222,6 +233,38 @@ export function setRecapOnResume(enabled: boolean): void {
   });
 }
 
+export const RECAP_DEFAULT_TURNS = 2;
+export const RECAP_MAX_TURNS = 20;
+
+export function getRecapModel(): string | undefined {
+  const v = config["recap-model"];
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+export function setRecapModel(model: string | undefined): void {
+  updateConfig((next) => {
+    if (model === undefined || model.trim() === "") {
+      delete next["recap-model"];
+    } else {
+      next["recap-model"] = model.trim();
+    }
+  });
+}
+
+export function getRecapTurns(): number {
+  const v = config["recap-turns"];
+  return typeof v === "number" && Number.isInteger(v) && v >= 1
+    ? Math.min(v, RECAP_MAX_TURNS)
+    : RECAP_DEFAULT_TURNS;
+}
+
+export function setRecapTurns(turns: number | undefined): void {
+  updateConfig((next) => {
+    if (turns === undefined) delete next["recap-turns"];
+    else next["recap-turns"] = turns;
+  });
+}
+
 // ── Summary-model resolution against pi's model registry ────────────────────
 
 /**
@@ -316,6 +359,8 @@ const SUBCOMMANDS = [
   "disable",
   "summary-model",
   "thinking-summaries",
+  "recap-model",
+  "recap-turns",
 ];
 
 /** Subcommands that take a further argument, completed with a trailing space. */
@@ -324,6 +369,8 @@ const SUBCOMMANDS_WITH_ARGUMENT = new Set([
   "disable",
   "summary-model",
   "thinking-summaries",
+  "recap-model",
+  "recap-turns",
 ]);
 
 /**
@@ -359,7 +406,15 @@ export function completeGoodiesArguments(
       ? matches.map((v) => ({ value: `${verb} ${v}`, label: v }))
       : null;
   }
-  if (verb === "summary-model") {
+  if (verb === "recap-turns") {
+    const matches = ["1", "2", "3", "4", "5", "default"].filter((v) =>
+      v.startsWith(valuePrefix.toLowerCase()),
+    );
+    return matches.length
+      ? matches.map((v) => ({ value: `${verb} ${v}`, label: v }))
+      : null;
+  }
+  if (verb === "summary-model" || verb === "recap-model") {
     // Single value token (model ids contain no spaces): "off"/"default"
     // clear the setting; anything else matches the catalogue, ranked.
     // Values MUST carry the verb: pi applies a selection by replacing the
@@ -369,7 +424,11 @@ export function completeGoodiesArguments(
     // thinking-summaries already follow this pattern.
     const q = valuePrefix.toLowerCase();
     const items: AutocompleteItem[] = [];
-    for (const w of ["off", "default"]) {
+    // "pick" opens pi's ctrl+l selector (recap-model only: summary-model
+    // keeps its show-current behavior on a bare verb).
+    const words =
+      verb === "recap-model" ? ["pick", "off", "default"] : ["off", "default"];
+    for (const w of words) {
       if (w.startsWith(q)) items.push({ value: `${verb} ${w}`, label: w });
     }
     for (const c of rankCandidates(completionModels, q).slice(0, 20)) {
@@ -380,14 +439,17 @@ export function completeGoodiesArguments(
   return null;
 }
 
-/** The argument text of a /goodies line, or null outside that context. */
-function goodiesArgumentText(
+/** The argument text of a `/<command> …` line, or null outside that context. */
+function commandArgumentText(
+  command: string,
   lines: string[],
   cursorLine: number,
   cursorCol: number,
 ): string | null {
   if (cursorLine !== 0) return null;
-  const match = /^\/goodies\s+(.*)$/.exec((lines[0] ?? "").slice(0, cursorCol));
+  const head = (lines[0] ?? "").slice(0, cursorCol);
+  if (!head.startsWith(`/${command}`)) return null;
+  const match = /^\s+(.*)$/.exec(head.slice(command.length + 1));
   return match ? match[1] : null;
 }
 
@@ -395,18 +457,24 @@ function goodiesArgumentText(
  * Pi's editor turns Tab in slash-command argument context into a forced file
  * completion that never consults the command's getArgumentCompletions, so Tab
  * after `/goodies enable ` would list cwd paths. Claim that context and answer
- * from the command's own completions — paths are never a valid /goodies
- * argument.
+ * from the command's own completions — paths are never a valid argument of
+ * these commands. Shared by /goodies and /recap.
  */
-export function wrapGoodiesAutocomplete(
-  current: AutocompleteProvider,
-): AutocompleteProvider {
-  return {
+export function wrapCommandAutocomplete(
+  command: string,
+  complete: (argumentText: string) => AutocompleteItem[] | null,
+): (current: AutocompleteProvider) => AutocompleteProvider {
+  return (current) => ({
     async getSuggestions(lines, cursorLine, cursorCol, options) {
       if (options.force) {
-        const argumentText = goodiesArgumentText(lines, cursorLine, cursorCol);
+        const argumentText = commandArgumentText(
+          command,
+          lines,
+          cursorLine,
+          cursorCol,
+        );
         if (argumentText !== null) {
-          const items = completeGoodiesArguments(argumentText);
+          const items = complete(argumentText);
           return items ? { items, prefix: argumentText } : null;
         }
       }
@@ -422,7 +490,7 @@ export function wrapGoodiesAutocomplete(
       );
     },
     shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
-      if (goodiesArgumentText(lines, cursorLine, cursorCol) !== null) {
+      if (commandArgumentText(command, lines, cursorLine, cursorCol) !== null) {
         return true;
       }
       return (
@@ -430,8 +498,13 @@ export function wrapGoodiesAutocomplete(
         true
       );
     },
-  };
+  });
 }
+
+export const wrapGoodiesAutocomplete = wrapCommandAutocomplete(
+  "goodies",
+  completeGoodiesArguments,
+);
 
 let autocompleteWrapped = false;
 
@@ -446,6 +519,36 @@ let completionModels: string[] = [];
 
 export function __setCompletionModelsForTesting(models: string[]): void {
   completionModels = models;
+}
+
+/**
+ * Resolve a user-typed model against the registry for a config setting.
+ * Notifies and returns undefined for an unknown model; otherwise the canonical
+ * "provider/id" plus whether the provider lacks auth (advisory only).
+ */
+function resolveConfigModel(
+  ctx: {
+    ui: { notify: (msg: string, level: "info" | "warning" | "error") => void };
+  },
+  registry: SummaryModelRegistry,
+  value: string,
+): { canonical: string; authMissing: boolean } | undefined {
+  const found = findSummaryModel(registry, value);
+  if (!found) {
+    const suggestions = suggestSummaryModels(registry, value);
+    ctx.ui.notify(
+      `Unknown model "${value}"` +
+        (suggestions.length
+          ? `. Did you mean one of:\n${suggestions.map((s) => `  ${s}`).join("\n")}`
+          : ". Run /models to see what your registry serves."),
+      "warning",
+    );
+    return undefined;
+  }
+  return {
+    canonical: `${found.provider}/${found.id}`,
+    authMissing: registry.hasConfiguredAuth?.(found) === false,
+  };
 }
 
 export default function goodies(pi: ExtensionAPI): void {
@@ -489,7 +592,7 @@ export default function goodies(pi: ExtensionAPI): void {
         );
         const recapMinutes = getRecapIdleMinutes();
         lines.push(
-          `  recap: ${
+          `  recap: model ${getRecapModel() ?? "session's active model"} · last ${getRecapTurns()} user messages · ${
             recapMinutes > 0 ? `${recapMinutes}m idle` : "idle off"
           } · resume ${getRecapOnResume() ? "on" : "off"}`,
         );
@@ -549,23 +652,12 @@ export default function goodies(pi: ExtensionAPI): void {
           );
           return;
         }
-        const found = findSummaryModel(registry, value);
-        if (!found) {
-          const suggestions = suggestSummaryModels(registry, value);
-          ctx.ui.notify(
-            `Unknown model "${value}"` +
-              (suggestions.length
-                ? `. Did you mean one of:\n${suggestions.map((s) => `  ${s}`).join("\n")}`
-                : ". Run /models to see what your registry serves."),
-            "warning",
-          );
-          return;
-        }
+        const resolved = resolveConfigModel(ctx, registry, value);
+        if (!resolved) return;
         // Store the canonical provider/id form so resolution never depends on
         // the bare-id fallback.
-        const canonical = `${found.provider}/${found.id}`;
+        const { canonical, authMissing } = resolved;
         setSummaryModel(canonical);
-        const authMissing = registry.hasConfiguredAuth?.(found) === false;
         ctx.ui.notify(
           `Smart summaries will use ${canonical}` +
             (authMissing
@@ -600,8 +692,103 @@ export default function goodies(pi: ExtensionAPI): void {
         return;
       }
 
+      if (sub === "recap-model") {
+        const value = parts.slice(1).join(" ");
+        const current = getRecapModel();
+        const showCurrent = () =>
+          ctx.ui.notify(
+            `recap model: ${current ?? "the session's active model (default)"}`,
+            "info",
+          );
+        if (value === "off" || value === "default") {
+          setRecapModel(undefined);
+          ctx.ui.notify(
+            "recap-model cleared — recaps use the session's active model",
+            "info",
+          );
+          return;
+        }
+        const registry = (
+          ctx as { modelRegistry?: SummaryModelRegistry } | undefined
+        )?.modelRegistry;
+        let chosen: string | undefined =
+          value && value !== "pick" ? value : undefined;
+        if (chosen === undefined) {
+          // Bare verb or "pick": pi's own ctrl+l selector. Without a UI a bare
+          // verb just reports the setting.
+          if (!value && !ctx.hasUI) {
+            showCurrent();
+            return;
+          }
+          const currentModel =
+            current && registry
+              ? findSummaryModel(registry, current)
+              : undefined;
+          const picked = await pickModel(ctx, {
+            owner: "recap",
+            title: "Recap model",
+            current: currentModel,
+            noUiHint: "pass the model: /goodies recap-model provider/model",
+          });
+          if (!picked) return; // cancelled, or already notified
+          chosen = `${picked.provider}/${picked.id}`;
+        }
+        if (!registry) {
+          setRecapModel(chosen);
+          ctx.ui.notify(
+            `recap-model set to ${chosen} (could not validate: model registry unavailable)`,
+            "warning",
+          );
+          return;
+        }
+        const resolved = resolveConfigModel(ctx, registry, chosen);
+        if (!resolved) return;
+        setRecapModel(resolved.canonical);
+        ctx.ui.notify(
+          `Recaps will use ${resolved.canonical}` +
+            (resolved.authMissing
+              ? "\nWarning: no auth configured for this provider yet — recaps will fail until it is."
+              : ""),
+          "info",
+        );
+        return;
+      }
+
+      if (sub === "recap-turns") {
+        const value = parts[1];
+        if (value === undefined) {
+          ctx.ui.notify(
+            `recap reads the last ${getRecapTurns()} user messages (default ${RECAP_DEFAULT_TURNS}). Usage: /goodies recap-turns <1-${RECAP_MAX_TURNS}|default>`,
+            "info",
+          );
+          return;
+        }
+        if (value === "default") {
+          setRecapTurns(undefined);
+          ctx.ui.notify(
+            `recap-turns reset — reading the last ${RECAP_DEFAULT_TURNS} user messages`,
+            "info",
+          );
+          return;
+        }
+        const n = Number(value);
+        if (!Number.isInteger(n) || n < 1 || n > RECAP_MAX_TURNS) {
+          ctx.ui.notify(
+            `Usage: /goodies recap-turns <1-${RECAP_MAX_TURNS}|default> (got "${value}")`,
+            "warning",
+          );
+          return;
+        }
+        setRecapTurns(n);
+        ctx.ui.notify(
+          `recap reads the last ${n} user message${n === 1 ? "" : "s"} (and everything after the first of them). Takes effect on the next recap.`,
+          "info",
+        );
+        return;
+      }
+
       ctx.ui.notify(
-        `Usage: /goodies [list|enable <feature>|disable <feature>|summary-model [provider/model|off]|thinking-summaries <on|off>]`,
+        `Usage: /goodies [list|enable <feature>|disable <feature>|summary-model [provider/model|off]|thinking-summaries <on|off>|recap-model [provider/model|pick|off]|recap-turns <1-${RECAP_MAX_TURNS}|default>]`,
         "warning",
       );
     },
