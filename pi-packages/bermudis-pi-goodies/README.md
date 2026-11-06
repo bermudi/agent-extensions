@@ -28,7 +28,7 @@ extensions. One entry point, sixteen independent features.
 First install, pinned to a published version:
 
 ```bash
-pi install npm:bermudis-pi-goodies@0.32.2
+pi install npm:bermudis-pi-goodies@0.33.0
 ```
 
 Picking up a new release on an existing install (`pi install` is not the
