@@ -139,21 +139,6 @@ pi-packages/
   diff/                   # ACTIVE (project-local)
   external-changes/       # ACTIVE (project-local): inject diff of changes made between agent runs
   ketamine/               # ACTIVE (development): replace compaction with a separate observer-curated context
-  model-picker/           # NEW (2026-11-03, development, not installed): instant ctrl+l model
-                         # picker — stock picker UI (MIT-ported from pi-mono model-selector.ts)
-                         # minus the on-open refreshModelCatalogs() network call. Data =
-                         # ctx.modelRegistry.getAvailable() (SYNC snapshot facade — no network,
-                         # no provider refreshModels); apply = pi.setModel (session-only, no
-                         # settings-write API → no ctrl+s save-as-default; default badge read
-                         # from pi.getSettings()). ctrl+l is RESERVED while builtin
-                         # app.model.select claims it: bermudi must remap it in
-                         # ~/.pi/agent/keybindings.json (e.g. ["ctrl+shift+l"]) — the conflict
-                         # check reads the EFFECTIVE config (runner.getShortcuts) and
-                         # CustomEditor.handleInput dispatches extension shortcuts BEFORE
-                         # builtin actions, so the freed key reaches the extension (verified in
-                         # 1.5.0 dist source). Pins @earendil-works/* ^1.5.0 (first 1.5-pinned
-                         # package). Tests drive the component with raw terminal bytes ("\r",
-                         # "\x1b", "\x1b[A") — getKeys() returns KeyId NAMES ("enter"), not raw
                          # data; feeding them to handleInput types "up" into the search box.
   pi-harness/             # ACTIVE (dev-only): test harness for TUI extensions; faithful ToolExecutionComponent render semantics
   session-summarizer/     # INACTIVE (source kept; not linked in .pi/extensions — verify install state before claiming it runs)
@@ -249,7 +234,7 @@ price of true isolation and is intentional.
 
 ## Conventions
 
-- Pi-version pins are per-package and are NOT yet uniform. As of 2026-11-03, `model-picker` pins pi ^1.5.0 (matches the installed 1.5.0 host); `bermudis-pi-goodies` pins pi 1.4.0 (and `pi-logfare` pins `pi-ai` 1.4.0); `critique`, `diff`, `external-changes`, `ketamine`, and `council` still pin 0.99.0 (as do INACTIVE `session-summarizer` and archived `experiments/`). Do not assume a lower-pinned package typechecks against a newer host — it has not been bumped or verified yet. After a pi upgrade: bump the `@earendil-works/*` pins in lockstep per package (bun add, never hand-edit), typecheck, test, then smoke with `pi -ne -e <abs entry>` from a scratch cwd. Stale pins here are how a package ends up typechecking against 0.99 while running on 1.4 — keep this inventory current when a package is bumped.
+- Pi-version pins are per-package and are NOT yet uniform. As of 2026-11-03, `bermudis-pi-goodies` pins pi 1.4.0 (and `pi-logfare` pins `pi-ai` 1.4.0); `critique`, `diff`, `external-changes`, `ketamine`, and `council` still pin 0.99.0 (as do INACTIVE `session-summarizer` and archived `experiments/`). Do not assume a lower-pinned package typechecks against a newer host — it has not been bumped or verified yet. After a pi upgrade: bump the `@earendil-works/*` pins in lockstep per package (bun add, never hand-edit), typecheck, test, then smoke with `pi -ne -e <abs entry>` from a scratch cwd. Stale pins here are how a package ends up typechecking against 0.99 while running on 1.4 — keep this inventory current when a package is bumped.
 
 - `pi-packages/experiments/` — archive of unused/exploratory extensions. Excluded from typecheck; tests run via `bun run test` inside `pi-packages/experiments/` but the dir is not gated as maintained code.
 - Active extensions live at `pi-packages/<name>/`. New keepers go there; experiments go in `pi-packages/experiments/`.
