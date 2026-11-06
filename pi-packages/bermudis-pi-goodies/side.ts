@@ -294,7 +294,13 @@ export function buildLensMessages(
 
   const messages: ContextEvent["messages"] = [
     quote,
-    ...sideNative.flatMap((entry) => sessionEntryToContextMessages(entry)),
+    // Match the context hook's system-free contract. Pi restores the current
+    // prompt and tools in one leading system message after a lens rewrite.
+    // Replaying persisted deltas here can remove a tool absent from that head
+    // (e.g. apply_patch after switching away from Codex), which providers reject.
+    ...sideNative
+      .flatMap((entry) => sessionEntryToContextMessages(entry))
+      .filter((message) => message.role !== "system"),
   ];
 
   // Guard: if the just-submitted prompt has not landed as an entry yet (first

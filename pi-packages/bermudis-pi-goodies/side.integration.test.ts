@@ -151,6 +151,77 @@ test("main branches retain Pi's threshold compaction", async () => {
   expect(passedCompactions.some((e) => e.reason === "threshold")).toBe(true);
 });
 
+test("the side lens lets Pi restore current tools without replaying their removal", async () => {
+  const harness = await createTestSession({
+    extensionFactories: [side],
+    systemPrompt: "You are a test consultant.",
+  });
+  sessions.push(harness);
+  setGoodiesLogPathForTesting(join(harness.cwd, "goodies.log"));
+  const session = harness.session as AgentSession;
+  const tool = (name: string) => ({
+    name,
+    description: `Fixture tool: ${name}`,
+    parameters: { type: "object", properties: {} },
+  });
+  session.sessionManager.appendMessage({
+    role: "system",
+    content: "Original instructions",
+    toolsAdded: [tool("apply_patch")],
+    timestamp: 1,
+  });
+  session.sessionManager.appendMessage({
+    role: "user",
+    content: "Main question",
+    timestamp: 2,
+  });
+  session.sessionManager.appendCustomEntry("side-session", {
+    v: 1,
+    mainTipId: session.sessionManager.getLeafId(),
+    mainModel: { provider: "openai", id: "main-fixture" },
+    sideModel: { provider: "claude-code", id: "side-fixture" },
+  });
+  session.sessionManager.appendMessage({
+    role: "system",
+    content: "",
+    sections: { tools: "Use edit and write." },
+    toolsAdded: [tool("edit"), tool("write")],
+    toolsRemoved: [{ name: "apply_patch" }],
+    timestamp: 3,
+  });
+  const prompt = {
+    role: "user" as const,
+    content: "Side question",
+    timestamp: 4,
+  };
+  session.sessionManager.appendMessage(prompt);
+  const projected = session.sessionManager.buildSessionProjection().messages;
+  // Pin the precondition: real Pi projection includes the persisted tool delta.
+  expect(
+    projected.some(
+      (message) =>
+        message.role === "system" &&
+        message.toolsRemoved?.some((ref) => ref.name === "apply_patch"),
+    ),
+  ).toBe(true);
+
+  const messages = await session.extensionRunner.emitContext(projected);
+
+  expect(messages).toHaveLength(3);
+  expect(messages[0]).toMatchObject({
+    role: "system",
+    content: "Original instructions",
+    sections: { tools: "Use edit and write." },
+    toolsAdded: [tool("edit"), tool("write")],
+  });
+  expect(messages.slice(1).some((message) => message.role === "system")).toBe(
+    false,
+  );
+  expect(JSON.stringify(messages[1])).toContain("Main session transcript");
+  expect(messages[2]).toEqual(prompt);
+  expect(JSON.stringify(messages)).not.toContain("apply_patch");
+});
+
 test("side manual compaction and actual overflow recovery are not vetoed", async () => {
   const { session, passedCompactions } = await setup();
   const branchEntries = session.sessionManager.getBranch();

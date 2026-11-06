@@ -311,6 +311,75 @@ describe("buildLensMessages", () => {
     expect(messages[messages.length - 1]).toBe(inFlight);
   });
 
+  test("omits side-limb system patches while keeping native conversation intact", () => {
+    const raw = branchWithSide();
+    const sideMessages = raw
+      .slice(3)
+      .flatMap((entry) => sessionEntryToContextMessages(entry));
+    const toolDelta: MessageEntry = {
+      type: "message",
+      id: id(),
+      parentId: raw[2]!.id,
+      timestamp: new Date(4).toISOString(),
+      message: {
+        role: "system",
+        content: "",
+        toolsAdded: [
+          {
+            name: "edit",
+            description: "Edit a file",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+        toolsRemoved: [{ name: "apply_patch" }],
+        timestamp: 4,
+      },
+    };
+    const promptPatch: MessageEntry = {
+      ...toolDelta,
+      id: id(),
+      message: {
+        role: "system",
+        content: "Updated system instructions",
+        sections: { tools: "Current tool instructions" },
+        timestamp: 6,
+      },
+    };
+    const toolResult = toolResultEntry("side tool output", 7);
+    raw.splice(3, 0, toolDelta);
+    raw.push(promptPatch, toolResult);
+    const messages = lens(raw)!;
+
+    expect(messages.slice(1)).toEqual([...sideMessages, toolResult.message]);
+    expect(messages.some((message) => message.role === "system")).toBe(false);
+    expect(JSON.stringify(messages)).not.toContain("apply_patch");
+    expect(JSON.stringify(messages)).not.toContain(
+      "Updated system instructions",
+    );
+  });
+
+  test("a side tool delta does not swallow an unlanded first prompt", () => {
+    const raw = branchWithSide().slice(0, 3);
+    raw.push({
+      type: "message",
+      id: id(),
+      parentId: raw[2]!.id,
+      timestamp: new Date(4).toISOString(),
+      message: {
+        role: "system",
+        content: "",
+        toolsRemoved: [{ name: "apply_patch" }],
+        timestamp: 4,
+      },
+    });
+    const inFlight = userEntry("Review the patch").message;
+    const messages = lens(raw, raw, [inFlight])!;
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toBe(inFlight);
+    expect(messages.some((message) => message.role === "system")).toBe(false);
+  });
+
   test("side-limb compaction is quoted with a who-is-who caveat, not native history", () => {
     const raw: SessionEntry[] = [
       userEntry("main question"),

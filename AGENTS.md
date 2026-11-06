@@ -288,6 +288,16 @@ infrastructure. Never move them into `pi-packages/`, publish them, or delete the
   `ONEMIN_API_KEY` in item "pi provider keys", the pi-keys tmpfs cache file, and the
   `extraNames` entry in the pass-keys pi profile.
 
+## Side-session lens
+
+`side.ts` rebuilds conversation from session entries inside a `context` hook.
+Keep the projected side messages system-free: Pi restores the current prompt
+and tool declarations in one leading system message after the rewrite.
+Reintroducing persisted system/tool deltas can remove a tool absent from that
+head (e.g. `apply_patch` after a Codex → Claude Code switch), causing an upstream
+unknown-tool 400. Regression coverage lives in `side.test.ts` and
+`side.integration.test.ts` (real Pi context dispatcher, offline provider).
+
 ## Releasing bermudis-pi-goodies
 
 Release = tag push → GitHub Actions publishes to npm via OIDC trusted publishing (no npm token in CI). Steps:
