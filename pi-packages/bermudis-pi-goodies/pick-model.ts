@@ -1,6 +1,6 @@
 /**
  * pick-model — one interactive model picker for every goodies command that
- * needs one (/side, /goodies recap-model).
+ * needs one (/side, /goodies recap-model, /goodies summary-model).
  *
  * In the TUI it opens pi's own ctrl+l selector (search box, provider/scope
  * hints, current-model marker) instead of a flat ctx.ui.select list. The
