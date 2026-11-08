@@ -78,7 +78,10 @@ it.
 To enable it, point it at any model your Pi installation already serves:
 
 ```text
-/goodies summary-model kilo/xai/grok-4-fast   # or any provider/model you have
+/goodies summary-model                     # pi's ctrl+l selector (search box, current marker)
+/goodies summary-model kilo/xai/grok-4-fast   # or any provider/model you have; Tab ranks matches
+/goodies summary-model pick                # same selector explicitly
+/goodies summary-model off                 # disable smart summaries
 ```
 
 The command validates the model against your registry and suggests close

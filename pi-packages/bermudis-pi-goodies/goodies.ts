@@ -424,10 +424,9 @@ export function completeGoodiesArguments(
     // thinking-summaries already follow this pattern.
     const q = valuePrefix.toLowerCase();
     const items: AutocompleteItem[] = [];
-    // "pick" opens pi's ctrl+l selector (recap-model only: summary-model
-    // keeps its show-current behavior on a bare verb).
-    const words =
-      verb === "recap-model" ? ["pick", "off", "default"] : ["off", "default"];
+    // "pick" opens pi's ctrl+l selector; without a UI a bare verb keeps its
+    // show-current behavior instead.
+    const words = ["pick", "off", "default"];
     for (const w of words) {
       if (w.startsWith(q)) items.push({ value: `${verb} ${w}`, label: w });
     }
@@ -621,16 +620,14 @@ export default function goodies(pi: ExtensionAPI): void {
 
       if (sub === "summary-model") {
         const value = parts.slice(1).join(" ");
-        if (!value) {
-          const current = getSummaryModel();
+        const current = getSummaryModel();
+        const showCurrent = () =>
           ctx.ui.notify(
             current
               ? `smart summaries (bash): ${current}`
               : `smart summaries (bash): ${SUMMARY_OFF_HINT}`,
             "info",
           );
-          return;
-        }
         if (value === "off" || value === "default") {
           setSummaryModel(undefined);
           ctx.ui.notify(
@@ -644,15 +641,37 @@ export default function goodies(pi: ExtensionAPI): void {
         const registry = (
           ctx as { modelRegistry?: SummaryModelRegistry } | undefined
         )?.modelRegistry;
+        let chosen: string | undefined =
+          value && value !== "pick" ? value : undefined;
+        if (chosen === undefined) {
+          // Bare verb or "pick": pi's own ctrl+l selector. Without a UI a bare
+          // verb just reports the setting.
+          if (!value && !ctx.hasUI) {
+            showCurrent();
+            return;
+          }
+          const currentModel =
+            current && registry
+              ? findSummaryModel(registry, current)
+              : undefined;
+          const picked = await pickModel(ctx, {
+            owner: "summary",
+            title: "Summary model",
+            current: currentModel,
+            noUiHint: "pass the model: /goodies summary-model provider/model",
+          });
+          if (!picked) return; // cancelled, or already notified
+          chosen = `${picked.provider}/${picked.id}`;
+        }
         if (!registry) {
-          setSummaryModel(value);
+          setSummaryModel(chosen);
           ctx.ui.notify(
-            `summary-model set to ${value} (could not validate: model registry unavailable)`,
+            `summary-model set to ${chosen} (could not validate: model registry unavailable)`,
             "warning",
           );
           return;
         }
-        const resolved = resolveConfigModel(ctx, registry, value);
+        const resolved = resolveConfigModel(ctx, registry, chosen);
         if (!resolved) return;
         // Store the canonical provider/id form so resolution never depends on
         // the bare-id fallback.
@@ -788,7 +807,7 @@ export default function goodies(pi: ExtensionAPI): void {
       }
 
       ctx.ui.notify(
-        `Usage: /goodies [list|enable <feature>|disable <feature>|summary-model [provider/model|off]|thinking-summaries <on|off>|recap-model [provider/model|pick|off]|recap-turns <1-${RECAP_MAX_TURNS}|default>]`,
+        `Usage: /goodies [list|enable <feature>|disable <feature>|summary-model [provider/model|pick|off]|thinking-summaries <on|off>|recap-model [provider/model|pick|off]|recap-turns <1-${RECAP_MAX_TURNS}|default>]`,
         "warning",
       );
     },

@@ -406,6 +406,24 @@ describe("/goodies summary-model handler", () => {
     expect(onView.notices[0].msg).toContain("kilo/xai/grok-4-fast");
   });
 
+  test("a bare verb without a UI reports the current setting; pick without a UI says so", async () => {
+    const cmd = registerGoodies();
+    const bare = fakeCtx(registry);
+    await cmd.handler("summary-model", bare.ctx as never);
+    expect(bare.notices[0].msg).toContain("off");
+
+    setSummaryModel("kilo/xai/grok-4-fast");
+    const set = fakeCtx(registry);
+    await cmd.handler("summary-model", set.ctx as never);
+    expect(set.notices[0].msg).toContain("kilo/xai/grok-4-fast");
+
+    const pick = fakeCtx(registry);
+    await cmd.handler("summary-model pick", pick.ctx as never);
+    expect(pick.notices[0].level).toBe("error");
+    expect(pick.notices[0].msg).toContain("no UI available");
+    expect(getSummaryModel()).toBe("kilo/xai/grok-4-fast"); // untouched
+  });
+
   test("absent registry degrades to an unvalidated set with a warning", async () => {
     const cmd = registerGoodies();
     const { ctx, notices } = fakeCtx(undefined);
@@ -705,20 +723,21 @@ describe("/goodies argument completion", () => {
     ]);
   });
 
-  test("summary-model completes off/default then ranked catalogue models", () => {
+  test("summary-model completes pick/off/default then ranked catalogue models", () => {
     __setCompletionModelsForTesting([
       "zai/glm-5.3-flash",
       "google/gemini-2.5-flash",
       "anthropic/claude-opus-4-6",
     ]);
-    // Empty token: clears first, then the whole catalogue alphabetically.
-    // Values carry the verb (see the regression test below).
+    // Empty token: picker/clears first, then the whole catalogue
+    // alphabetically. Values carry the verb (see the regression test below).
     const all = completeGoodiesArguments("summary-model ")!.map((i) => i.value);
-    expect(all.slice(0, 2)).toEqual([
+    expect(all.slice(0, 3)).toEqual([
+      "summary-model pick",
       "summary-model off",
       "summary-model default",
     ]);
-    expect(all.slice(2)).toEqual([
+    expect(all.slice(3)).toEqual([
       "summary-model anthropic/claude-opus-4-6",
       "summary-model google/gemini-2.5-flash",
       "summary-model zai/glm-5.3-flash",
@@ -803,10 +822,11 @@ describe("/goodies forced-Tab autocomplete wrapper", () => {
     expect(wrapped.shouldTriggerFileCompletion([line], 0, line.length)).toBe(
       true,
     );
-    // With an empty stashed catalogue the clear words still complete — the
-    // claimed context never falls through to file completion.
+    // With an empty stashed catalogue the picker/clear words still complete —
+    // the claimed context never falls through to file completion.
     const offered = await wrapped.getSuggestions([line], 0, line.length, force);
     expect(offered?.items.map((i) => i.value)).toEqual([
+      "summary-model pick",
       "summary-model off",
       "summary-model default",
     ]);
