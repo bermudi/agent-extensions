@@ -350,6 +350,15 @@ describe("detectLegacyTool rg replace guard", () => {
     blocked("cat <<EOF\n`rg -rn foo`\nEOF");
   });
 
+  it("allows backslash-quoted heredoc delimiters (literal body)", () => {
+    // Bash-verified: quoting any part of the delimiter (here a backslash)
+    // makes the body literal — `<<\EOF` is `<<'EOF'`, nothing executes.
+    allowed("cat <<\\EOF\n$(rg -rn foo)\nEOF");
+    allowed("cat <<\\EOF\n`rg -rn foo`\nEOF");
+    allowed("cat <<E\\OF\n$(rg -rn foo)\nEOF");
+    allowed("cat <<-\\EOF\n$(rg -rn foo)\nEOF");
+  });
+
   it("allows rg without the replace flag", () => {
     allowed("rg -n foo .");
     allowed('"rg" -n foo .');

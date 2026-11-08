@@ -467,7 +467,12 @@ function readHeredocDelimiter(
   }
   const { word, next } = readWord(s, i);
   if (word.length === 0) return null;
-  return { delimiter: word, next, quoted: false };
+  // Quoting ANY part of the delimiter word makes the body literal
+  // (bash-verified: `cat <<\EOF` prints `$(cmd)` verbatim, like `<<'EOF'`).
+  // readWord already stripped the backslash into `word`, so detect it in the
+  // raw span. Mixed quote-in-the-middle delimiters (`<<E"O"F`) stay
+  // untracked — readWord stops at quotes; pre-existing limitation.
+  return { delimiter: word, next, quoted: s.slice(i, next).includes("\\") };
 }
 
 /**
