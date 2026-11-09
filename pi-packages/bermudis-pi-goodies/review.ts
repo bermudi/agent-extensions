@@ -292,7 +292,7 @@ const UNCOMMITTED_PROMPT =
   "Review the current code changes (staged, unstaged, and untracked files) and provide prioritized findings.";
 
 const BASE_BRANCH_PROMPT_WITH_MERGE_BASE =
-  "Review the code changes against the base branch '{baseBranch}'. The merge base commit for this comparison is {mergeBaseSha}. Run `git diff {mergeBaseSha}` to inspect the changes relative to {baseBranch}. Provide prioritized, actionable findings.";
+  "Review the code changes against the base branch '{baseBranch}'. The merge base commit for this comparison is {mergeBaseSha}. Run `git diff {mergeBaseSha}` to inspect the changes relative to {baseBranch}.{commits} Provide prioritized, actionable findings.";
 
 const BASE_BRANCH_PROMPT_FALLBACK =
   'Review the code changes against the base branch \'{branch}\'. Start by finding the merge diff between the current branch and {branch}\'s upstream e.g. (`git merge-base HEAD "$(git rev-parse --abbrev-ref "{branch}@{upstream}")"`), then run `git diff` against that SHA to see what changes we would merge into the {branch} branch. Provide prioritized, actionable findings.';
@@ -319,7 +319,7 @@ const COMMIT_RANGE_TRUNCATED_NOTE =
   "\n\n(Commit list truncated to the first {limit} commits — run `git log --oneline {logRange}` for the full list.)";
 
 const PULL_REQUEST_PROMPT =
-  "Review pull request #{prNumber} (\"{title}\") against the base branch '{baseBranch}'. The merge base commit for this comparison is {mergeBaseSha}. Run `git diff {mergeBaseSha}` to inspect the changes that would be merged. Provide prioritized, actionable findings.";
+  "Review pull request #{prNumber} (\"{title}\") against the base branch '{baseBranch}'. The merge base commit for this comparison is {mergeBaseSha}. Run `git diff {mergeBaseSha}` to inspect the changes that would be merged.{commits} Provide prioritized, actionable findings.";
 
 const PULL_REQUEST_PROMPT_FALLBACK =
   "Review pull request #{prNumber} (\"{title}\") against the base branch '{baseBranch}'. Start by finding the merge base between the current branch and {baseBranch} (e.g., `git merge-base HEAD {baseBranch}`), then run `git diff` against that SHA to see the changes that would be merged. Provide prioritized, actionable findings.";
@@ -429,6 +429,16 @@ Tag each finding with a priority level in the title:
 - [P2] - Normal. To be fixed eventually.
 - [P3] - Low. Nice to have.
 
+## Scope and intent
+
+Before reading the diff, establish what this change is meant to do: use the commit list and messages, linked issue/PR numbers, the branch name, and any user-provided instruction below. State that intent in one line at the top of your review.
+
+If the diff contains work that does not belong to that intent (for example many commits from unrelated features, or a base that looks far older than the change), stop and ask the user which scope to review. Do not review the unrelated work.
+
+## Report only
+
+This review is read-only. Report findings in your reply. Do not post comments on issues or PRs, open issues, edit files, write report files, commit, or push.
+
 ## Output format
 
 Provide your findings in a clear, structured format:
@@ -475,45 +485,88 @@ async function loadProjectReviewGuidelines(
 }
 
 /**
- * Get the merge base between HEAD and a branch
+ * Merge base between HEAD and a branch. Both the local branch and its
+ * upstream are candidates; the newest wins. Preferring the upstream alone
+ * picked a far-too-old base whenever `origin/<branch>` was stale (no fetch)
+ * while the local branch was current — the review then covered unrelated work.
  */
 async function getMergeBase(
   pi: ExtensionAPI,
   branch: string,
 ): Promise<string | null> {
+  const candidates: string[] = [];
   try {
-    // First try to get the upstream tracking branch
+    const refs = [branch];
     const { stdout: upstream, code: upstreamCode } = await pi.exec("git", [
       "rev-parse",
       "--abbrev-ref",
       `${branch}@{upstream}`,
     ]);
-
-    if (upstreamCode === 0 && upstream.trim()) {
-      const { stdout: mergeBase, code } = await pi.exec("git", [
+    if (upstreamCode === 0 && upstream.trim()) refs.push(upstream.trim());
+    for (const ref of refs) {
+      const { stdout, code } = await pi.exec("git", [
         "merge-base",
         "HEAD",
-        upstream.trim(),
+        ref,
       ]);
-      if (code === 0 && mergeBase.trim()) {
-        return mergeBase.trim();
-      }
+      const sha = stdout.trim();
+      if (code === 0 && sha && !candidates.includes(sha)) candidates.push(sha);
     }
+    let best = candidates[0];
+    if (best === undefined) return null;
+    for (const sha of candidates.slice(1)) {
+      if (await isAncestorOf(pi, best, sha)) best = sha;
+    }
+    return best;
+  } catch {
+    return candidates[0] ?? null;
+  }
+}
 
-    // Fall back to using the branch directly
-    const { stdout: mergeBase, code } = await pi.exec("git", [
-      "merge-base",
-      "HEAD",
-      branch,
+/**
+ * `git log --oneline` for a range, capped at COMMIT_RANGE_COMMIT_LIMIT with a
+ * truncation note. null when git fails or the range is empty.
+ */
+async function listCommits(
+  pi: ExtensionAPI,
+  logRange: string,
+): Promise<string | null> {
+  try {
+    const { stdout, code } = await pi.exec("git", [
+      "log",
+      "--oneline",
+      "-n",
+      `${COMMIT_RANGE_COMMIT_LIMIT + 1}`,
+      logRange,
     ]);
-    if (code === 0 && mergeBase.trim()) {
-      return mergeBase.trim();
+    if (code !== 0) return null;
+    const lines = stdout
+      .trim()
+      .split("\n")
+      .filter((line) => line.trim());
+    if (lines.length === 0) return null;
+    let out = lines.slice(0, COMMIT_RANGE_COMMIT_LIMIT).join("\n");
+    if (lines.length > COMMIT_RANGE_COMMIT_LIMIT) {
+      out += COMMIT_RANGE_TRUNCATED_NOTE.replace(
+        "{limit}",
+        String(COMMIT_RANGE_COMMIT_LIMIT),
+      ).replace(/{logRange}/g, () => logRange);
     }
-
-    return null;
+    return out;
   } catch {
     return null;
   }
+}
+
+/** Commit-list sentence for base-branch/PR prompts ("" when unavailable). */
+async function commitsSentence(
+  pi: ExtensionAPI,
+  mergeBase: string,
+): Promise<string> {
+  const commits = await listCommits(pi, `${mergeBase}..HEAD`);
+  return commits
+    ? ` The commits in scope are:\n\n${commits}\n\nCheck that they all belong to the change under review.`
+    : "";
 }
 
 /**
@@ -1045,11 +1098,14 @@ export async function buildReviewPrompt(
 
     case "baseBranch": {
       const mergeBase = await getMergeBase(pi, target.branch);
+      const commits = mergeBase ? await commitsSentence(pi, mergeBase) : "";
       const basePrompt = mergeBase
         ? BASE_BRANCH_PROMPT_WITH_MERGE_BASE.replace(
             /{baseBranch}/g,
             () => target.branch,
-          ).replace(/{mergeBaseSha}/g, () => mergeBase)
+          )
+            .replace(/{mergeBaseSha}/g, () => mergeBase)
+            .replace("{commits}", () => commits)
         : BASE_BRANCH_PROMPT_FALLBACK.replace(/{branch}/g, () => target.branch);
       return basePrompt;
     }
@@ -1077,52 +1133,26 @@ export async function buildReviewPrompt(
           /{logRange}/g,
           () => logRange,
         );
-      let prompt: string;
-      try {
-        const { stdout, code } = await pi.exec("git", [
-          "log",
-          "--oneline",
-          "-n",
-          `${COMMIT_RANGE_COMMIT_LIMIT + 1}`,
-          logRange,
-        ]);
-        const lines =
-          code === 0
-            ? stdout
-                .trim()
-                .split("\n")
-                .filter((line) => line.trim())
-            : [];
-        if (lines.length === 0) {
-          prompt = fallbackPrompt();
-        } else {
-          const truncated = lines.length > COMMIT_RANGE_COMMIT_LIMIT;
-          const commits = lines.slice(0, COMMIT_RANGE_COMMIT_LIMIT).join("\n");
-          prompt = COMMIT_RANGE_PROMPT_WITH_COMMITS.replace(
+      const commits = await listCommits(pi, logRange);
+      let prompt = commits
+        ? COMMIT_RANGE_PROMPT_WITH_COMMITS.replace(
             /{range}/g,
             () => range,
-          ).replace("{commits}", () => commits);
-          if (truncated) {
-            prompt += COMMIT_RANGE_TRUNCATED_NOTE.replace(
-              "{limit}",
-              String(COMMIT_RANGE_COMMIT_LIMIT),
-            ).replace(/{logRange}/g, () => logRange);
-          }
-        }
-      } catch {
-        prompt = fallbackPrompt();
-      }
+          ).replace("{commits}", () => commits)
+        : fallbackPrompt();
       if (title) prompt += ` The range is described as: "${title}".`;
       return prompt + note;
     }
 
     case "pullRequest": {
       const mergeBase = await getMergeBase(pi, target.baseBranch);
+      const commits = mergeBase ? await commitsSentence(pi, mergeBase) : "";
       const basePrompt = mergeBase
         ? PULL_REQUEST_PROMPT.replace(/{prNumber}/g, String(target.prNumber))
             .replace(/{title}/g, () => target.title)
             .replace(/{baseBranch}/g, () => target.baseBranch)
             .replace(/{mergeBaseSha}/g, () => mergeBase)
+            .replace("{commits}", () => commits)
         : PULL_REQUEST_PROMPT_FALLBACK.replace(
             /{prNumber}/g,
             String(target.prNumber),

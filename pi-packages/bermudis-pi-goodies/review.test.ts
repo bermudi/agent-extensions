@@ -626,6 +626,58 @@ describe("buildReviewPrompt ($-pattern safety)", () => {
     expect(prompt).toContain("deadbeef123");
   });
 
+  test("stale upstream: the newer local merge base wins and commits are listed", async () => {
+    // origin/main is stale (old base), local main is current (new base).
+    const calls: string[][] = [];
+    const prompt = await buildReviewPrompt(
+      piStub(async (_cmd, args) => {
+        calls.push(args);
+        if (args[0] === "rev-parse")
+          return { stdout: "origin/main\n", code: 0 };
+        if (args[0] === "merge-base" && args[1] === "HEAD")
+          return {
+            stdout: args[2] === "main" ? "newbase\n" : "oldbase\n",
+            code: 0,
+          };
+        if (args[0] === "merge-base" && args[1] === "--is-ancestor")
+          return { stdout: "", code: args[2] === "oldbase" ? 0 : 1 };
+        if (args[0] === "log")
+          return { stdout: "f00 feat: the change\n", code: 0 };
+        return { stdout: "", code: 1 };
+      }),
+      { type: "baseBranch", branch: "main" },
+    );
+    expect(prompt).toContain("git diff newbase");
+    expect(prompt).not.toContain("oldbase");
+    expect(prompt).toContain("f00 feat: the change");
+    expect(calls).toContainEqual([
+      "log",
+      "--oneline",
+      "-n",
+      "101",
+      "newbase..HEAD",
+    ]);
+  });
+
+  test("current upstream ahead of local branch: the upstream merge base wins", async () => {
+    const prompt = await buildReviewPrompt(
+      piStub(async (_cmd, args) => {
+        if (args[0] === "rev-parse")
+          return { stdout: "origin/main\n", code: 0 };
+        if (args[0] === "merge-base" && args[1] === "HEAD")
+          return {
+            stdout: args[2] === "main" ? "oldbase\n" : "newbase\n",
+            code: 0,
+          };
+        if (args[0] === "merge-base" && args[1] === "--is-ancestor")
+          return { stdout: "", code: args[2] === "oldbase" ? 0 : 1 };
+        return { stdout: "", code: 1 };
+      }),
+      { type: "baseBranch", branch: "main" },
+    );
+    expect(prompt).toContain("git diff newbase");
+  });
+
   test("branch name round-trips verbatim (no merge-base)", async () => {
     const prompt = await buildReviewPrompt(piStub(), {
       type: "baseBranch",
