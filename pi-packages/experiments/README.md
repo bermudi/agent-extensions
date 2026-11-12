@@ -28,6 +28,7 @@ work on those features.
 | [hotkeys](./hotkeys/hotkeys.ts) | `hotkeys.ts` | `Ctrl+\\` | In-session Pi keyboard cheat sheet |
 | [llm-dump](./llm-dump/index.ts) | `index.ts` | `/dump` | Inspect the exact context and provider payload |
 | [mcp](./mcp/index.ts) | `index.ts` | `mcp`, `mcp_list` tools | Call configured MCP servers through `mcporter` |
+| [monty-code-mode](./monty-code-mode/index.ts) | `index.ts` | `run_code` tool | pydantic-ai-style code mode: one Python program calls Pi's tools, run in the Monty sandbox |
 | [oracle](./oracle/oracle.ts) | `oracle.ts` | `oracle` tool | Ask a standalone Qwen reasoning endpoint for a second opinion |
 | [pi-debate](./pi-debate/debate.ts) | `debate.ts` | `/debate`, `debate` tool | Sequential pro/con model debate with optional judge |
 | [pi-telegram](./pi-telegram/index.ts) | `index.ts` | Telegram bridge | Drive a Pi session from Telegram and send attachments |
@@ -136,6 +137,17 @@ or sensitive workspaces without checking the prompt construction first.
   It shells out to `mcporter`, so the executable and its server configuration must be
   available in the environment. Default timeouts range from 15 seconds to 120 seconds,
   depending on the server.
+- **`monty-code-mode`** registers `run_code`, a pydantic-ai Code Mode equivalent: the
+  model writes one Python program that calls Pi's callable tools as async functions
+  (`asyncio.gather` for parallel calls) instead of one model turn per tool call. The
+  code runs in the Monty sandbox (`@pydantic/monty` native binding, spawned lazily as
+  worker subprocesses) with no filesystem, network, or environment access; nested calls
+  dispatch through `ctx.executeTool`, so validation, hooks, and permission checks apply
+  as for direct calls. REPL state persists across calls in the session (`restart: true`
+  clears it); limits are 30s execution per call (host waits excluded), 256 MiB, and 100
+  nested tool calls. Unlike `xonsh`, the model's code never runs on the host — only
+  registered tools do. Requires the `@pydantic/monty` platform binary (installed with
+  the package).
 - **`oracle`** registers a tool-only Qwen reasoning endpoint. It accepts a question and
   optional file attachments, has no tools or project awareness, and logs to
   `~/.pi/logs/oracle/` with seven-day retention. Configuration is controlled by
@@ -184,6 +196,9 @@ The archive's tests concentrate on pure helpers and the extension harness rather
 end-to-end provider calls:
 
 - `arena/arena.test.ts`
+- `monty-code-mode/monty-code-mode.test.ts` (unit) and
+  `monty-code-mode/monty-code-mode.integration.test.ts` (real Monty sandbox, needs the
+  `@pydantic/monty` platform binary)
 - `pi-debate/debate.test.ts`
 - `roundtable/roundtable.test.ts`
 - `session-reference/session-reference-utils.test.ts`

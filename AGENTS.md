@@ -146,6 +146,22 @@ pi-packages/
                          #   claudish/: port of the Claude Code claudish-to-english plugin (display-only
                          #   plain-English rewrite of assistant messages). Standalone package, never
                          #   published, not installed anywhere; own tests (58, run green).
+                         #   monty-code-mode/: `run_code` tool — pydantic-ai Code Mode for pi (#33). Model
+                         #   writes one Python program calling pi's callable tools as async functions
+                         #   (asyncio.gather), executed in the Monty sandbox via the @pydantic/monty npm
+                         #   binding (napi — verified working under Bun 1.4.4; workers spawn lazily on
+                         #   first call, closed on session_shutdown with a 3s race cap). Nested calls go
+                         #   through ctx.executeTool (full pipeline: validation, tool_call/tool_result
+                         #   hooks, permissions). Async host fns MUST be awaited in-sandbox (else
+                         #   'coroutine' TypeError — probed); kwargs arrive at the host as a trailing
+                         #   object arg: f(1, a=2) -> [1, {a:2}]. Trailing-expression value returns,
+                         #   null for assignment/None; print captured to <output>. REPL persists across
+                         #   calls (restart:true clears); syntax/runtime errors AND feed timeouts keep
+                         #   the session, only crash-class errors poison it (then next call re-checks
+                         #   out). CRITICAL: session.close() during a pending feed WAITS for that feed —
+                         #   abort by rejecting host calls, never by closing first (pinned in
+                         #   monty-code-mode.integration.test.ts). Dep added to experiments
+                         #   package.json dependencies (bun.lock is gitignored for experiments by design).
 herdr-plugins/           # Herdr plugins (python3, stdlib-only), linked via `herdr plugin link`
   pane-context/           # ACTIVE: leader+alt+i copies HERDR_PANE_ID/HERDR_SOCKET_PATH/HERDR_TAB_ID/HERDR_WORKSPACE_ID
                          #   (KEY=value lines) to the clipboard + toast. Clipboard tools fork a daemon to serve the
