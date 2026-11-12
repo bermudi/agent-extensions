@@ -149,7 +149,10 @@ pi-packages/
                          #   monty-code-mode/: `run_code` tool — pydantic-ai Code Mode for pi (#33). Model
                          #   writes one Python program calling pi's callable tools as async functions
                          #   (asyncio.gather), executed in the Monty sandbox via the @pydantic/monty npm
-                         #   binding (napi — verified working under Bun 1.4.4; workers spawn lazily on
+                         #   binding (napi — pi runs VANILLA NODE (~/.pi/agent/bin/pi execs
+                         #   dist/bundle/cli.js, #!/usr/bin/env node; verified on node v24.22.3 AND
+                         #   inside a live pi smoke; bun only appears as this package's test runner).
+                         #   Workers spawn lazily on
                          #   first call, closed on session_shutdown with a 3s race cap). Nested calls go
                          #   through ctx.executeTool (full pipeline: validation, tool_call/tool_result
                          #   hooks, permissions). Async host fns MUST be awaited in-sandbox (else
