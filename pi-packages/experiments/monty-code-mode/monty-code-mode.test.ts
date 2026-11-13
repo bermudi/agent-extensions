@@ -130,7 +130,7 @@ test("params that cannot be kwargs stay out of the signature and get the dict es
   );
   // No escape-hatch bullet when every param name is a valid kwarg.
   expect(createRunCodeDescription([fakeTool()])).not.toContain(
-    "not a valid Python identifier",
+    "pass them through a dict",
   );
 });
 
@@ -175,6 +175,10 @@ test("marshalToolArgs maps positionals onto declared names and rejects overflow"
   expect(marshalToolArgs([], ["a"])).toEqual({});
   expect(() => marshalToolArgs([1, 2, 3], ["a"])).toThrow(
     "too many positional arguments",
+  );
+  // The trailing kwargs dict is not counted as a positional.
+  expect(() => marshalToolArgs([1, 2, { b: 3 }], ["a"])).toThrow(
+    "got 2, tool declares 1",
   );
 });
 

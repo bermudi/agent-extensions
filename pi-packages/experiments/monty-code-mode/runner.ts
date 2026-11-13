@@ -116,7 +116,7 @@ export function marshalToolArgs(
   for (const [i, arg] of positional.entries()) {
     if (i >= paramNames.length) {
       throw new Error(
-        `too many positional arguments (got ${args.length}, tool declares ${paramNames.length}); pass the rest as keyword arguments`,
+        `too many positional arguments (got ${positional.length}, tool declares ${paramNames.length}); pass the rest as keyword arguments`,
       );
     }
     merged[paramNames[i]] = arg;
@@ -243,6 +243,9 @@ export class MontyCodeRunner {
     };
 
     let sessionReset = false;
+    // Set when a tool call arrives with the signal already aborted: dispatch then raised
+    // inside the sandbox, so the snippet has actually seen (and maybe swallowed) the abort.
+    let abortObserved = false;
     try {
       if (input.restart) {
         await this.dropSession();
@@ -260,8 +263,10 @@ export class MontyCodeRunner {
         (...args: unknown[]) => Promise<unknown>
       > = {};
       for (const [id, tool] of byId) {
-        externalLookup[id] = async (...args: unknown[]) =>
-          this.dispatch(tool, id, args, ctx, signal, calls, emit);
+        externalLookup[id] = async (...args: unknown[]) => {
+          if (signal?.aborted) abortObserved = true;
+          return this.dispatch(tool, id, args, ctx, signal, calls, emit);
+        };
       }
 
       const value = await session.feedRun(input.code, {
@@ -278,9 +283,10 @@ export class MontyCodeRunner {
         content: [
           {
             type: "text",
-            // A snippet that catches the abort's RuntimeError resolves normally; label it.
+            // A cancelled-but-completing run is labelled; only claim the snippet ignored the
+            // abort when a tool call actually surfaced it there.
             text: aborted
-              ? `run_code was cancelled mid-run; the snippet ignored the abort. Partial result:\n${success}`
+              ? `run_code was cancelled mid-run; ${abortObserved ? "the snippet ignored the abort" : "no tool call saw the abort"}. Partial result:\n${success}`
               : success,
           },
         ],

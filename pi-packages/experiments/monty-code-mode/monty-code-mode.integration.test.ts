@@ -313,6 +313,68 @@ test("a snippet that swallows the abort error is labelled as cancelled", async (
   }
 });
 
+test("an abort landing after the last tool call is labelled without claiming the snippet saw it", async () => {
+  const local = new MontyCodeRunner();
+  try {
+    const controller = new AbortController();
+    // Abort fires while the (only) tool call is in flight; no later call arrives aborted,
+    // so the snippet never observes the abort and finishes normally.
+    const { ctx } = fakeCtx([echoTool], () => {
+      controller.abort();
+      return undefined;
+    });
+    const result = await local.run(
+      { code: "await echo(text='x')\n'done'" },
+      ctx,
+      controller.signal,
+      undefined,
+    );
+    expect(result.isError).toBeUndefined();
+    const text = result.content
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .join("\n");
+    expect(text).toContain("cancelled mid-run");
+    expect(text).toContain("no tool call saw the abort");
+    expect(text).not.toContain("the snippet ignored the abort");
+    expect(text).toContain('<result>\n"done"\n</result>');
+  } finally {
+    await local.close();
+  }
+});
+
+test("huge tool error text is truncated on the error path", async () => {
+  const local = new MontyCodeRunner();
+  try {
+    const big = "x".repeat(60_000);
+    const { ctx } = fakeCtx([echoTool], ({ name }) => ({
+      toolCall: {
+        id: "nested",
+        name,
+        arguments: {},
+      } as AgentToolCallOutcome["toolCall"],
+      result: {
+        content: [{ type: "text", text: big }],
+        details: undefined,
+      },
+      isError: true,
+    }));
+    const result = await local.run(
+      { code: "await echo(text='y')" },
+      ctx,
+      undefined,
+      undefined,
+    );
+    expect(result.isError).toBe(true);
+    const text = result.content
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .join("\n");
+    expect(text).toContain("… (error text truncated)");
+    expect(text.length).toBeLessThan(60_000);
+  } finally {
+    await local.close();
+  }
+});
+
 test("a closed runner reports an error instead of crashing", async () => {
   const local = new MontyCodeRunner();
   await local.close();
