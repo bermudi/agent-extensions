@@ -95,28 +95,40 @@ function isSessionFatal(error: unknown): boolean {
   return !(error instanceof MontyError);
 }
 
-/** `[..., {kwargs}]` from the sandbox into one arguments object for executeTool. */
+/**
+ * `[..., {kwargs}]` from the sandbox into one arguments object for executeTool. Positional
+ * arguments map onto the tool's declared parameter names in order; a trailing object is the
+ * kwargs dict. A positional past the declared parameters throws — a clear, retryable error
+ * instead of silently dropping the argument.
+ */
 export function marshalToolArgs(
   args: readonly unknown[],
-  firstParamName?: string,
+  paramNames: readonly string[] = [],
 ): Record<string, unknown> {
   const merged: Record<string, unknown> = {};
-  for (const arg of args) {
-    if (typeof arg === "object" && arg !== null && !Array.isArray(arg)) {
-      Object.assign(merged, arg as Record<string, unknown>);
-    } else if (firstParamName !== undefined && !(firstParamName in merged)) {
-      merged[firstParamName] = arg;
+  let positional = args.length > 0 ? args.slice(0, -1) : [];
+  const last = args[args.length - 1];
+  if (typeof last === "object" && last !== null && !Array.isArray(last)) {
+    Object.assign(merged, last as Record<string, unknown>);
+  } else {
+    positional = args.slice();
+  }
+  for (const [i, arg] of positional.entries()) {
+    if (i >= paramNames.length) {
+      throw new Error(
+        `too many positional arguments (got ${args.length}, tool declares ${paramNames.length}); pass the rest as keyword arguments`,
+      );
     }
+    merged[paramNames[i]] = arg;
   }
   return merged;
 }
 
-/** First declared property name of a tool's parameter schema, for positional-argument rescue. */
-function firstParamName(tool: AgentTool): string | undefined {
+/** Declared property names of a tool's parameter schema, in order, for positional-argument mapping. */
+function paramNames(tool: AgentTool): string[] {
   const params = tool.parameters as unknown as
     { properties?: Record<string, unknown> } | undefined;
-  const names = Object.keys(params?.properties ?? {});
-  return names[0];
+  return Object.keys(params?.properties ?? {});
 }
 
 /** What a nested call resolves to inside the sandbox: structuredContent, else text, else raise. */
@@ -124,7 +136,8 @@ export function nestedCallValue(
   outcome: AgentToolCallOutcome,
   tool: AgentTool,
 ): unknown {
-  const text = outcome.result.content
+  const blocks = outcome.result.content;
+  const text = blocks
     .map((block) => (block.type === "text" ? block.text : ""))
     .join("\n");
   const structured =
@@ -133,6 +146,10 @@ export function nestedCallValue(
       : undefined;
   if (outcome.isError && structured === undefined) {
     throw new Error(text || `tool ${outcome.toolCall.name} failed`);
+  }
+  if (structured === undefined && text === "" && blocks.length > 0) {
+    // Non-text content (images) cannot cross into the sandbox; say so instead of an empty string.
+    return "[non-text tool content omitted]";
   }
   return structured !== undefined ? structured : text;
 }
@@ -166,25 +183,47 @@ function summarizeCalls(calls: readonly NestedCallRecord[]): string {
 export class MontyCodeRunner {
   private pool: Monty | undefined;
   private session: MontySession | undefined;
+  private closed = false;
 
   constructor(private readonly limits: Partial<typeof DEFAULT_LIMITS> = {}) {}
 
   private async ensureSession(): Promise<MontySession> {
+    if (this.closed) throw new Error("monty-code-mode runner is closed");
     if (this.session) return this.session;
     if (!this.pool) {
-      this.pool = await Monty.create({ minProcesses: 1 });
+      const pool = await Monty.create({ minProcesses: 1 });
+      // close() may have run while the pool was being created; do not leak it.
+      if (this.closed) {
+        await this.closePool(pool);
+        throw new Error("monty-code-mode runner is closed");
+      }
+      this.pool = pool;
     }
-    this.session = await this.pool.checkout({
+    const session = await this.pool.checkout({
       limits: { ...DEFAULT_LIMITS, ...this.limits },
       scriptName: "run_code.py",
     });
-    return this.session;
+    if (this.closed) {
+      await session.close().catch(() => {});
+      throw new Error("monty-code-mode runner is closed");
+    }
+    this.session = session;
+    return session;
   }
 
   private async dropSession(): Promise<void> {
     const session = this.session;
     this.session = undefined;
     if (session) await session.close().catch(() => {});
+  }
+
+  private async closePool(pool: Monty): Promise<void> {
+    await Promise.race([
+      pool.close().catch((error) => {
+        console.error("[monty-code-mode] pool close failed:", error);
+      }),
+      new Promise((resolve) => setTimeout(resolve, 3000)),
+    ]);
   }
 
   /** Run one `run_code` call. Never rejects; failures come back as `isError` results. */
@@ -195,6 +234,7 @@ export class MontyCodeRunner {
     onUpdate: AgentToolUpdateCallback<RunCodeDetails> | undefined,
   ): Promise<AgentToolResult<RunCodeDetails>> {
     const calls: NestedCallRecord[] = [];
+    const print = new CollectString();
     const emit = (status: string): void => {
       onUpdate?.({
         content: [{ type: "text", text: status }],
@@ -224,20 +264,24 @@ export class MontyCodeRunner {
           this.dispatch(tool, id, args, ctx, signal, calls, emit);
       }
 
-      const print = new CollectString();
       const value = await session.feedRun(input.code, {
         externalLookup,
         printCallback: print,
       });
+      const aborted = signal?.aborted === true;
       for (const call of calls) {
         if (call.status === "running")
-          call.status = signal?.aborted ? "cancelled" : "ok";
+          call.status = aborted ? "cancelled" : "ok";
       }
+      const success = this.renderSuccess(value, print.output, calls);
       return {
         content: [
           {
             type: "text",
-            text: this.renderSuccess(value, print.output, calls),
+            // A snippet that catches the abort's RuntimeError resolves normally; label it.
+            text: aborted
+              ? `run_code was cancelled mid-run; the snippet ignored the abort. Partial result:\n${success}`
+              : success,
           },
         ],
         details: {
@@ -260,20 +304,29 @@ export class MontyCodeRunner {
       const header = sessionReset
         ? "The Monty sandbox session was reset — re-run imports and recreate any state."
         : "Python error:";
-      const message = error instanceof Error ? error.message : String(error);
+      // Error text can be a full Monty traceback or a huge nested tool error; cap it like results.
+      const message = truncate(
+        error instanceof Error ? error.message : String(error),
+        MAX_RESULT_CHARS,
+      );
       const summary = summarizeCalls(calls);
+      const parts: string[] = [];
+      if (print.output) {
+        const p = truncate(print.output.trimEnd(), MAX_PRINT_CHARS);
+        parts.push(
+          `<output>\n${p.text}${p.truncated ? "\n… (print output truncated)" : ""}\n</output>`,
+        );
+      }
+      parts.push(
+        aborted
+          ? `run_code cancelled. ${summary}`
+          : `${header} ${message.text}${message.truncated ? " … (error text truncated)" : ""}${summary ? `\n${summary}` : ""}`,
+      );
       return {
-        content: [
-          {
-            type: "text",
-            text: aborted
-              ? `run_code cancelled. ${summary}`
-              : `${header} ${message}${summary ? `\n${summary}` : ""}`,
-          },
-        ],
+        content: [{ type: "text", text: parts.join("\n") }],
         details: {
           calls,
-          printChars: 0,
+          printChars: print.output.length,
           sessionReset: sessionReset || undefined,
         },
         isError: true,
@@ -297,7 +350,7 @@ export class MontyCodeRunner {
       );
     }
     if (signal?.aborted) throw new Error("run_code aborted");
-    const toolArgs = marshalToolArgs(args, firstParamName(tool));
+    const toolArgs = marshalToolArgs(args, paramNames(tool));
     const record: NestedCallRecord = {
       id: `${id}-${calls.length + 1}`,
       name: tool.name,
@@ -351,6 +404,8 @@ export class MontyCodeRunner {
 
   /** Best-effort teardown for session_shutdown. Never rejects. */
   async close(): Promise<void> {
+    // Flag first so a pool still being created by ensureSession() is closed there, not leaked.
+    this.closed = true;
     // close() during a pending feed would wait for that feed; races are abandoned, not awaited.
     await Promise.race([
       this.dropSession(),
@@ -358,13 +413,6 @@ export class MontyCodeRunner {
     ]).catch(() => {});
     const pool = this.pool;
     this.pool = undefined;
-    if (pool) {
-      await Promise.race([
-        pool.close().catch((error) => {
-          console.error("[monty-code-mode] pool close failed:", error);
-        }),
-        new Promise((resolve) => setTimeout(resolve, 3000)),
-      ]);
-    }
+    if (pool) await this.closePool(pool);
   }
 }

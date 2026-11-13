@@ -163,6 +163,15 @@ export function toPythonIdentifier(name: string): string {
 }
 
 /**
+ * Whether `name` is usable as a keyword argument in sandbox code: a valid identifier that is not a
+ * Python keyword. Builtins are fine as kwargs (`f(id=1)` is legal); keywords (`from`, `in`) and
+ * names like `max-results` make the call a syntax error, so they must go through `f(**{'from': v})`.
+ */
+export function isUsableKwargName(name: string): boolean {
+  return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name) && !PYTHON_KEYWORDS.has(name);
+}
+
+/**
  * Tool names to sandbox identifiers, collision-free: the first name keeps its direct identifier,
  * later collisions get `_2`, `_3`, … suffixes.
  */
@@ -202,12 +211,21 @@ function asSchema(value: unknown): JsonSchemaObject | undefined {
     : undefined;
 }
 
+/** Longest all-string enum still rendered as a `Literal[...]`; longer ones fall back to `str`. */
+const MAX_ENUM_LITERALS = 10;
+
 /** One JSON-Schema node as a Python annotation. Anything shapeless is `Any`. */
 export function pythonType(schema: unknown): string {
   const s = asSchema(schema);
   if (!s) return "Any";
-  if (Array.isArray(s.enum) && s.enum.every((v) => typeof v === "string"))
-    return "str";
+  if (
+    Array.isArray(s.enum) &&
+    s.enum.length > 0 &&
+    s.enum.length <= MAX_ENUM_LITERALS &&
+    s.enum.every((v) => typeof v === "string")
+  ) {
+    return `Literal[${s.enum.map((v) => JSON.stringify(v)).join(", ")}]`;
+  }
   switch (s.type) {
     case "string":
       return "str";
@@ -239,7 +257,9 @@ function reprDefault(value: unknown): string | undefined {
   }
 }
 
-/** `async def <id>(*, p: t = d, ...) -> <ret>` for one tool, or just the id when the schema is unusable. */
+/** `async def <id>(*, p: t = d, ...) -> <ret>` for one tool. Params whose names cannot appear as
+ * Python keyword arguments (keywords, invalid identifiers) are left out of the signature and
+ * documented by {@link renderToolSection} with the `**{'name': value}` call form. */
 export function renderPythonSignature(
   tool: AgentTool,
   identifier: string,
@@ -247,15 +267,18 @@ export function renderPythonSignature(
   const params = asSchema(tool.parameters as unknown);
   const props = params?.properties ?? {};
   const required = new Set(params?.required ?? []);
-  const args = Object.entries(props).map(([name, raw]) => {
-    const schema = asSchema(raw);
-    const type = pythonType(raw);
-    if (required.has(name)) return `${name}: ${type}`;
-    const def = schema ? reprDefault(schema.default) : undefined;
-    return def !== undefined
-      ? `${name}: ${type} = ${def}`
-      : `${name}: ${type} | None = None`;
-  });
+  const args = Object.entries(props)
+    .filter(([name]) => isUsableKwargName(name))
+    .map(([name, raw]) => {
+      const schema = asSchema(raw);
+      const type = pythonType(raw);
+      if (required.has(name)) return `${name}: ${type}`;
+      const def = schema ? reprDefault(schema.default) : undefined;
+      if (def !== undefined) return `${name}: ${type} = ${def}`;
+      // Optional without a default: mark it optional without implying None is a valid argument
+      // (TypeBox Optional is not nullable).
+      return `${name}: ${type} (optional)`;
+    });
   const output = asSchema(tool.outputSchema as unknown);
   const ret = !output ? "str" : pythonType(tool.outputSchema);
   return `async def ${identifier}(${args.length > 0 ? `*, ${args.join(", ")}` : ""}) -> ${ret}`;
@@ -273,7 +296,8 @@ function firstParagraph(text: string): string {
 
 /**
  * One tool's catalog section: identifier heading, signature, short description, and one line per
- * documented parameter.
+ * documented parameter. Params whose names cannot be Python keyword arguments are documented with
+ * the `**{'name': value}` call form instead of the signature.
  */
 export function renderToolSection(tool: AgentTool, identifier: string): string {
   const lines = [`### \`${identifier}\``];
@@ -284,6 +308,12 @@ export function renderToolSection(tool: AgentTool, identifier: string): string {
   if (desc) lines.push(desc);
   const params = asSchema(tool.parameters as unknown);
   for (const [name, raw] of Object.entries(params?.properties ?? {})) {
+    if (!isUsableKwargName(name)) {
+      lines.push(
+        `- '${name}' (${pythonType(raw)}, not a valid Python name): pass as \`${identifier}(**{'${name}': value})\``,
+      );
+      continue;
+    }
     const d = asSchema(raw)?.description;
     if (typeof d === "string" && d.trim()) lines.push(`- ${name}: ${d.trim()}`);
   }
@@ -293,6 +323,16 @@ export function renderToolSection(tool: AgentTool, identifier: string): string {
 /** Estimated-token budget the tool catalog may spend (chars / 4, like pi's codemode inline budget). */
 export const DEFAULT_CATALOG_BUDGET_TOKENS = 3000;
 const CHARS_PER_TOKEN = 4;
+/** Cap on identifiers in the "Also callable" overflow tail, so it cannot defeat the budget. */
+const MAX_OVERFLOW_NAMES = 30;
+
+/** Whether any param of the tool cannot be passed as a Python keyword argument. */
+function hasQuotedParams(tool: AgentTool): boolean {
+  const params = asSchema(tool.parameters as unknown);
+  return Object.keys(params?.properties ?? {}).some(
+    (name) => !isUsableKwargName(name),
+  );
+}
 
 /** The model-facing `run_code` description: sandbox contract + the callable-tool catalog. */
 export function createRunCodeDescription(
@@ -310,8 +350,13 @@ export function createRunCodeDescription(
     "- `print(...)` is for progress logging. The value of the final expression is returned to the model — put it on the last line (an assignment or `None` returns no value).",
     "- Variables, imports, and definitions persist across run_code calls in this session. Pass `restart: true` to clear the sandbox first.",
     `- Limits per call: ${maxSecs}s execution (time waiting on tools excluded), 256 MiB memory, ${maxToolCalls} nested tool calls.`,
-  ].join("\n");
-  if (callable.length === 0) return intro;
+  ];
+  if (callable.some((t) => hasQuotedParams(t))) {
+    intro.push(
+      "- Some tool params are shown quoted because their names are not valid Python identifiers (keywords, dashes); pass them through a dict: `await tool(**{'from': value})`.",
+    );
+  }
+  if (callable.length === 0) return intro.join("\n");
 
   const ids = buildIdentifierMap(callable.map((t) => t.name));
   const sections = callable.map((tool) => {
@@ -331,9 +376,11 @@ export function createRunCodeDescription(
   }
   const catalog = ["## Callable tools", ...shown];
   if (rest.length > 0) {
+    const listed = rest.slice(0, MAX_OVERFLOW_NAMES);
+    const more = rest.length - listed.length;
     catalog.push(
-      `Also callable (left out for space): ${rest.join(", ")}. Same shape as above: \`await <name>(<kwargs>)\`.`,
+      `Also callable (left out for space): ${listed.join(", ")}${more > 0 ? `, … and ${more} more` : ""}. Same shape as above: \`await <name>(<kwargs>)\`.`,
     );
   }
-  return `${intro}\n\n${catalog.join("\n\n")}`;
+  return `${intro.join("\n")}\n\n${catalog.join("\n\n")}`;
 }

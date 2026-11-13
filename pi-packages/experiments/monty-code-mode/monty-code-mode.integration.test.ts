@@ -254,6 +254,77 @@ test("a snippet with no value and no print says so instead of an empty result", 
   expect(text).toContain("no output, no result value");
 });
 
+test("print output already captured is preserved on the error path", async () => {
+  const { ctx } = fakeCtx([]);
+  const result = await runner.run(
+    { code: "print('progress: half done')\n1/0" },
+    ctx,
+    undefined,
+    undefined,
+  );
+  expect(result.isError).toBe(true);
+  const text = result.content
+    .map((b) => (b.type === "text" ? b.text : ""))
+    .join("\n");
+  expect(text.indexOf("<output>")).toBeLessThan(text.indexOf("Python error:"));
+  expect(text).toContain("<output>\nprogress: half done\n</output>");
+  expect(text).toContain("ZeroDivisionError");
+  expect((result.details as RunCodeDetails).printChars).toBeGreaterThan(0);
+});
+
+test("extra positional arguments surface as a clear error, not a dropped argument", async () => {
+  const { ctx, journal } = fakeCtx([echoTool]);
+  const result = await runner.run(
+    { code: "await echo('a', 'b')" },
+    ctx,
+    undefined,
+    undefined,
+  );
+  expect(result.isError).toBe(true);
+  const text = result.content
+    .map((b) => (b.type === "text" ? b.text : ""))
+    .join("\n");
+  expect(text).toContain("too many positional arguments");
+  expect(journal).toEqual([]); // nothing reached the tool
+});
+
+test("a snippet that swallows the abort error is labelled as cancelled", async () => {
+  const local = new MontyCodeRunner();
+  try {
+    const { ctx } = fakeCtx([echoTool]);
+    const controller = new AbortController();
+    controller.abort();
+    const result = await local.run(
+      {
+        code: "result = None\ntry:\n    await echo(text='x')\nexcept RuntimeError:\n    result = 'swallowed'\nresult",
+      },
+      ctx,
+      controller.signal,
+      undefined,
+    );
+    expect(result.isError).toBeUndefined();
+    const text = result.content
+      .map((b) => (b.type === "text" ? b.text : ""))
+      .join("\n");
+    expect(text).toContain("cancelled mid-run");
+    expect(text).toContain('<result>\n"swallowed"\n</result>');
+  } finally {
+    await local.close();
+  }
+});
+
+test("a closed runner reports an error instead of crashing", async () => {
+  const local = new MontyCodeRunner();
+  await local.close();
+  const { ctx } = fakeCtx([]);
+  const result = await local.run({ code: "1" }, ctx, undefined, undefined);
+  expect(result.isError).toBe(true);
+  const text = result.content
+    .map((b) => (b.type === "text" ? b.text : ""))
+    .join("\n");
+  expect(text).toContain("monty-code-mode runner is closed");
+});
+
 test("syntax errors keep the session and report the traceback line", async () => {
   const { ctx } = fakeCtx([]);
   const before = await runner.run(
