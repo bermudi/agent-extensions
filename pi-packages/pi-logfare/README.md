@@ -29,12 +29,13 @@ When refreshes actually run (pi 1.4.0):
   sessions see the last persisted (or baseline) list.
 
 For the specifically reported Logfare capacity error (code 4006 and the reported
-message with a request identifier), the `message_end` hook preserves the original
-error and adds a marker Pi recognizes for its normal assistant retry. Other
-errors and providers are untouched. Retries depend on Pi's retry settings and
-budget; the extension cannot set a per-error delay through this hook, so Pi's
-configured backoff applies. This does not cover calls outside the assistant
-message lifecycle, such as classifier calls.
+message with a request identifier, whether Pi surfaces the bare message text or
+the raw JSON error envelope), the `message_end` hook preserves the original error
+and adds a marker Pi recognizes for its normal assistant retry. Other errors and
+providers are untouched. Retries depend on Pi's retry settings and budget; the
+extension cannot set a per-error delay through this hook, so Pi's configured
+backoff applies. This does not cover calls outside the assistant message
+lifecycle, such as classifier calls.
 
 Set `PI_LOGFARE_DEBUG=1` to trace refresh phases to
 `/tmp/pi-logfare-debug.log`.
