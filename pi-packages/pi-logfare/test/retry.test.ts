@@ -4,7 +4,8 @@ import { isRetryableAssistantError, retryAssistantCall } from "@earendil-works/p
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { normalizeLogfareError, registerLogfareRetry } from "../src/retry.ts";
 
-const body = '{"errors":[{"message":"AiError: AiError: Service temporarily at capacity (85f15b27-9f23-4fd9-9089-f7a09ff2133a)","code":4006}],"success":false,"result":{},"messages":[]}';
+const capacity = "AiError: AiError: Service temporarily at capacity (85f15b27-9f23-4fd9-9089-f7a09ff2133a)";
+const body = `{"errors":[{"message":"${capacity}","code":4006}],"success":false,"result":{},"messages":[]}`;
 const failure = { role: "assistant", provider: "logfare", stopReason: "error", errorMessage: body, content: [], api: "openai-completions", model: "test", timestamp: 0, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } as AssistantMessage;
 
 test("message_end returns a replacement recognized by Pi retry and preserves the error", async () => {
@@ -15,6 +16,10 @@ test("message_end returns a replacement recognized by Pi retry and preserves the
 	assert.equal(normalized.errorMessage, `overloaded: ${body}`);
 	assert.equal(failure.errorMessage, body);
 	assert.equal(isRetryableAssistantError(normalized), true);
+	// Pi's OpenAI adapter surfaces errors[0].message, dropping the envelope and code.
+	const bare = normalizeLogfareError({ ...failure, errorMessage: capacity })!;
+	assert.equal(bare.errorMessage, `overloaded: ${capacity}`);
+	assert.equal(isRetryableAssistantError(bare), true);
 	assert.equal(handler!({ message: { role: "user" } }), undefined);
 	let calls = 0;
 	const success = { ...failure, stopReason: "stop" } as AssistantMessage;
@@ -27,6 +32,7 @@ test("message_end returns a replacement recognized by Pi retry and preserves the
 test("matches status prefixes and only the specified provider, error and code", () => {
 	for (const prefix of ["400: ", "400 ", ""]) {
 		assert.ok(normalizeLogfareError({ ...failure, errorMessage: prefix + body }));
+		assert.ok(normalizeLogfareError({ ...failure, errorMessage: prefix + capacity }));
 	}
 	assert.ok(normalizeLogfareError({ ...failure, errorMessage: body.replace("85f15b27", "85f15b28") }));
 	for (const message of [
@@ -35,6 +41,8 @@ test("matches status prefixes and only the specified provider, error and code", 
 		{ ...failure, errorMessage: body.replace("85f15b27", "not-a-uuid") },
 		{ ...failure, errorMessage: body.replace('"success":false', '"success":true') },
 		{ ...failure, errorMessage: body.replace('"code":4006}', '"code":4006},{"message":"other","code":4006}') },
+		{ ...failure, errorMessage: capacity.replace("85f15b27", "not-a-uuid") },
+		{ ...failure, errorMessage: `${capacity} (extra)` },
 		{ ...failure, errorMessage: `prefix ${body}` }, { ...failure, errorMessage: body.slice(0, -1) },
 	]) assert.equal(normalizeLogfareError(message), undefined);
 });

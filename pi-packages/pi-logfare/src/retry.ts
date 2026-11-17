@@ -8,6 +8,10 @@ function isReportedCapacityError(text: string): boolean {
 	// Pi's OpenAI adapter may prefix the JSON body with an HTTP status, e.g.
 	// `400: {...}` or `400 {...}`. Parse the body, not a substring of its fields.
 	const body = text.replace(/^\s*\d{3}(?::|\s)\s*/, "");
+	// The OpenAI SDK surfaces `errors[0].message` as the assistant error text for
+	// most failures, dropping the envelope and its 4006 code. Pi also surfaces the
+	// raw envelope for other failures; accept both shapes.
+	if (CAPACITY_MESSAGE.test(body.trim())) return true;
 	try {
 		const value: unknown = JSON.parse(body);
 		if (!value || typeof value !== "object" || Array.isArray(value)) return false;
