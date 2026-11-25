@@ -1,10 +1,9 @@
 /**
  * Real-pi insurance for model-identity (unit tests use a fake event shape).
- * Runs the handler's guideline mutation through pi's own
+ * Runs the handler's section mutation through pi's own
  * normalizeBuildSystemPromptOptions / buildSystemPromptSections /
- * diffSystemPromptSections, so a future pi release changing guideline
- * rendering or diff semantics fails here while the unit suite stays
- * green.
+ * diffSystemPromptSections, so a future pi release changing section
+ * rendering or diff semantics fails here while the unit suite stays green.
  *
  * Imports pi's module by filesystem path: the package's "exports" map has
  * no subpath for dist/core/system-prompt, and test files never ship
@@ -53,13 +52,18 @@ function makeModel(provider: string, id: string, name = id): Model<Api> {
   };
 }
 
+const SYSTEM_MD = "You are running inside pi, in a terminal.";
+
 /** Real pi options, mutated by the real handler, the way agent-start does. */
 function runHandlerThrough(
   handler: Handler,
   model: Model<Api> | undefined,
   prompt: { customPrompt?: string } = {},
 ): ReturnType<typeof buildSystemPromptSections> {
-  const options = normalizeBuildSystemPromptOptions({ cwd: "/project", ...prompt });
+  const options = normalizeBuildSystemPromptOptions({
+    cwd: "/project",
+    ...prompt,
+  });
   const event = {
     type: "before_agent_start",
     systemPrompt: "",
@@ -73,42 +77,54 @@ describe("model-identity against pi's real system-prompt code", () => {
   test("renders under a custom prompt (SYSTEM.md), where pi builds no rules section", () => {
     const handler = registerHandler();
     const sections = runHandlerThrough(handler, makeModel("zai", "glm-5.4"), {
-      customPrompt: "You are running inside pi, in a terminal.",
+      customPrompt: SYSTEM_MD,
     });
     expect(sections.rules).toBeUndefined();
+    expect(sections.preamble).toBe(SYSTEM_MD);
     expect(sections.identity).toBe(
       "<identity>\nCurrent model ID: zai/glm-5.4\n</identity>",
     );
   });
-  test("pi renders the identity as a plain bullet inside <rules>, no new tag", () => {
+
+  test("pi's default prompt renders the identity as its own section, not in <rules>", () => {
     const handler = registerHandler();
     const sections = runHandlerThrough(
       handler,
       makeModel("kilo", "claude-sonnet-4-5", "Claude Sonnet 4.5"),
     );
-    expect(sections.rules).toContain(
-      "- Current model ID: kilo/claude-sonnet-4-5",
+    expect(sections.identity).toBe(
+      "<identity>\nCurrent model ID: kilo/claude-sonnet-4-5\n</identity>",
     );
-    expect(Object.keys(sections)).not.toContain("active_model");
+    expect(sections.rules).not.toContain("Current model ID:");
+    expect(sections.rules).toContain("Be concise");
   });
 
-  test("a model switch diffs to the rules section only", () => {
-    const handler = registerHandler();
-    const before = runHandlerThrough(
-      handler,
-      makeModel("kilo", "claude-sonnet-4-5"),
-    );
-    const after = runHandlerThrough(handler, makeModel("zai", "glm-5.3"));
+  test("a model switch patches the identity section only; the head is untouched", () => {
+    for (const prompt of [{}, { customPrompt: SYSTEM_MD }]) {
+      const handler = registerHandler();
+      const before = runHandlerThrough(
+        handler,
+        makeModel("kilo", "claude-sonnet-4-5"),
+        prompt,
+      );
+      const after = runHandlerThrough(
+        handler,
+        makeModel("zai", "glm-5.3"),
+        prompt,
+      );
 
-    const patch = diffSystemPromptSections(before, after);
-    expect(Object.keys(patch ?? {})).toEqual(["rules"]);
-    expect(patch?.rules).toContain("Current model ID: zai/glm-5.3");
-    expect(patch?.rules).not.toContain("claude-sonnet-4-5");
+      const patch = diffSystemPromptSections(before, after);
+      expect(Object.keys(patch ?? {})).toEqual(["identity"]);
+      expect(patch?.identity).toContain("Current model ID: zai/glm-5.3");
+      expect(patch?.identity).not.toContain("claude-sonnet-4-5");
+      expect(after.preamble).toBe(before.preamble);
+    }
   });
 
-  test("no model leaves no identity line in pi's own render", () => {
+  test("no model leaves no identity section in pi's own render", () => {
     const handler = registerHandler();
     const sections = runHandlerThrough(handler, undefined);
+    expect(sections.identity).toBeUndefined();
     expect(sections.rules).not.toContain("Current model ID:");
   });
 });

@@ -11,7 +11,7 @@ extensions. One entry point, sixteen independent features.
 | `prefer-tools`      | hook (no command)             | Blocks legacy tools: `rm` → `trash <path>` (and `trash-rm`/`trash-empty`, which delete permanently), `python`/`pip`/`pytest`/`mypy` are not blocked (removed 2026-10-24 — steering to `uv` is AGENTS.md's job, not the hook's). Bash `rg` is allowed, except the replace flag: `-r` (including clusters like `-rn`) is blocked because it is `--replace` and silently replaces matched text — use `--replace` explicitly if you mean it. The built-in grep tool still works.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `keep-model`        | hook (no command)             | Keep the active model when `/new` starts a fresh session instead of reverting to pi's saved default model.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `model-thinking`    | `/model-thinking`             | Per-model default thinking levels: save the current level as this model's default and get it back on every switch to that model, instead of pi's global default.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `model-identity`    | hook (no command)             | Inject the active model's identity (one `Current model ID: provider/id` line in the prompt rules) so the model always knows what it is — mid-session switches included.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `model-identity`    | hook (no command)             | Inject the active model's identity (one `Current model ID: provider/id` line in its own `<identity>` prompt section) so the model always knows what it is — mid-session switches included.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `clean-tui`         | tool overrides (no command)   | Collapse built-in tool output for a cleaner TUI: back-to-back same-tool calls share one block (e.g. `read ×2`) until a boundary — visible text (assistant prose or a typed user message) or a thinking block (even an empty one, as OpenAI emits between tool calls) — so reasoning-per-call models render one block per call. Images stay visible without expanding, expand a row with ctrl+o to see the full command and results/diffs. Long bash commands get an AI-generated summary once you pick a model with `/goodies summary-model <provider/model>` (see "Smart summaries" below) — expanding a row swaps the summary back out for the raw command. While enabled, also flips `@bermudi/pi-codex`'s `apply_patch`/`web_search` into the same burst style. Long thinking runs can show a live plain-English line above the editor (`/goodies thinking-summaries on`) instead of a static `Thinking...` — see "Smart summaries". |
 | `review`            | `/review`, `/end-review`      | Code review workflow: review uncommitted changes, a branch, a commit, a commit range (`A..B`/`A...B`), a GitHub PR, or folders. Prioritized findings with actionable follow-ups. Targets tab-complete. Works in the terminal and in RPC hosts like T3 Code (plain selectors replace the search-as-you-type ones outside the TUI).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `kilo`              | provider                      | Access Kilo Gateway models via `/login kilo` or `KILO_API_KEY`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -303,27 +303,26 @@ expert coding assistant operating inside pi" and nothing more. Asked
 routed through gateways (Kilo, relays) have no way to learn their own
 identity at all.
 
-`model-identity` adds one line to the system prompt's rules before every
+`model-identity` adds one small section to the system prompt before every
 agent run, naming the session's current model:
 
 ```text
-- Current model ID: kilo/claude-sonnet-4-5
+<identity>
+Current model ID: kilo/claude-sonnet-4-5
+</identity>
 ```
 
-One guideline bullet — the prompt is transmitted on every request, so it
-carries nothing beyond the identity itself: no dedicated section tag, no
-explanation. Pi diffs prompt sections between runs, so a mid-session model
-switch (`/model`, Ctrl+P) re-sends just the rules section with the new
-identity, and the normal prompt-cache flow stays intact. Runs with no
-active model get the line removed rather than a stale identity. The change
-is made through the structured prompt sections pi exposes to extensions on
-`before_agent_start`, never by rewriting the prompt.
-
-One known window (pi 0.99.x; fixed upstream in 1.4.0): turns triggered by
-extensions (`sendMessage` with `triggerTurn`) don't fire
-`before_agent_start`, so a run started that way immediately after a model
-switch carries the previous model's identity line until the next user
-prompt corrects it.
+Nothing beyond the identity itself: no explanation. It is a custom prompt
+section, not a guideline bullet, because pi renders guideline bullets only
+inside the `<rules>` section of its *default* prompt — a `SYSTEM.md` replaces
+that prompt wholesale and has no rules, which silently dropped the line in
+every such session. A section renders under both. Pi diffs prompt sections
+between runs and never rewrites the head system message, so a mid-session
+model switch (`/model`, Ctrl+P) sends just one small `<identity>` patch and
+the cached prefix stays intact. Runs with no active model get the section
+removed rather than a stale identity. The change is made through the
+structured prompt sections pi exposes to extensions on `before_agent_start`,
+never by rewriting the prompt.
 
 Like every toggle, disabling takes effect on the next `/reload` or new
 session.

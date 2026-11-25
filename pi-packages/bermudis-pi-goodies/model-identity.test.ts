@@ -5,7 +5,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import modelIdentity, { buildIdentityGuideline } from "./model-identity.ts";
+import modelIdentity, { buildIdentitySection } from "./model-identity.ts";
 
 type Handler = (event: BeforeAgentStartEvent, ctx: ExtensionContext) => unknown;
 
@@ -65,7 +65,7 @@ function contextWith(model: Model<Api> | undefined): ExtensionContext {
 }
 
 describe("model-identity", () => {
-  test("injects one guideline line naming the model", async () => {
+  test("sets the identity section naming the model", async () => {
     const pi = new PiHarness();
     modelIdentity(pi.api);
     const event = agentStartEvent();
@@ -73,9 +73,11 @@ describe("model-identity", () => {
 
     await pi.emit("before_agent_start", event, contextWith(model));
 
-    expect(event.systemPromptOptions.promptGuidelines).toEqual([
+    expect(event.systemPromptOptions.sections.identity).toBe(
       "Current model ID: kilo/claude-sonnet-4-5",
-    ]);
+    );
+    // The rules section is where a SYSTEM.md session loses it (#40).
+    expect(event.systemPromptOptions.promptGuidelines).toEqual([]);
   });
 
   test("handler never inspects run provenance", async () => {
@@ -89,19 +91,19 @@ describe("model-identity", () => {
 
     await pi.emit("before_agent_start", event, contextWith(model));
 
-    expect(event.systemPromptOptions.promptGuidelines).toEqual([
-      buildIdentityGuideline(model),
-    ]);
+    expect(event.systemPromptOptions.sections.identity).toBe(
+      buildIdentitySection(model),
+    );
   });
 
-  test("replaces a stale identity line instead of duplicating it", async () => {
+  test("replaces a stale identity section without touching its neighbours", async () => {
     const pi = new PiHarness();
     modelIdentity(pi.api);
     const event = agentStartEvent();
-    event.systemPromptOptions.promptGuidelines = [
-      "Be concise",
-      "Current model ID: kilo/claude-sonnet-4-5",
-    ];
+    event.systemPromptOptions.sections = {
+      identity: "Current model ID: kilo/claude-sonnet-4-5",
+      other: "keep me",
+    };
 
     await pi.emit(
       "before_agent_start",
@@ -109,32 +111,31 @@ describe("model-identity", () => {
       contextWith(makeModel("zai", "glm-5.3")),
     );
 
-    expect(event.systemPromptOptions.promptGuidelines).toEqual([
-      "Be concise",
-      "Current model ID: zai/glm-5.3",
-    ]);
+    expect(event.systemPromptOptions.sections).toEqual({
+      identity: "Current model ID: zai/glm-5.3",
+      other: "keep me",
+    });
   });
 
-  test("removes the identity line when there is no active model", async () => {
+  test("removes the identity section when there is no active model", async () => {
     const pi = new PiHarness();
     modelIdentity(pi.api);
     const event = agentStartEvent();
-    event.systemPromptOptions.promptGuidelines = [
-      "Current model ID: kilo/claude-sonnet-4-5",
-    ];
+    event.systemPromptOptions.sections.identity =
+      "Current model ID: kilo/claude-sonnet-4-5";
 
     await pi.emit("before_agent_start", event, contextWith(undefined));
 
-    expect(event.systemPromptOptions.promptGuidelines).toEqual([]);
+    expect(event.systemPromptOptions.sections).toEqual({});
   });
 
-  test("guideline text is a pure function of the model", () => {
+  test("section text is a pure function of the model", () => {
     const model = makeModel("kilo", "qwen3-max", "Qwen3 Max");
-    expect(buildIdentityGuideline(model)).toBe(buildIdentityGuideline(model));
-    expect(buildIdentityGuideline(model)).toBe(
+    expect(buildIdentitySection(model)).toBe(buildIdentitySection(model));
+    expect(buildIdentitySection(model)).toBe(
       "Current model ID: kilo/qwen3-max",
     );
-    expect(buildIdentityGuideline(makeModel("zai", "glm-5.3"))).toBe(
+    expect(buildIdentitySection(makeModel("zai", "glm-5.3"))).toBe(
       "Current model ID: zai/glm-5.3",
     );
   });
