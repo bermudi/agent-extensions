@@ -57,8 +57,9 @@ function makeModel(provider: string, id: string, name = id): Model<Api> {
 function runHandlerThrough(
   handler: Handler,
   model: Model<Api> | undefined,
+  prompt: { customPrompt?: string } = {},
 ): ReturnType<typeof buildSystemPromptSections> {
-  const options = normalizeBuildSystemPromptOptions({ cwd: "/project" });
+  const options = normalizeBuildSystemPromptOptions({ cwd: "/project", ...prompt });
   const event = {
     type: "before_agent_start",
     systemPrompt: "",
@@ -69,6 +70,16 @@ function runHandlerThrough(
 }
 
 describe("model-identity against pi's real system-prompt code", () => {
+  test("renders under a custom prompt (SYSTEM.md), where pi builds no rules section", () => {
+    const handler = registerHandler();
+    const sections = runHandlerThrough(handler, makeModel("zai", "glm-5.4"), {
+      customPrompt: "You are running inside pi, in a terminal.",
+    });
+    expect(sections.rules).toBeUndefined();
+    expect(sections.identity).toBe(
+      "<identity>\nCurrent model ID: zai/glm-5.4\n</identity>",
+    );
+  });
   test("pi renders the identity as a plain bullet inside <rules>, no new tag", () => {
     const handler = registerHandler();
     const sections = runHandlerThrough(
