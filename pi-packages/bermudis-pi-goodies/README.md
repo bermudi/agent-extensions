@@ -317,9 +317,11 @@ section, not a guideline bullet, because pi renders guideline bullets only
 inside the `<rules>` section of its *default* prompt — a `SYSTEM.md` replaces
 that prompt wholesale and has no rules, which silently dropped the line in
 every such session. A section renders under both. Pi diffs prompt sections
-between runs and never rewrites the head system message, so a mid-session
-model switch (`/model`, Ctrl+P) sends just one small `<identity>` patch and
-the cached prefix stays intact. Runs with no active model get the section
+between runs and never rewrites the head system message, so a model switch
+made between turns (`/model`, Ctrl+P) sends just one small `<identity>` patch
+and the cached prefix stays intact. A switch made while a tool call is still
+running applies from the next turn; that run's continuation keeps the previous
+identity (#42). Runs with no active model get the section
 removed rather than a stale identity. The change is made through the
 structured prompt sections pi exposes to extensions on `before_agent_start`,
 never by rewriting the prompt.

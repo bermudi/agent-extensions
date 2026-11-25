@@ -20,6 +20,10 @@
  *
  * The handler runs before every agent run (before_agent_start), replacing
  * the section so a mid-session model switch updates it.
+ *
+ * Known window (#42): a /model switch while a tool call is still running
+ * applies from the next run — pi's setModel does not re-emit
+ * before_agent_start — so that run's continuation keeps the previous identity.
  */
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
